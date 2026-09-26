@@ -1,0 +1,101 @@
+#!/usr/bin/env node
+/*
+ * og-spatial-autoroute — route multichannel (>2ch) playback through the
+ * OG Spatial HRTF sink automatically; keep stereo on the real device.
+ *
+ * ~/.local/state/spatial-mode:  auto | always | off   (default auto)
+ *   auto   - 5.1/7.1 stream -> HRTF, stereo stream -> real device
+ *   always - every stream -> HRTF
+ *   off    - route nothing (HRTF sink may still be loaded, just idle)
+ *
+ * The HRTF sink is created/kept by `spatial load`; this only moves
+ * sink-inputs. Runs as a systemd --user service.
+ */
+'use strict';
+const { execSync, execFileSync, spawn } = require('child_process');
+const fs = require('fs');
+const os = require('os');
+
+const SINK = 'effect_input.og-spatial';
+const HOME = os.homedir();
+const MODE_F = `${HOME}/.local/state/spatial-mode`;
+const PRESET_F = `${HOME}/.local/state/spatial-preset`;
+
+const sh = (c) => { try { return execSync(c, { encoding: 'utf8', timeout: 8000 }); } catch { return ''; } };
+const pactlJSON = (what) => { try { return JSON.parse(sh(`pactl -f json list ${what}`)); } catch { return []; } };
+
+const mode = () => (fs.readFileSync(MODE_F, 'utf8').trim() || 'auto');
+const readMode = () => { try { return mode(); } catch { return 'auto'; } };
+
+function realDefault() {
+  // the device the HRTF chain is pinned to, else the live default, else first real sink
+  const pinned = sh('spatial _hw').trim();
+  if (pinned && pinned !== SINK) return pinned;
+  const def = sh('pactl get-default-sink').trim();
+  if (def && def !== SINK) return def;
+  const first = pactlJSON('sinks').map((s) => s.name).find((n) => !n.startsWith('effect_'));
+  return first || '';
+}
+
+function sinkPresent() {
+  return pactlJSON('sinks').some((s) => s.name === SINK);
+}
+
+function ensureSink() {
+  if (sinkPresent()) return true;
+  sh(`spatial load ${fs.existsSync(PRESET_F) ? fs.readFileSync(PRESET_F, 'utf8').trim() : 'atmos'}`);
+  for (let i = 0; i < 15; i++) {
+    if (sinkPresent()) return true;
+    execSync('sleep 0.2');
+  }
+  return false;
+}
+
+function reroute() {
+  const m = readMode();
+  if (m === 'off') return;
+  if (!ensureSink()) return;
+  const hw = realDefault();
+
+  // keep the *default* sink sane: in auto mode it must be the real device
+  // (only 5.1/7.1 goes to the HRTF sink, by move); in always mode it is the
+  // HRTF sink so new streams land there.
+  const def = sh('pactl get-default-sink').trim();
+  if (m === 'auto' && def === SINK && hw) {
+    execSync(`pactl set-default-sink ${hw}`);
+    try { execFileSync('pw-metadata', ['0', 'default.configured.audio.sink', `{ "name": "${hw}" }`]); } catch {}
+  } else if (m === 'always' && def !== SINK) {
+    try { execSync(`pactl set-default-sink ${SINK}`); } catch {}
+  }
+
+  const sinks = Object.fromEntries(pactlJSON('sinks').map((s) => [s.index, s.name]));
+
+  for (const si of pactlJSON('sink-inputs')) {
+    const idx = si.index;
+    const cur = sinks[si.sink] || '';
+    const ch = String(si.channel_map || '').split(',').filter(Boolean).length;
+    const move = (to) => { if (to && cur !== to) { try { execFileSync('pactl', ['move-sink-input', String(idx), to]); } catch {} } };
+
+    if (m === 'always') {
+      move(SINK);
+    } else { // auto
+      if (ch > 2) move(SINK);
+      else if (cur === SINK) move(hw);
+    }
+  }
+}
+
+// initial sweep
+reroute();
+
+// react to sink-input / sink changes, coalesced
+let timer = null;
+const bump = () => { clearTimeout(timer); timer = setTimeout(reroute, 300); };
+
+const sub = spawn('pactl', ['subscribe'], { stdio: ['ignore', 'pipe', 'ignore'] });
+sub.stdout.on('data', (buf) => {
+  for (const line of buf.toString().split('\n')) {
+    if (/on sink-input|on sink\b/.test(line)) bump();
+  }
+});
+sub.on('exit', () => process.exit(1)); // let systemd restart us

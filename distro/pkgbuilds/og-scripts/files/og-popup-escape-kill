@@ -1,0 +1,7 @@
+#!/bin/sh
+# Run by sway itself (via the Escape bind og-popup-escape-guard sets up),
+# not called directly — closes whichever of these popups is actually
+# open. `kill` on a non-matching criteria is a silent no-op, so it's safe
+# to always target both regardless of which is really running.
+swaymsg '[app_id="og-search"] kill' >/dev/null 2>&1
+swaymsg '[app_id="og-notif-center"] kill' >/dev/null 2>&1

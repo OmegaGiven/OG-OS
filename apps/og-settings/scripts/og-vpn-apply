@@ -1,0 +1,154 @@
+#!/usr/bin/env bash
+# Root-only helper for og-settings' VPN tab. Invoked exclusively via a
+# scoped NOPASSWD sudoers entry (see scripts/og-vpn-sudoers) — this script
+# is the ONLY thing that entry authorizes, so everything it does must stay
+# narrowly VPN-related. Never add unrelated commands here.
+#
+# Subcommands:
+#   add <name>              write /etc/wireguard/<name>.conf from stdin (mode 600)
+#   delete <name>            remove it (bringing it/netns down first if active)
+#   list                     JSON: [{"name":..,"whole_active":bool}], plus netns state
+#   up <name> / down <name>  whole-system wg-quick up/down
+#   netns-up <name>          bring up the isolated "ogvpn" netns using this config
+#   netns-down               tear the netns down
+#   launch <id>              exec the app named by /usr/share/applications/<id>.desktop
+#                            inside the ogvpn netns, as the invoking (real) user
+set -euo pipefail
+
+WG_DIR=/etc/wireguard
+NETNS=ogvpn
+VETH_HOST=veth-og0
+VETH_NS=veth-og1
+HOST_IP=10.200.200.1
+NS_IP=10.200.200.2
+STATE_FILE=/run/og-vpn-netns-config
+
+cmd="${1:-}"; shift || true
+
+default_iface() {
+    ip route show default | awk '/^default/ {print $5; exit}'
+}
+
+case "$cmd" in
+    add)
+        name="$1"
+        [[ "$name" =~ ^[a-zA-Z0-9_-]+$ ]] || { echo "bad name" >&2; exit 1; }
+        install -d -m 700 "$WG_DIR"
+        install -m 600 /dev/stdin "$WG_DIR/$name.conf"
+        ;;
+
+    delete)
+        name="$1"
+        wg-quick down "$name" 2>/dev/null || true
+        if [[ -f "$STATE_FILE" && "$(cat "$STATE_FILE")" == "$name" ]]; then
+            "$0" netns-down
+        fi
+        rm -f "$WG_DIR/$name.conf"
+        ;;
+
+    list)
+        shopt -s nullglob
+        confs=("$WG_DIR"/*.conf)
+        printf '{"configs":['
+        first=1
+        for c in "${confs[@]}"; do
+            n=$(basename "$c" .conf)
+            active="false"
+            wg show "$n" >/dev/null 2>&1 && active="true"
+            [[ $first -eq 1 ]] || printf ','
+            first=0
+            printf '{"name":"%s","whole_active":%s}' "$n" "$active"
+        done
+        printf ']'
+        netns_active="false"
+        netns_config="null"
+        if ip netns list 2>/dev/null | grep -q "^$NETNS"; then
+            netns_active="true"
+            [[ -f "$STATE_FILE" ]] && netns_config="\"$(cat "$STATE_FILE")\""
+        fi
+        printf ',"netns_active":%s,"netns_config":%s}\n' "$netns_active" "$netns_config"
+        ;;
+
+    up)
+        wg-quick up "$1"
+        ;;
+
+    down)
+        wg-quick down "$1"
+        ;;
+
+    netns-up)
+        name="$1"
+        conf="$WG_DIR/$name.conf"
+        [[ -f "$conf" ]] || { echo "no such config: $name" >&2; exit 1; }
+
+        if ip netns list 2>/dev/null | grep -q "^$NETNS"; then
+            "$0" netns-down
+        fi
+
+        iface=$(default_iface)
+        [[ -n "$iface" ]] || { echo "no default route on host" >&2; exit 1; }
+
+        ip netns add "$NETNS"
+        ip link add "$VETH_HOST" type veth peer name "$VETH_NS" netns "$NETNS"
+        ip addr add "$HOST_IP/24" dev "$VETH_HOST"
+        ip link set "$VETH_HOST" up
+        ip netns exec "$NETNS" ip addr add "$NS_IP/24" dev "$VETH_NS"
+        ip netns exec "$NETNS" ip link set "$VETH_NS" up
+        ip netns exec "$NETNS" ip link set lo up
+        ip netns exec "$NETNS" ip route add default via "$HOST_IP"
+
+        sysctl -qw net.ipv4.ip_forward=1
+        iptables -t nat -C POSTROUTING -s 10.200.200.0/24 -o "$iface" -j MASQUERADE 2>/dev/null \
+            || iptables -t nat -A POSTROUTING -s 10.200.200.0/24 -o "$iface" -j MASQUERADE
+
+        mkdir -p "/etc/netns/$NETNS"
+        dns_line=$(awk -F'=' '/^\s*DNS\s*=/{gsub(/ /,"",$2); print $2; exit}' "$conf")
+        {
+            IFS=',' read -ra ips <<< "${dns_line:-1.1.1.1}"
+            for ip in "${ips[@]}"; do echo "nameserver $ip"; done
+        } > "/etc/netns/$NETNS/resolv.conf"
+
+        ip netns exec "$NETNS" wg-quick up "$conf"
+        echo -n "$name" > "$STATE_FILE"
+        ;;
+
+    netns-down)
+        if [[ -f "$STATE_FILE" ]]; then
+            name=$(cat "$STATE_FILE")
+            ip netns exec "$NETNS" wg-quick down "$WG_DIR/$name.conf" 2>/dev/null || true
+        fi
+        ip link del "$VETH_HOST" 2>/dev/null || true
+        ip netns del "$NETNS" 2>/dev/null || true
+        iface=$(default_iface)
+        if [[ -n "$iface" ]]; then
+            iptables -t nat -D POSTROUTING -s 10.200.200.0/24 -o "$iface" -j MASQUERADE 2>/dev/null || true
+        fi
+        rm -f "$STATE_FILE" "/etc/netns/$NETNS/resolv.conf"
+        ;;
+
+    launch)
+        id="$1"
+        desktop="/usr/share/applications/$id.desktop"
+        [[ -f "$desktop" ]] || { echo "no such app: $id" >&2; exit 1; }
+        exec_line=$(awk -F'=' '/^\[Desktop Entry\]/{f=1} /^\[/{if($0!="[Desktop Entry]")f=0} f&&/^Exec=/{sub(/^Exec=/,""); print; exit}' "$desktop")
+        [[ -n "$exec_line" ]] || { echo "no Exec= in $desktop" >&2; exit 1; }
+        # strip desktop-file field codes (%f %F %u %U %i %c %k)
+        read -ra words <<< "$exec_line"
+        cleaned=()
+        for w in "${words[@]}"; do
+            [[ "$w" =~ ^%.$ ]] && continue
+            cleaned+=("$w")
+        done
+        ip netns list 2>/dev/null | grep -q "^$NETNS" || { echo "ogvpn netns not up" >&2; exit 1; }
+        ip netns exec "$NETNS" runuser -u "${SUDO_USER:-$USER}" -- \
+            env DISPLAY="${DISPLAY:-}" WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-}" XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-}" \
+            setsid "${cleaned[@]}" < /dev/null > /dev/null 2>&1 &
+        disown
+        ;;
+
+    *)
+        echo "usage: og-vpn-apply {add|delete|list|up|down|netns-up|netns-down|launch} ..." >&2
+        exit 1
+        ;;
+esac

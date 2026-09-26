@@ -1,0 +1,5 @@
+Defaults!/usr/local/bin/og-vpn-apply env_keep += "DISPLAY WAYLAND_DISPLAY XDG_RUNTIME_DIR"
+# %wheel, not a hardcoded username — this ships as a real package to
+# whoever installs OG-OS, not just this dev machine. install-ogos.sh
+# adds every new user to wheel, matching the group this rule grants to.
+%wheel ALL=(root) NOPASSWD: /usr/local/bin/og-vpn-apply

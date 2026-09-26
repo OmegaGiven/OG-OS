@@ -1,0 +1,44 @@
+# OG-OS Calamares branding. Placeholder assets (ImageMagick-generated
+# text-on-solid-color PNGs) — swap for real artwork later, this just
+# needs to exist and not be blank for a functional installer.
+componentName:  ogos
+
+welcomeStyleCalamares:   false
+welcomeExpandingLogo:   true
+
+windowExpanding:    normal
+windowSize: 800px,520px
+windowPlacement: center
+
+sidebar: widget
+navigation: widget
+
+strings:
+    productName:         "OG-OS"
+    shortProductName:    OG-OS
+    version:             2026.07
+    shortVersion:        2026.07
+    versionedName:       "OG-OS 2026.07"
+    shortVersionedName:  "OG-OS 2026.07"
+    bootloaderEntryName: OG-OS
+    productUrl:          https://github.com/OmegaGiven
+    supportUrl:          https://github.com/OmegaGiven
+    knownIssuesUrl:      https://github.com/OmegaGiven
+    releaseNotesUrl:     https://github.com/OmegaGiven
+    donateUrl:           https://github.com/OmegaGiven
+
+images:
+    productBanner:       "banner.png"
+    productIcon:         "icon.png"
+    productLogo:         "icon.png"
+    productWelcome:      "welcome.png"
+
+style:
+   SidebarBackground:        "#1a1b26"
+   SidebarText:              "#c0caf5"
+   SidebarTextCurrent:       "#1a1b26"
+   SidebarBackgroundCurrent: "#7aa2f7"
+
+# Plain image slideshow instead of QML — no slideshow authoring needed
+# for a functional installer; swap for a real QML show later.
+slideshow: [ "welcome.png" ]

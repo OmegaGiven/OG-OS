@@ -1,0 +1,15 @@
+[package]
+name = "og-clip"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "og-clip"
+path = "src/main.rs"
+
+[dependencies]
+og-config = { path = "../../crates/og-config" }
+og-theme = { path = "../../crates/og-theme" }
+iced = { version = "0.13", default-features = false, features = ["wgpu", "tiny-skia", "advanced", "tokio", "image"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

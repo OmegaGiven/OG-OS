@@ -1,0 +1,18 @@
+{
+  "name": "@og-suite/ui",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./Icon": "./src/Icon.svelte",
+    "./FileNavigator": "./src/FileNavigator.svelte",
+    "./ActionBar": "./src/ActionBar.svelte",
+    "./ActionButton": "./src/ActionButton.svelte",
+    "./MobileSuiteMenu": "./src/MobileSuiteMenu.svelte",
+    "./MobileSuiteTopBar": "./src/MobileSuiteTopBar.svelte"
+  },
+  "dependencies": {
+    "@og-suite/contracts": "0.1.0"
+  }
+}

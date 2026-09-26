@@ -1,0 +1,34 @@
+#!/bin/sh
+# Shared by og-search-launch and og-notif-center-launch: coordinates a
+# single global Escape bind (sway can only have one binding per key combo
+# at a time) so Escape closes whichever of the two is open, regardless of
+# which — if any — actually has keyboard focus. Iced only sees key events
+# while its own window is focused; this grabs a compositor-level bind for
+# as long as either app is running instead.
+#
+# "release" only actually unbinds once *neither* app is still running —
+# otherwise closing one while the other is still open would silently
+# un-hijack Escape out from under the one still open.
+#
+# The whole `bindsym ...` command is passed to swaymsg as a single
+# argument (quoted here) — swaymsg's own CLI arg parser otherwise treats
+# a bare `--release` word as one of *its* flags (it isn't) and rejects it
+# with "unrecognized option", since it doesn't stop scanning for flags
+# just because an earlier word ("bindsym") wasn't one.
+
+set -eu
+
+case "${1:-}" in
+    acquire)
+        swaymsg "bindsym --release Escape exec /usr/bin/og-popup-escape-kill" >/dev/null
+        ;;
+    release)
+        if ! pgrep -f '/og-search$' >/dev/null 2>&1 && ! pgrep -f '/og-notif-center$' >/dev/null 2>&1; then
+            swaymsg unbindsym Escape >/dev/null 2>&1 || true
+        fi
+        ;;
+    *)
+        echo "usage: og-popup-escape-guard acquire|release" >&2
+        exit 1
+        ;;
+esac

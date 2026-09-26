@@ -1,0 +1,90 @@
+# Builds a complete OG-OS ISO from this commit: packages -> [ogos] repo ->
+# archiso, with the ISO installing exactly the packages built here (not
+# whatever is currently published). Optionally runs the full VM test
+# (boot ISO -> Calamares install -> reboot installed disk -> verify the
+# desktop session) and publishes a GitHub pre-release.
+#
+# Manual only. Runs on the self-hosted builder — see distro/CI.md.
+name: ISO
+
+on:
+  workflow_dispatch:
+    inputs:
+      install_test:
+        description: Run the full VM install test
+        type: boolean
+        default: true
+      release:
+        description: Publish as a GitHub pre-release (requires the install test to pass)
+        type: boolean
+        default: false
+
+concurrency:
+  group: iso
+  cancel-in-progress: false
+
+permissions:
+  contents: write # release upload
+
+jobs:
+  iso:
+    runs-on: [self-hosted, ogos-builder]
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Version
+        run: |
+          # Labels/dates inside the ISO come from the commit, not the clock,
+          # so rebuilding the same commit gives the same names.
+          echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >> "$GITHUB_ENV"
+          echo "OGOS_VERSION=$(git log -1 --format=%cd --date=format:%Y.%m.%d)-$(git rev-parse --short HEAD)" >> "$GITHUB_ENV"
+
+      - name: Import signing key
+        env:
+          OGOS_GPG_PRIVATE_KEY: ${{ secrets.OGOS_GPG_PRIVATE_KEY }}
+        run: distro/ci/import-signing-key.sh
+
+      - name: Build [ogos] repo
+        run: distro/ci/build-repo.sh "$RUNNER_TEMP/ogos-repo"
+
+      - name: Build ISO
+        run: distro/ci/build-iso.sh "$RUNNER_TEMP/ogos-repo" "$RUNNER_TEMP/out"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ogos-iso-${{ env.OGOS_VERSION }}
+          path: ${{ runner.temp }}/out/*
+          retention-days: 7
+          compression-level: 0 # squashfs is already compressed
+
+      - name: Full VM install test
+        if: inputs.install_test || inputs.release
+        run: |
+          python3 distro/testing/full_install_boot_test.py \
+            --iso "$(ls "$RUNNER_TEMP"/out/*.iso)" \
+            --screenshot-dir "$RUNNER_TEMP/shots"
+
+      - uses: actions/upload-artifact@v4
+        if: always() && (inputs.install_test || inputs.release)
+        with:
+          name: install-test-screenshots
+          path: ${{ runner.temp }}/shots
+          if-no-files-found: ignore
+
+      - name: Publish pre-release
+        if: inputs.release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "v$OGOS_VERSION" "$RUNNER_TEMP"/out/* \
+            --prerelease --target "$GITHUB_SHA" --title "OG-OS $OGOS_VERSION" \
+            --notes "Automated build of $GITHUB_SHA. Verify with the .sha256 (and .sig when signed)."
+
+      - name: Clean up
+        if: always()
+        run: |
+          rm -rf "$RUNNER_TEMP/gnupg"
+          sudo rm -rf "$RUNNER_TEMP/work" "$RUNNER_TEMP/profile"

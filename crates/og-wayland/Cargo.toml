@@ -1,0 +1,13 @@
+[package]
+name = "og-wayland"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+iced = { version = "0.13", default-features = false, features = ["tiny-skia", "advanced", "tokio", "image"] }
+smithay-client-toolkit = "0.20"
+wayland-client = "0.31"
+wayland-backend = { version = "0.3", features = ["client_system"] }
+calloop = "0.14"
+calloop-wayland-source = "0.4"
+libc = "0.2"

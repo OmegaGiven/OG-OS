@@ -1,0 +1,21 @@
+#!/bin/sh
+# Press-edge wrapper for the push-to-talk bind:
+#   bindsym $mod+v exec ~/.local/bin/og-voice-launch
+#   bindsym --release $mod+v exec ~/.local/bin/og-voice --stop
+#
+# If an instance is already running, this is a *repeat* press — either a
+# key-repeat/bounce mid-turn (harmless no-op via --start, since og-voice
+# only acts on it while resting on Done/Failed/Cancelled) or the user
+# pressing again after seeing the previous answer to start the next
+# turn in the same popup. Either way, signal --start rather than doing
+# nothing — og-voice's own main.rs still guards against a second window
+# regardless.
+#
+# Full path throughout — sway's exec environment doesn't have
+# ~/.local/bin on PATH.
+
+if pgrep -f '/og-voice$' >/dev/null 2>&1; then
+    exec ~/.local/bin/og-voice --start
+fi
+
+exec ~/.local/bin/og-voice

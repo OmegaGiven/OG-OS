@@ -1,0 +1,65 @@
+# Builds the [ogos] pacman repo from this commit, signed, and optionally
+# publishes it to https://omegagiven.github.io/OG-os-repo (the update
+# channel installed systems use). Runs on the self-hosted builder — see
+# distro/CI.md for runner setup and required secrets.
+name: Packages
+
+on:
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish to the OG-os-repo Pages repo
+        type: boolean
+        default: false
+      packages:
+        description: Space-separated subset to build (empty = all)
+        type: string
+        default: ""
+
+concurrency:
+  group: packages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: [self-hosted, ogos-builder]
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # build-repo.sh derives the package version from history
+
+      - name: Import signing key
+        env:
+          OGOS_GPG_PRIVATE_KEY: ${{ secrets.OGOS_GPG_PRIVATE_KEY }}
+        run: distro/ci/import-signing-key.sh
+
+      - name: Build repo
+        env:
+          OGOS_PACKAGES: ${{ inputs.packages }}
+        run: distro/ci/build-repo.sh "$RUNNER_TEMP/ogos-repo"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ogos-repo
+          path: ${{ runner.temp }}/ogos-repo
+          retention-days: 14
+
+      - name: Check out OG-os-repo
+        if: inputs.publish
+        uses: actions/checkout@v4
+        with:
+          repository: OmegaGiven/OG-os-repo
+          token: ${{ secrets.OGOS_REPO_TOKEN }}
+          path: pages
+
+      - name: Publish
+        if: inputs.publish
+        run: |
+          git -C pages config user.name "OG-OS CI"
+          git -C pages config user.email "ci@users.noreply.github.com"
+          distro/ci/publish-pages.sh "$RUNNER_TEMP/ogos-repo" pages
+
+      - name: Clean up keyring
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/gnupg"

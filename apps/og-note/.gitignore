@@ -1,0 +1,26 @@
+node_modules/
+dist/
+.DS_Store
+*.log
+
+# Rust
+target/
+Cargo.lock.bak
+
+# Tauri mobile build outputs (keep the gen/ scaffolding source, drop build artifacts)
+apps/note/src-tauri/gen/android/.gradle/
+apps/note/src-tauri/gen/android/build/
+apps/note/src-tauri/gen/android/app/build/
+apps/note/src-tauri/gen/android/**/build/
+apps/note/src-tauri/gen/apple/build/
+apps/note/src-tauri/gen/apple/DerivedData/
+apps/note/src-tauri/gen/apple/**/xcuserdata/
+
+# editors
+.vscode/
+.idea/
+
+# android release signing key — never commit this, it's the only way to
+# ship updates to devices that already have the app installed
+apps/note/src-tauri/keystore/
+apps/note/.env.local

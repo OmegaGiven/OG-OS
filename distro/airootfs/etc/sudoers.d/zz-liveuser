@@ -1,0 +1,16 @@
+# Live/rescue medium convenience — liveuser is wheel + NOPASSWD here since
+# this is a removable disk with an unset (locked) account password, not a
+# hardened install. Reassess before this convention carries over to an
+# installed system in phase 4.
+#
+# Filename prefixed zz- deliberately: sudo reads /etc/sudoers.d/* in
+# lexicographic order and the LAST matching rule for a user wins. Without
+# the prefix this sorted as "liveuser" < "wheel", so sudoers.d/wheel's
+# password-required %wheel rule (needed for real installed users) silently
+# overrode this NOPASSWD grant for liveuser too, since liveuser is also in
+# the wheel group — confirmed live: Calamares' own launch line (`sudo env
+# ... calamares`, no TTY available in a sway exec context) failed outright
+# with "a password is required" and Calamares never appeared, on a build
+# that otherwise booted and logged in fine. zz- sorts after "wheel",
+# restoring the intended precedence.
+%wheel ALL=(ALL:ALL) NOPASSWD: ALL

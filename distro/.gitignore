@@ -1,0 +1,46 @@
+# makepkg build artifacts — rebuildable from each pkgbuilds/<name>/PKGBUILD
+pkgbuilds/*/src/
+pkgbuilds/*/pkg/
+pkgbuilds/*/*.pkg.tar.zst
+pkgbuilds/*/*.pkg.tar.zst.sig
+pkgbuilds/*/*.log
+# rsync-sourced working-tree copies makepkg leaves in the pkgbuild dir itself
+pkgbuilds/*/OG-toolkit/
+pkgbuilds/og-bar/og-bar/
+pkgbuilds/og-settings/sway-control/
+pkgbuilds/og-search/omegagiven-search/
+pkgbuilds/og-clip/og-clip/
+pkgbuilds/og-notif-center/og-notif-center/
+pkgbuilds/og-notify/og-notify/
+pkgbuilds/og-apps/app-store/
+pkgbuilds/og-files/file-manager/
+pkgbuilds/og-links/og-links/
+# og-scripts sources straight from files/ via file:// — makepkg extracts a
+# duplicate copy to the pkgbuild dir root
+pkgbuilds/og-scripts/og-notif-center-launch
+pkgbuilds/og-scripts/og-popup-escape-guard
+pkgbuilds/og-scripts/og-popup-escape-kill
+pkgbuilds/og-scripts/og-search-launch
+
+# upstream source tarballs makepkg downloads (yay, calamares)
+pkgbuilds/yay/yay-*.tar.gz
+pkgbuilds/calamares/calamares-*.tar.gz
+
+# local [ogos] pacman repo — regenerate with `repo-add` from pkgbuilds/ output
+local-repo/*.pkg.tar.zst
+local-repo/*.db*
+local-repo/*.files*
+local-repo/*.sig
+
+# same repo, baked into the ISO for the installer — copy from local-repo/
+# via `cp local-repo/*.pkg.tar.zst local-repo/ogos.db.tar.gz airootfs/root/ogos-repo/`
+airootfs/root/ogos-repo/*.pkg.tar.zst
+airootfs/root/ogos-repo/*.db*
+airootfs/root/ogos-repo/*.files*
+airootfs/root/ogos-repo/*.sig
+
+# archiso build workspace/output — created by mkarchiso, not source
+/work/
+/out/
+__pycache__/
+*.pyc

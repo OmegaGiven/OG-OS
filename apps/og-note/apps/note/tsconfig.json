@@ -1,0 +1,19 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "types": ["svelte", "vite/client", "node"],
+    "paths": {
+      "@og-suite/contracts": ["../../packages/contracts/src/index.ts"],
+      "@og-suite/crdt": ["../../packages/crdt/src/index.ts"],
+      "@og-suite/runtime": ["../../packages/runtime/src/index.ts"],
+      "@og-suite/sync": ["../../packages/sync/src/index.ts"],
+      "@og-suite/ui": ["../../packages/ui/src/index.ts"],
+      "@og-suite/ui/ActionBar": ["../../packages/ui/src/ActionBar.svelte"],
+      "@og-suite/ui/Icon": ["../../packages/ui/src/Icon.svelte"],
+      "@og-suite/ui/MobileSuiteTopBar": ["../../packages/ui/src/MobileSuiteTopBar.svelte"],
+      "@og-toolkit/theme": ["../../packages/theme/src/index.ts"],
+      "@og-toolkit/theme/ThemeModeToggle": ["../../packages/theme/src/ThemeModeToggle.svelte"]
+    }
+  },
+  "include": ["src/**/*.ts", "src/**/*.svelte", "vite.config.ts"]
+}

@@ -1,0 +1,14 @@
+[Unit]
+Description=OG Spatial auto-router (multichannel playback -> HRTF sink)
+After=pipewire.service pipewire-pulse.service wireplumber.service
+PartOf=pipewire.service
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/og-spatial-autoroute
+Restart=on-failure
+RestartSec=2
+Slice=session.slice
+
+[Install]
+WantedBy=default.target

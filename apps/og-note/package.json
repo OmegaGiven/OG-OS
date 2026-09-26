@@ -1,0 +1,29 @@
+{
+  "name": "og-note",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "npm run dev --workspace @og-note/app",
+    "build": "npm run build --workspace @og-note/app",
+    "check": "npm run check --if-present --workspaces",
+    "test": "npm run test --if-present --workspaces",
+    "tauri": "npm run tauri --workspace @og-note/app"
+  },
+  "devDependencies": {
+    "@sveltejs/vite-plugin-svelte": "^5.0.0",
+    "@types/node": "^22.0.0",
+    "svelte": "^5.0.0",
+    "svelte-check": "^4.7.3",
+    "typescript": "^5.6.0",
+    "vite": "^6.0.0"
+  },
+  "overrides": {
+    "@tiptap/core": "3.23.5",
+    "@tiptap/pm": "3.23.5"
+  }
+}

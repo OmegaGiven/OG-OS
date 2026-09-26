@@ -1,0 +1,75 @@
+# Fast checks on every push and PR, on GitHub-hosted runners.
+# Runs inside an Arch container so it builds against the same toolchain
+# and libraries the distro ships. Heavy jobs (signed package repo, ISO,
+# VM install tests) live in packages.yml / iso.yml on the self-hosted
+# runner.
+name: CI
+
+on:
+  push:
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  rust:
+    name: Build, test, lint (workspace)
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    steps:
+      # git before checkout, so checkout makes a real clone (not a tarball).
+      - name: Install toolchain and system libraries
+        run: pacman -Syu --noconfirm --needed git rust wayland libxkbcommon
+
+      - uses: actions/checkout@v4
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-
+
+      - name: Build
+        run: cargo build --workspace --locked --all-targets
+
+      - name: Test
+        run: cargo test --workspace --locked
+
+      # Reported, not enforced yet: the codebase has never been linted.
+      # Flip to `-- -D warnings` once the existing warnings are cleaned up.
+      - name: Clippy
+        run: cargo clippy --workspace --locked --all-targets
+
+  pkgbuilds:
+    name: PKGBUILDs and scripts
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    steps:
+      - name: Install tools
+        run: pacman -Syu --noconfirm --needed git shellcheck
+
+      - uses: actions/checkout@v4
+
+      - name: PKGBUILDs parse
+        # makepkg refuses to run as root; the container has no other user.
+        run: |
+          useradd -m builder
+          chown -R builder "$GITHUB_WORKSPACE"
+          for d in distro/pkgbuilds/*/; do
+            [ -f "$d/PKGBUILD" ] || continue
+            echo "--- $d"
+            su builder -c "cd '$d' && makepkg --printsrcinfo >/dev/null"
+          done
+
+      - name: Shellcheck CI scripts
+        run: shellcheck distro/ci/*.sh distro/pkgbuilds/publish.sh

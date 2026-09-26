@@ -1,0 +1,26 @@
+[Unit]
+Description=og-bar — Wayland layer-shell status bar
+PartOf=graphical-session.target
+After=graphical-session.target
+# Don't give up after repeated fast restarts (e.g. a suspend/resume storm).
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/og-bar
+# Layer-shell clients are fragile across DPMS/suspend/output hotplug; if the
+# bar dies (crash on resume, Wayland disconnect) bring it straight back.
+Restart=always
+RestartSec=1
+# Hang detection: og-bar pings WATCHDOG=1 every 10s from inside its event
+# loop (src/watchdog.rs). A frozen loop (e.g. a present blocked on a dead
+# layer surface) stops pinging and gets killed + restarted here — a live
+# PID alone isn't proof of life.
+WatchdogSec=45
+NotifyAccess=main
+Environment=RUST_BACKTRACE=1
+TimeoutStopSec=5
+Slice=session.slice
+
+[Install]
+WantedBy=graphical-session.target

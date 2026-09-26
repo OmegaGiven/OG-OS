@@ -1,0 +1,52 @@
+# OG-OS seed sway config — deliberately generic defaults, not this
+# project's personal tuning (see OS-PLAN.md's resolved config-split
+# decision: seed defaults + let og-settings' own onboarding import a
+# personal config afterward, don't hardcode the ISO to one machine's
+# bindings).
+
+set $mod Mod4
+set $term alacritty
+
+font pango:sans-serif 10
+
+output * bg #1a1b26 solid_color
+
+exec_always og-bar
+exec og-notify
+# og-clip and og-notif-center are on-demand POPUPS, not background
+# daemons -- launching them bare (`exec og-clip`) just pops an empty
+# window open immediately and sway tiles it into the workspace, which
+# is not what we want at startup. og-bar's own clipboard/notification
+# buttons already spawn these on demand via the *-launch wrappers; the
+# only thing that actually needs to run continuously in the background
+# is wl-paste's watcher, which feeds clip history into og-clip's store
+# without ever showing a window.
+exec wl-paste --type text --watch og-clip --store-text
+exec wl-paste --type image/png --watch og-clip --store-image
+
+bindsym $mod+Return exec $term
+bindsym $mod+d exec og-search-launch
+bindsym $mod+n exec og-notif-center-launch
+bindsym $mod+v exec og-clip
+bindsym $mod+Shift+q kill
+bindsym $mod+Shift+c reload
+bindsym $mod+Shift+e exec swaynag -t warning -m 'Exit sway?' -B 'Yes' 'swaymsg exit'
+
+bindsym $mod+Left focus left
+bindsym $mod+Right focus right
+bindsym $mod+Up focus up
+bindsym $mod+Down focus down
+
+bindsym $mod+1 workspace number 1
+bindsym $mod+2 workspace number 2
+bindsym $mod+3 workspace number 3
+bindsym $mod+4 workspace number 4
+bindsym $mod+Shift+1 move container to workspace number 1
+bindsym $mod+Shift+2 move container to workspace number 2
+bindsym $mod+Shift+3 move container to workspace number 3
+bindsym $mod+Shift+4 move container to workspace number 4
+
+bindsym $mod+f fullscreen
+bindsym $mod+Shift+space floating toggle
+
+include /etc/sway/config.d/*

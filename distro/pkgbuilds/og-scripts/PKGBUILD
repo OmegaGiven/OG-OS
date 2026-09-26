@@ -1,0 +1,35 @@
+# Maintainer: OmegaGiven
+# Not a repo — gap found while wiring og-os's seed sway config: og-search
+# and og-notif-center's correct Escape-to-close behavior (closes the popup
+# even when it isn't focused, since iced only sees key events while its
+# own window has focus) depends on four small wrapper scripts that only
+# ever existed in ~/.local/bin, never committed to any git repo. Packaged
+# here verbatim (paths rewritten from ~/.local/bin/ to /usr/bin/, matching
+# where the real PKGBUILDs install their binaries) rather than silently
+# shipping an ISO where Escape doesn't close these popups.
+pkgname=og-scripts
+# Source tree: $OGOS_SRC if set (CI sets it to the checked-out commit),
+# else the repo this PKGBUILD lives in. Version: $OGOS_PKGVER if set (CI
+# derives a monotonic one from git), else the static fallback below.
+_ogsrc="${OGOS_SRC:-$(cd "$startdir/../../.." && pwd)}"
+pkgver="${OGOS_PKGVER:-20260908}"
+pkgrel=1
+pkgdesc="OG-toolkit glue scripts (popup Escape-close coordination for og-search/og-notif-center)"
+arch=('x86_64')
+url="https://github.com/OmegaGiven/OG-OS"
+license=('MIT')
+depends=('sway')
+source=(
+  "og-search-launch::file://$_ogsrc/distro/pkgbuilds/og-scripts/files/og-search-launch"
+  "og-notif-center-launch::file://$_ogsrc/distro/pkgbuilds/og-scripts/files/og-notif-center-launch"
+  "og-popup-escape-guard::file://$_ogsrc/distro/pkgbuilds/og-scripts/files/og-popup-escape-guard"
+  "og-popup-escape-kill::file://$_ogsrc/distro/pkgbuilds/og-scripts/files/og-popup-escape-kill"
+)
+sha256sums=('SKIP' 'SKIP' 'SKIP' 'SKIP')
+
+package() {
+  install -Dm755 "$srcdir/og-search-launch" "$pkgdir/usr/bin/og-search-launch"
+  install -Dm755 "$srcdir/og-notif-center-launch" "$pkgdir/usr/bin/og-notif-center-launch"
+  install -Dm755 "$srcdir/og-popup-escape-guard" "$pkgdir/usr/bin/og-popup-escape-guard"
+  install -Dm755 "$srcdir/og-popup-escape-kill" "$pkgdir/usr/bin/og-popup-escape-kill"
+}

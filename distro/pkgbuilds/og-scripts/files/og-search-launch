@@ -1,0 +1,17 @@
+#!/bin/sh
+# Wraps the og-search binary so Escape closes it even when it's not the
+# focused window. Iced only sees key events while its own window has focus,
+# so we grab a compositor-level Escape bind for the duration of the run and
+# release it again once og-search exits (however it exits).
+#
+# Coordinated with og-notif-center-launch via og-popup-escape-guard — the
+# same Escape bind covers both, so closing one doesn't un-hijack Escape
+# out from under the other if it's still open.
+#
+# Full paths throughout, not bare names — sway's exec environment doesn't
+# have ~/.local/bin on PATH.
+/usr/bin/og-popup-escape-guard acquire
+
+/usr/bin/og-search
+
+/usr/bin/og-popup-escape-guard release

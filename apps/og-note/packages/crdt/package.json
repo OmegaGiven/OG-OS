@@ -1,0 +1,19 @@
+{
+  "name": "@og-suite/crdt",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@og-suite/contracts": "0.1.0",
+    "yjs": "^13.6.30"
+  },
+  "devDependencies": {
+    "vitest": "^4.1.6"
+  }
+}

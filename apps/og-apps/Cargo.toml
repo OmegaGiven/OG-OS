@@ -1,0 +1,16 @@
+[package]
+name = "og-apps"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "og-apps"
+path = "src/main.rs"
+
+[dependencies]
+og-config = { path = "../../crates/og-config" }
+og-theme = { path = "../../crates/og-theme" }
+iced = { version = "0.13", default-features = false, features = ["wgpu", "tiny-skia", "advanced", "tokio"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt"] }

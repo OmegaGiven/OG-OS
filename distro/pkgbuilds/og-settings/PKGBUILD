@@ -1,0 +1,45 @@
+# Maintainer: OmegaGiven
+# Built on the dev machine, not inside the archiso chroot — see
+# OS-PLAN.md phase 2. Sources via rsync from $_ogsrc (the live working tree when built locally, the
+# checked-out commit in CI), not git — one rsync of the whole OG-toolkit monorepo now that og-settings
+# (formerly sway-control) lives at apps/og-settings and its build deps
+# (crates/, vendor/) are siblings in the same tree.
+pkgname=og-settings
+# Source tree: $OGOS_SRC if set (CI sets it to the checked-out commit),
+# else the repo this PKGBUILD lives in. Version: $OGOS_PKGVER if set (CI
+# derives a monotonic one from git), else the static fallback below.
+_ogsrc="${OGOS_SRC:-$(cd "$startdir/../../.." && pwd)}"
+pkgver="${OGOS_PKGVER:-20260908}"
+pkgrel=1
+pkgdesc="OG-toolkit control panel (theme, audio, network, printing, power, sysmonitor)"
+arch=('x86_64')
+url="https://github.com/OmegaGiven/OG-OS"
+license=('MIT')
+depends=('gcc-libs' 'wayland' 'btop' 'bluez' 'iwd')
+makedepends=('cargo' 'rsync')
+source=()
+
+prepare() {
+  rsync -a --exclude target --exclude .git --exclude pkg --exclude distro "$_ogsrc/" "$srcdir/OG-toolkit/"
+}
+
+build() {
+  cd "$srcdir/OG-toolkit/apps/og-settings"
+  cargo build --release
+}
+
+package() {
+  install -Dm755 "$srcdir/OG-toolkit/target/release/og-settings" "$pkgdir/usr/bin/og-settings"
+
+  # VPN split-tunnel helper: root-owned, group-inaccessible-to-write
+  # (750, root:root — NOT ~/.local/bin, which a normal user can edit; a
+  # NOPASSWD sudoers rule pointing at a user-writable path is a
+  # privilege-escalation hole, flagged in OS-PLAN.md since phase 1 and
+  # unresolved until this package actually installed it correctly).
+  install -Dm750 -o root -g root "$srcdir/OG-toolkit/apps/og-settings/scripts/og-vpn-apply" "$pkgdir/usr/local/bin/og-vpn-apply"
+
+  # Scoped NOPASSWD entry — the sudoers rule's own path binds it to this
+  # exact root-owned file, so widening what a user can run means editing
+  # this line, not just editing a script sitting under their own home.
+  install -Dm440 "$srcdir/OG-toolkit/apps/og-settings/scripts/og-vpn-sudoers" "$pkgdir/etc/sudoers.d/og-vpn"
+}

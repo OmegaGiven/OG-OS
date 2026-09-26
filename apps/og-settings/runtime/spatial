@@ -1,0 +1,201 @@
+#!/usr/bin/env bash
+# spatial — PipeWire virtual-surround (HeSuVi HRTF) for headphones.
+#
+#   spatial auto  [preset]     5.1/7.1 streams -> HRTF, stereo left alone (recommended)
+#   spatial always[preset]     every stream -> HRTF
+#   spatial off                route nothing, tear the HRTF sink down
+#   spatial preset <name>      swap the HRIR (keeps current mode)
+#   spatial status
+#   spatial test [all|0-7]
+#
+# preset: atmos dtshx gsx sonic cmss_game dh+ dht ooyh1 ssc_syd dvs waves
+#
+# "auto"/"always" run a small user service (og-spatial-autoroute) that moves
+# streams onto the HRTF sink as they appear. "surround"/"stereo" are kept as
+# aliases for always/off.
+set -euo pipefail
+
+HRIR_DIR="$HOME/.local/src/sway-control/src/assets/hrir"
+GRAPH="/usr/share/pipewire/filter-chain/sink-virtual-surround-7.1-hesuvi.conf"
+CONF="$HOME/.config/pipewire/filter-chain.conf.d/og-spatial.conf"
+SINK="effect_input.og-spatial"
+STATE="$HOME/.local/state"
+PREV="$STATE/spatial-prev-sink"
+PRESET_F="$STATE/spatial-preset"
+MODE_F="$STATE/spatial-mode"
+SVC="og-spatial-autoroute.service"
+PRESETS="atmos dtshx gsx sonic cmss_game dh+ dht ooyh1 ssc_syd dvs waves"
+
+mkdir -p "$STATE" "$(dirname "$CONF")"
+
+real_sink() {   # first genuine (non-effect) output device that isn't the HRTF sink
+  local d; d="$(pactl get-default-sink)"
+  if [ -n "$d" ] && [ "$d" != "$SINK" ]; then echo "$d"; return; fi
+  [ -s "$PREV" ] && { cat "$PREV"; return; }
+  pactl list short sinks | awk -F'\t' '$2 !~ /^effect_(in|out)put\./ {print $2; exit}'
+}
+
+hw_target() {   # the device the current conf is pinned to, else real_sink
+  local t=""
+  [ -f "$CONF" ] && t="$(sed -n 's/.*target.object  = "\([^"]*\)".*/\1/p' "$CONF" | head -1)" || true
+  if [ -n "$t" ]; then echo "$t"; else real_sink; fi
+}
+
+write_conf() {  # $1 preset  $2 hw-device
+  local preset="$1" hw="$2" wav="$HRIR_DIR/$1.wav"
+  [ -f "$wav" ] || { echo "no preset '$preset' — have: $PRESETS" >&2; exit 1; }
+  [ -f "$GRAPH" ] || { echo "missing $GRAPH" >&2; exit 1; }
+  { echo "# og-spatial-mode: surround:$preset"
+    sed -e "s#\"hrir_hesuvi/hrir.wav\"#\"$wav\"#g" \
+        -e 's#node.name      = "effect_input.virtual-surround-7.1-hesuvi"#node.name      = "effect_input.og-spatial"\n                node.description = "OG Spatial (Virtual Surround)"#' \
+        -e 's#effect_output.virtual-surround-7.1-hesuvi#effect_output.og-spatial#' \
+        -e "s#node.passive   = true#node.passive   = false\n                target.object  = \"$hw\"\n                node.dont-reconnect = true#" \
+        "$GRAPH"
+  } > "$CONF"
+  echo "$preset" > "$PRESET_F"
+}
+
+bring_up() {    # ensure the HRTF sink exists, pinned to a real device. no routing.
+  local preset="${1:-$(cat "$PRESET_F" 2>/dev/null || echo atmos)}"
+  local hw="${2:-}"
+  [ -n "$hw" ] || hw="$(real_sink)"
+  # never pin to the effect sink itself
+  [ "$hw" = "$SINK" ] && hw="$(pactl list short sinks | awk -F'\t' '$2 !~ /^effect_/ {print $2; exit}')"
+  [ -n "$hw" ] || { echo "no real output device found" >&2; exit 1; }
+  echo "$hw" > "$PREV"
+  write_conf "$preset" "$hw"
+  systemctl --user enable filter-chain.service >/dev/null 2>&1 || true
+  systemctl --user restart filter-chain.service
+  for _ in $(seq 20); do
+    pactl list short sinks | grep -q "$SINK" && break
+    sleep 0.2
+  done
+  pactl list short sinks | grep -q "$SINK" || {
+    echo "sink failed to load — journalctl --user -u filter-chain -n40" >&2
+    systemctl --user stop filter-chain.service; rm -f "$CONF"; exit 1
+  }
+  # force the binaural output onto the real device (WirePlumber likes to steal it)
+  sleep 0.3
+  pw-link "effect_output.og-spatial:output_FL" "$hw:playback_FL" 2>/dev/null || true
+  pw-link "effect_output.og-spatial:output_FR" "$hw:playback_FR" 2>/dev/null || true
+  for other in $(pactl list short sinks | awk -F'\t' -v s="$SINK" -v h="$hw" '$2!=s && $2!=h {print $2}'); do
+    pw-link -d "effect_output.og-spatial:output_FL" "$other:playback_FL" 2>/dev/null || true
+    pw-link -d "effect_output.og-spatial:output_FR" "$other:playback_FR" 2>/dev/null || true
+  done
+  pactl set-sink-volume "$hw" 100% 2>/dev/null || true
+}
+
+tear_down() {
+  local back; back="$(hw_target)"
+  systemctl --user disable --now "$SVC" 2>/dev/null || true
+  if [ -n "$back" ]; then
+    pactl set-default-sink "$back" 2>/dev/null || true
+    pw-metadata 0 default.configured.audio.sink "{ \"name\": \"$back\" }" >/dev/null 2>&1 || true
+  fi
+  systemctl --user stop filter-chain.service 2>/dev/null || true
+  rm -f "$CONF"
+  if [ -n "$back" ]; then
+    pactl set-default-sink "$back" 2>/dev/null || true
+    pactl list short sink-inputs | cut -f1 | while read -r i; do
+      [ -n "$i" ] && pactl move-sink-input "$i" "$back" 2>/dev/null || true
+    done
+  fi
+}
+
+case "${1:-status}" in
+  auto|always|surround)
+    if [[ "$1" == always || "$1" == surround ]]; then m="always"; else m="auto"; fi
+    [ -n "${2:-}" ] && echo "$2" > "$PRESET_F" || true
+    dev="${3:-}"
+    [ -n "$dev" ] && echo "$dev" > "$PREV" || true
+    echo "$m" > "$MODE_F"
+    bring_up "$(cat "$PRESET_F" 2>/dev/null || echo atmos)" "$dev"
+    hw="$(hw_target)"
+    if [ "$m" = "always" ]; then
+      # every new stream should land on the HRTF sink
+      pactl set-default-sink "$SINK" 2>/dev/null || true
+    else
+      # auto: default stays the REAL device; the daemon moves 5.1/7.1 over
+      [ -n "$hw" ] && {
+        pactl set-default-sink "$hw" 2>/dev/null || true
+        pw-metadata 0 default.configured.audio.sink "{ \"name\": \"$hw\" }" >/dev/null 2>&1 || true
+      }
+    fi
+    systemctl --user enable --now "$SVC" 2>/dev/null || {
+      pkill -f 'og-spatial-autoroute' 2>/dev/null || true
+      nohup og-spatial-autoroute >/dev/null 2>&1 &
+    }
+    echo "spatial: $m  ($(cat "$PRESET_F"))  -> $hw"
+    ;;
+
+  off|stereo)
+    echo "off" > "$MODE_F"
+    tear_down
+    echo "spatial: off"
+    ;;
+
+  preset)
+    [ -n "${2:-}" ] || { echo "usage: spatial preset <$PRESETS>"; exit 1; }
+    echo "$2" > "$PRESET_F"
+    if [ -f "$CONF" ]; then
+      bring_up "$2"
+      systemctl --user is-active "$SVC" >/dev/null 2>&1 && systemctl --user restart "$SVC" || true
+    fi
+    echo "preset: $2"
+    ;;
+
+  _hw)   # internal: print the pinned real device (used by the autoroute daemon)
+    hw_target
+    ;;
+
+  load)  # internal: bring the sink up, no mode change, no routing
+    bring_up "${2:-}"
+    ;;
+
+  unload)
+    systemctl --user stop filter-chain.service 2>/dev/null || true
+    rm -f "$CONF"
+    ;;
+
+  test)
+    which="${2:-all}"
+    pactl list short sinks | grep -q "$SINK" || echo "note: HRTF sink not loaded — playing through plain stereo"
+    SPK=(1 3 2 8 6 5 7 4)
+    NAME=("Front Left" "Front Right" "Center" "LFE" "Rear Left" "Rear Right" "Side Left" "Side Right")
+    play1() { speaker-test -D pipewire -c 8 -t wav -l 1 -s "${SPK[$1]}" >/dev/null 2>&1; }
+    case "$which" in
+      all|""|cw)
+        echo "clockwise: Rear L -> Side L -> Front L -> Center -> Front R -> Side R -> Rear R -> (LFE)"
+        for slot in 4 6 0 2 1 7 5 3; do echo "  ${NAME[$slot]}"; play1 "$slot"; sleep 0.25; done
+        ;;
+      [0-7]) echo "  ${NAME[$which]}"; play1 "$which" ;;
+      *) echo "usage: spatial test [all | 0-7]"; exit 1 ;;
+    esac
+    echo done
+    ;;
+
+  status)
+    echo "mode:    $(cat "$MODE_F" 2>/dev/null || echo '(unset -> auto)')"
+    echo "preset:  $(cat "$PRESET_F" 2>/dev/null || echo atmos)"
+    echo "sink:    $(pactl list short sinks | grep -q "$SINK" && echo "loaded" || echo "not loaded")"
+    echo "output:  $(hw_target)"
+    echo "daemon:  $(systemctl --user is-active "$SVC" 2>/dev/null || echo inactive)"
+    echo "streams:"
+    pactl -f json list sink-inputs 2>/dev/null | node -e '
+      let d="";process.stdin.on("data",x=>d+=x).on("end",()=>{
+        let a=[];try{a=JSON.parse(d)}catch(e){}
+        const sinks={};try{require("child_process").execSync("pactl -f json list sinks").toString();}catch(e){}
+        for(const s of a){
+          const p=s.properties||{};
+          const ch=String(s.channel_map||"").split(",").filter(Boolean).length;
+          console.log("  "+(p["application.name"]||p["media.name"]||"?")+"  "+ch+"ch");
+        }
+        if(!a.length)console.log("  (none)");
+      });'
+    ;;
+
+  *)
+    echo "usage: spatial {auto|always [preset] | off | preset <name> | status | test [all|0-7]}"
+    exit 1
+    ;;
+esac

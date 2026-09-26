@@ -1,0 +1,26 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/og-config",
+    "crates/og-drag",
+    "crates/og-theme",
+    "crates/og-wayland",
+    "crates/og-wallpaper-core",
+    "apps/og-apps",
+    "apps/og-bar",
+    "apps/og-clip",
+    "apps/og-files",
+    "apps/og-hotkeys",
+    "apps/og-notif-center",
+    "apps/og-notify",
+    "apps/og-search",
+    "apps/og-settings",
+    "apps/og-voice",
+    "apps/og-wallpaper",
+    "apps/og-wallpaper-studio",
+]
+
+# Suite-wide patched crates — see vendor/README.md.
+[patch.crates-io]
+layershellev = { path = "vendor/layershellev-0.13.7" }
+iced_layershell = { path = "vendor/iced_layershell-0.13.7" }

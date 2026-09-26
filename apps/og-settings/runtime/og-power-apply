@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+CONFIG="$HOME/.config/sway-power/config.json"
+PID_FILE="$HOME/.config/sway-power/swayidle.pid"
+WATCH_PID_FILE="$HOME/.config/sway-power/controller-idle-watch.pid"
+
+# Kill by pidfile AND by name: the pidfile only tracks the last instance we
+# spawned, and an `||` here left any older stray swayidle running (two
+# instances = doubled dpms/lock commands).
+pkill -F "$PID_FILE" 2>/dev/null; pkill -x swayidle 2>/dev/null; true
+sleep 0.3
+
+# Gamepad input never reaches swayidle's own (keyboard/pointer-only) idle
+# tracking, so a controller-only session gets locked/suspended out from
+# under the user. This watcher pings us back to respawn swayidle (above)
+# on controller activity, resetting its timeout clock. Its own behavior
+# doesn't depend on config, so start it once and leave it running across
+# repeated Apply&Save calls instead of restarting it every time.
+if ! kill -0 "$(cat "$WATCH_PID_FILE" 2>/dev/null)" 2>/dev/null; then
+    "$HOME/.local/bin/og-controller-idle-watch" >/dev/null 2>&1 &
+    echo $! > "$WATCH_PID_FILE"
+fi
+
+if [ ! -f "$CONFIG" ]; then
+    exit 0
+fi
+
+MON_ENABLED=$(python3 -c "import json,sys; c=json.load(open('$CONFIG')); print(c['monitor_sleep']['enabled'])")
+SYS_ENABLED=$(python3 -c "import json,sys; c=json.load(open('$CONFIG')); print(c['system_sleep']['enabled'])")
+LOCK_ENABLED=$(python3 -c "import json,sys; c=json.load(open('$CONFIG')); print(c.get('screen_lock',{}).get('enabled',False))")
+MON_SEC=$(python3 -c "import json; c=json.load(open('$CONFIG')); print(c['monitor_sleep']['minutes']*60)")
+SYS_SEC=$(python3 -c "import json; c=json.load(open('$CONFIG')); print(c['system_sleep']['minutes']*60)")
+LOCK_SEC=$(python3 -c "import json; c=json.load(open('$CONFIG')); print(c.get('screen_lock',{}).get('minutes',10)*60)")
+
+LOCK_CMD='swaylock -f -c 000000'
+
+ARGS=(-w)
+
+if [ "$LOCK_ENABLED" = "True" ]; then
+    ARGS+=(timeout "$LOCK_SEC" "$LOCK_CMD")
+fi
+
+if [ "$MON_ENABLED" = "True" ]; then
+    ARGS+=(timeout "$MON_SEC" 'swaymsg "output * dpms off"' resume 'swaymsg "output * dpms on"')
+fi
+
+if [ "$SYS_ENABLED" = "True" ]; then
+    ARGS+=(timeout "$SYS_SEC" 'systemctl suspend')
+fi
+
+if [ "$LOCK_ENABLED" = "True" ]; then
+    ARGS+=(before-sleep "$LOCK_CMD; swaymsg \"output * dpms on\"")
+else
+    ARGS+=(before-sleep 'swaymsg "output * dpms on"')
+fi
+
+if [ "$MON_ENABLED" = "True" ] || [ "$SYS_ENABLED" = "True" ] || [ "$LOCK_ENABLED" = "True" ]; then
+    swayidle "${ARGS[@]}" >/dev/null 2>&1 &
+    echo $! > "$PID_FILE"
+fi

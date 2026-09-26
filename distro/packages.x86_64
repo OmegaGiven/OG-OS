@@ -1,0 +1,176 @@
+# og-os ISO package manifest — consumed directly by mkarchiso.
+# This is the CURATED base list (see BASE-PACKAGES.md for full rationale
+# per group), NOT a snapshot of any one machine. The personal-machine
+# audit-trail snapshot lives in machine-snapshot-packages.x86_64 instead
+# — do not confuse the two, see reference/og-os.md's gotcha note.
+
+# --- Core system ---
+base
+base-devel
+linux
+linux-firmware
+amd-ucode
+intel-ucode
+sudo
+efibootmgr
+
+# --- archiso boot-mode requirements (bios.syslinux / uefi.systemd-boot) ---
+syslinux
+grub
+dosfstools
+mtools
+squashfs-tools
+memtest86+
+memtest86+-efi
+edk2-shell
+
+# --- archiso initramfs requirements (gap found: without these, none of
+# HOOKS=(... archiso archiso_loop_mnt ...) in
+# airootfs/etc/mkinitcpio.conf.d/archiso.conf actually exist, so the
+# initramfs can't find the boot medium at all — "mounting '' on real
+# root" at boot, reproduced locally under qemu, matches the user's UTM
+# report exactly) ---
+mkinitcpio
+mkinitcpio-archiso
+
+# zsh: airootfs/etc/passwd (copied from releng) hardcodes root's login
+# shell as /usr/bin/zsh — without the package, autologin has no shell
+# to exec.
+zsh
+
+# --- Compositor + session ---
+sway
+sway-contrib
+swaybg
+swayidle
+swaylock
+lightdm
+lightdm-gtk-greeter
+polkit
+xorg-xwayland
+xdg-desktop-portal-wlr
+xdg-desktop-portal-gtk
+xdg-utils
+
+# --- OG suite (own [ogos] repo packages) ---
+og-bar
+og-settings
+og-search
+og-clip
+og-notif-center
+og-notify
+og-files
+og-links
+og-apps
+og-scripts
+# og-note deferred — Tauri/npm toolchain, no PKGBUILD yet (see pkgbuilds/README.md)
+
+# --- OG suite runtime deps ---
+# mako: gap found while wiring the seed sway config — og-notify/
+# og-notif-center are a themed-effects layer + history browser sitting on
+# top of mako's actual org.freedesktop.Notifications DBus service
+# (og-notify watches DBus calls addressed to mako by its unique bus name,
+# doesn't implement the service itself); notifications don't work at all
+# without it, but it was never in any base group.
+mako
+ttf-nerd-fonts-symbols
+ttf-nerd-fonts-symbols-common
+# General-purpose UI/text fonts — ttf-nerd-fonts-symbols above is icon
+# glyphs only, never covered ordinary text. Without these, fontconfig's
+# only fallback is Ghostscript's bundled Nimbus fonts (a side effect of
+# the cups/ghostscript printing group, Latin-1-ish coverage only) —
+# confirmed live as the cause of random tofu boxes across every app,
+# not an OG-suite-specific bug. See BASE-PACKAGES.md's 2026-09-12 entry.
+noto-fonts
+noto-fonts-emoji
+ttf-liberation
+wl-clipboard
+grim
+slurp
+# alacritty: gap found while writing this list — sway config's $term is
+# alacritty (per BASE-PACKAGES.md's own audit note) but it was never
+# actually added to any base group. Added here as its own line so it's
+# not confused with a GPU/audio/etc group; flagged in BASE-PACKAGES.md.
+alacritty
+
+# --- Audio ---
+pipewire-alsa
+pipewire-jack
+pipewire-pulse
+alsa-utils
+alsa-firmware
+sof-firmware
+
+# --- Bluetooth / network ---
+bluez
+bluez-utils
+iwd
+wireless_tools
+openssh
+tailscale
+wireguard-tools
+
+# --- GPU / hardware breadth (deliberately broad, see OS-PLAN.md 2e) ---
+mesa-utils
+vulkan-tools
+vulkan-intel
+vulkan-radeon
+vulkan-nouveau
+libva-intel-driver
+intel-media-driver
+libva-utils
+xf86-video-amdgpu
+xf86-video-ati
+xf86-video-nouveau
+
+# --- Everyday utilities ---
+git
+nano
+vim
+htop
+btop
+unzip
+wget
+less
+brightnessctl
+smartmontools
+zram-generator
+flatpak
+mpv
+
+# --- Printing ---
+cups
+cups-pdf
+ghostscript
+gsfonts
+gutenprint
+
+# --- AUR helper (built as its own [ogos] package — yay isn't in official repos) ---
+yay
+
+# --- Install-script requirements (phase 4) ---
+arch-install-scripts
+parted
+gptfdisk
+e2fsprogs
+
+# --- Graphical installer (phase 5, public-distribution goal) ---
+# calamares itself is AUR-only, built via pkgbuilds/calamares/ into the
+# local [ogos] repo like the OG-suite apps; its own deps (kpmcore,
+# libpwquality, yaml-cpp, qt6-declarative, qt6-svg) are all official
+# extra/ packages, pulled in transitively. kcrash listed explicitly below
+# — gap found via `ldd`: the AUR PKGBUILD's depends=() doesn't declare
+# it, but the built binary needs libKF6Crash.so.6 and fails to launch at
+# all without it ("error while loading shared libraries").
+calamares
+kcrash
+qt6-wayland
+ntfs-3g
+os-prober
+# rsync: real gap, found via an actual failed install run ("Failed to
+# unpack image ... rsync failed with error code 127" == command not
+# found). The unpackfs module shells out to rsync to copy the squashfs
+# contents onto the target -- it was in releng's own package list but
+# got excluded here during the phase-3 curation pass as "rescue-disk
+# bloat" without realizing Calamares itself hard-depends on it.
+rsync

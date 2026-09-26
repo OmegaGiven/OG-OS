@@ -1,0 +1,10 @@
+# Real installed users' sudo access. shellprocess.conf strips
+# sudoers.d/liveuser (a live-medium-only NOPASSWD-for-all-wheel
+# convenience) during install specifically because leaving it in place
+# would silently grant the new real account passwordless root -- but
+# that cleanup never left wheel members with ANY sudo rule at all,
+# which is just as wrong the other way (a normal installed user
+# couldn't sudo, period). This is the real, password-required rule
+# that's meant to actually ship: not removed by the liveuser cleanup
+# above since it targets a different filename.
+%wheel ALL=(ALL:ALL) ALL

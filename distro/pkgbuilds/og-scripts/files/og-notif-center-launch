@@ -1,0 +1,13 @@
+#!/bin/sh
+# Wraps the og-notif-center binary so Escape closes it even when it's not
+# the focused window — same mechanism and rationale as og-search-launch,
+# coordinated with it via og-popup-escape-guard so the shared Escape bind
+# only actually releases once neither popup is open anymore.
+#
+# Full paths throughout, not bare names — sway's exec environment doesn't
+# have ~/.local/bin on PATH.
+/usr/bin/og-popup-escape-guard acquire
+
+/usr/bin/og-notif-center
+
+/usr/bin/og-popup-escape-guard release

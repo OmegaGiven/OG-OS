@@ -1,0 +1,11 @@
+[Unit]
+Description=OG-toolkit local shortcut redirect service (go/whatever)
+After=network.target
+
+[Service]
+Environment=OG_LINKS_PORT=8080
+ExecStart=/usr/bin/og-links
+Restart=on-failure
+
+[Install]
+WantedBy=default.target

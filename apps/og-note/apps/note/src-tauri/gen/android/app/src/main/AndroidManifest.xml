@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-permission android:name="android.permission.INTERNET" />
+
+    <!-- AndroidTV support -->
+    <uses-feature android:name="android.software.leanback" android:required="false" />
+
+    <application
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:label="@string/app_name"
+        android:theme="@style/Theme.og_note"
+        android:usesCleartextTraffic="${usesCleartextTraffic}">
+        <!--
+          Hardware acceleration is back ON (was forced off for a while,
+          see git history on this file and on build.gradle.kts's targetSdk
+          comment for the earlier attempts). On at least one real device
+          (Galaxy S24, Adreno 750), Android opting this app into
+          Vulkan-backed HWUI rendering triggered a driver bug that
+          intermittently failed to paint anything at all on launch (a
+          permanent blank white screen, not a crash; touch input kept
+          working). The actual trigger turned out to be this app's
+          pervasive backdrop-filter: blur() CSS (about 20 places, see
+          styles.css), which compiles to a runtime GPU shader, exactly the
+          kind of thing that trips driver bugs like this. Disabled it for
+          Android specifically (main.ts adds an og-no-backdrop-blur class
+          to the root html element; see styles.css's matching rule)
+          instead of disabling hardware acceleration app wide. Verified
+          with 38 consecutive cold launch and background/foreground
+          cycles on the affected device with zero failures, hardware
+          acceleration enabled. If this regresses again, the previous
+          fallback (android:hardwareAccelerated="false" here) is the one
+          that never failed, at the cost of slower typing/scrolling.
+        -->
+        <activity
+            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|locale|smallestScreenSize|screenLayout|uiMode"
+            android:launchMode="singleTask"
+            android:label="@string/main_activity_title"
+            android:name=".MainActivity"
+            android:exported="true"
+            android:windowSoftInputMode="adjustResize">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+                <!-- AndroidTV support -->
+                <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <provider
+          android:name="androidx.core.content.FileProvider"
+          android:authorities="${applicationId}.fileprovider"
+          android:exported="false"
+          android:grantUriPermissions="true">
+          <meta-data
+            android:name="android.support.FILE_PROVIDER_PATHS"
+            android:resource="@xml/file_paths" />
+        </provider>
+    </application>
+</manifest>

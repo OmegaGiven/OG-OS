@@ -1,0 +1,16 @@
+[package]
+name = "og-drag"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Depends on the full `iced` crate (not `iced_widget` directly) purely
+# because that's the crate that actually proxies the `wgpu`/`tiny-skia`
+# renderer-backend features — `iced_renderer` (pulled in transitively no
+# matter what) refuses to compile without one enabled somewhere. Picks
+# only `tiny-skia` (not `wgpu` too) so this doesn't force the heavier wgpu
+# stack into a consumer like og-bar that doesn't otherwise use it —
+# consumers that do want wgpu (og-settings, OG-TestDesk) already request
+# it themselves, and cargo unions features across the workspace, so this
+# doesn't dictate anyone's final binary either way.
+iced = { version = "0.13", default-features = false, features = ["tiny-skia", "advanced"] }

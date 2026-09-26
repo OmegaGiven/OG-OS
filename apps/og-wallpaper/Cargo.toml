@@ -1,0 +1,17 @@
+[package]
+name = "og-wallpaper"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "og-wallpaper"
+path = "src/main.rs"
+
+[dependencies]
+og-config = { path = "../../crates/og-config" }
+og-theme = { path = "../../crates/og-theme" }
+og-wallpaper-core = { path = "../../crates/og-wallpaper-core" }
+iced = { version = "0.13", default-features = false, features = ["tiny-skia", "canvas", "tokio", "image"] }
+iced_layershell = "0.13.7"
+rand = "0.8"
+

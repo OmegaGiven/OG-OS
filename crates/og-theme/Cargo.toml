@@ -1,0 +1,8 @@
+[package]
+name = "og-theme"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+og-config = { path = "../og-config" }
+iced_core = "0.13"

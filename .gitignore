@@ -1,0 +1,7 @@
+# Cargo build output (any depth: some apps were once built standalone)
+target/
+# og-note (Tauri/Svelte) dependencies and build output
+node_modules/
+dist/
+__pycache__/
+*.pyc

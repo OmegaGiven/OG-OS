@@ -1,0 +1,40 @@
+# Maintainer: OmegaGiven
+# Source repo is galias; binary/pkg name is og-links. Built on the dev
+# machine, not inside the archiso chroot — see og-os/OS-PLAN.md phase 2.
+# No og-toolkit path deps (plain axum/tokio server), no install.sh in
+# repo — package() and the systemd --user unit written from scratch.
+# Default port is 8080 (unprivileged) via OG_LINKS_PORT in the unit —
+# binary defaults to 80 if unset, which needs cap_net_bind_service or
+# root; not granting that automatically here, see og-os/OS-PLAN.md
+# security note about NOPASSWD/setcap-style privilege grants. Sources
+# via rsync from $_ogsrc (the live working tree when built locally, the
+# checked-out commit in CI), not git.
+pkgname=og-links
+# Source tree: $OGOS_SRC if set (CI sets it to the checked-out commit),
+# else the repo this PKGBUILD lives in. Version: $OGOS_PKGVER if set (CI
+# derives a monotonic one from git), else the static fallback below.
+_ogsrc="${OGOS_SRC:-$(cd "$startdir/../../.." && pwd)}"
+pkgver="${OGOS_PKGVER:-20260908}"
+pkgrel=1
+pkgdesc="OG-toolkit local shortcut redirect service (go/whatever)"
+arch=('x86_64')
+url="https://github.com/OmegaGiven/OG-OS"
+license=('MIT')
+depends=('gcc-libs')
+makedepends=('cargo' 'rsync')
+source=("og-links.service")
+sha256sums=('SKIP')
+
+prepare() {
+  rsync -a --exclude target --exclude .git --exclude pkg "$_ogsrc/apps/og-links/" "$srcdir/og-links/"
+}
+
+build() {
+  cd "$srcdir/og-links"
+  cargo build --release
+}
+
+package() {
+  install -Dm755 "$srcdir/og-links/target/release/og-links" "$pkgdir/usr/bin/og-links"
+  install -Dm644 "$srcdir/og-links.service" "$pkgdir/usr/lib/systemd/user/og-links.service"
+}
