@@ -1,8 +1,8 @@
 # Maintainer: OmegaGiven
 # Built on the dev machine, not inside the archiso chroot — see
 # og-os/OS-PLAN.md phase 2. No install.sh existed in-repo; package()
-# written from scratch against Cargo.toml's [[bin]] name. Sources via
-# rsync from $_ogsrc (the live working tree when built locally, the
+# written from scratch against Cargo.toml's [[bin]] name. Builds straight from
+# $_ogsrc (the live working tree when built locally, the
 # checked-out commit in CI), not git — these repos carry
 # uncommitted work a git+file:// clone would silently drop.
 pkgname=og-notify
@@ -17,18 +17,23 @@ arch=('x86_64')
 url="https://github.com/OmegaGiven/OG-OS"
 license=('MIT')
 depends=('gcc-libs' 'wayland')
-makedepends=('cargo' 'rsync')
+makedepends=('cargo')
+# No split -debug package: its RUSTFLAGS path remap differs per package,
+# which would make every package rebuild the shared cargo target from
+# scratch (and build-repo.sh drops -debug packages anyway).
+options=('!debug')
 source=()
 
-prepare() {
-  rsync -a --exclude target --exclude .git --exclude pkg --exclude distro "$_ogsrc/" "$srcdir/OG-toolkit/"
-}
-
 build() {
-  cd "$srcdir/OG-toolkit/apps/og-notify"
-  cargo build --release
+  # Builds every packaged app (../workspace-apps) straight from the source
+  # tree in one go: all og-* packages share that one build (and, via
+  # build-repo.sh, one CARGO_TARGET_DIR), so the 2nd..nth are no-ops.
+  local apps=()
+  mapfile -t apps < <(grep -v '^#' "$startdir/../workspace-apps")
+  cd "$_ogsrc"
+  cargo build --release --locked "${apps[@]/#/--package=}"
 }
 
 package() {
-  install -Dm755 "${CARGO_TARGET_DIR:-$srcdir/OG-toolkit/target}/release/og-notify" "$pkgdir/usr/bin/og-notify"
+  install -Dm755 "${CARGO_TARGET_DIR:-$_ogsrc/target}/release/og-notify" "$pkgdir/usr/bin/og-notify"
 }

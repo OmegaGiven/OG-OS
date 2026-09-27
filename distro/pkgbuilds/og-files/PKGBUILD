@@ -4,7 +4,7 @@
 # phase 2. ffmpeg/zip/unzip/tar/alacritty are optional runtime deps
 # (video thumbs, archive ops, terminal spawn) — left out of depends,
 # already covered by base's everyday-utilities group or user config.
-# Sources via rsync from $_ogsrc (the live working tree when built locally, the
+# Builds straight from $_ogsrc (the live working tree when built locally, the
 # checked-out commit in CI), not git — these repos
 # carry uncommitted work a git+file:// clone would silently drop.
 pkgname=og-files
@@ -19,18 +19,23 @@ arch=('x86_64')
 url="https://github.com/OmegaGiven/OG-OS"
 license=('MIT')
 depends=('gcc-libs' 'wayland' 'ttf-nerd-fonts-symbols' 'xdg-utils')
-makedepends=('cargo' 'rsync')
+makedepends=('cargo')
+# No split -debug package: its RUSTFLAGS path remap differs per package,
+# which would make every package rebuild the shared cargo target from
+# scratch (and build-repo.sh drops -debug packages anyway).
+options=('!debug')
 source=()
 
-prepare() {
-  rsync -a --exclude target --exclude .git --exclude pkg --exclude distro "$_ogsrc/" "$srcdir/OG-toolkit/"
-}
-
 build() {
-  cd "$srcdir/OG-toolkit/apps/og-files"
-  cargo build --release
+  # Builds every packaged app (../workspace-apps) straight from the source
+  # tree in one go: all og-* packages share that one build (and, via
+  # build-repo.sh, one CARGO_TARGET_DIR), so the 2nd..nth are no-ops.
+  local apps=()
+  mapfile -t apps < <(grep -v '^#' "$startdir/../workspace-apps")
+  cd "$_ogsrc"
+  cargo build --release --locked "${apps[@]/#/--package=}"
 }
 
 package() {
-  install -Dm755 "${CARGO_TARGET_DIR:-$srcdir/OG-toolkit/target}/release/og-files" "$pkgdir/usr/bin/og-files"
+  install -Dm755 "${CARGO_TARGET_DIR:-$_ogsrc/target}/release/og-files" "$pkgdir/usr/bin/og-files"
 }

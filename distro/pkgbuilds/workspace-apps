@@ -1,0 +1,12 @@
+# Workspace apps shipped as [ogos] packages. Every workspace PKGBUILD builds
+# exactly this set in one cargo invocation, so they all share one
+# dependency build (identical feature unification) and the 2nd..nth
+# package build is a no-op. Keep in sync with the og-* PKGBUILDs.
+og-apps
+og-bar
+og-clip
+og-files
+og-notif-center
+og-notify
+og-search
+og-settings
