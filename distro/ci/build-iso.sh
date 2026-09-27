@@ -32,7 +32,9 @@ sed -i "/^\[ogos\]/,/^\[/ s#^Server = .*#Server = file://$REPO_DIR#" "$PROFILE/p
 grep -A2 '^\[ogos\]' "$PROFILE/pacman.conf"
 
 # 3. Build.
-sudo --preserve-env=SOURCE_DATE_EPOCH mkarchiso -v -w "$WORK" -o "$OUT" "$PROFILE"
+# SOURCE_DATE_EPOCH reaches mkarchiso via sudoers env_keep (see CI.md);
+# without it the ISO label/version just fall back to the build date.
+sudo mkarchiso -v -w "$WORK" -o "$OUT" "$PROFILE"
 sudo chown -R "$(id -u):$(id -g)" "$OUT"
 
 iso="$(find "$OUT" -maxdepth 1 -name '*.iso' | head -1)"

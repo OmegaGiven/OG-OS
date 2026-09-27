@@ -33,8 +33,9 @@ runner is itself a VM) and ~40 GB free disk.
 2. A dedicated non-root user (makepkg refuses root) in the `kvm` group,
    with passwordless sudo for the ISO steps, e.g. `/etc/sudoers.d/ogos-runner`:
    `runner ALL=(root) NOPASSWD: /usr/bin/pacman, /usr/bin/mkarchiso, /usr/bin/rm, /usr/bin/chown`
-   (`pacman` because `build-repo.sh` runs `makepkg --syncdeps` to install
-   each package's dependencies).
+   plus `Defaults!/usr/bin/mkarchiso env_keep += "SOURCE_DATE_EPOCH"` so ISO
+   labels come from the commit date (`pacman` because `build-repo.sh`
+   installs the packages' build dependencies).
    That is effectively root (mkarchiso needs it anyway), so the real
    isolation boundary is the machine: use a **dedicated VM** for the
    runner, not a box with anything else on it.
