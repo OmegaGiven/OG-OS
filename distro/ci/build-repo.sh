@@ -43,12 +43,36 @@ if [ -n "${OGOS_SIGN_KEY:-}" ]; then
     SIGN_ARGS=(--sign --key "$OGOS_SIGN_KEY")
 fi
 
+# Build dependencies. Some packages depend on others built here (og-apps
+# needs yay), which no Arch repo can provide, so `makepkg --syncdeps`
+# can't be used. Instead install everything the PKGBUILDs need from the
+# Arch repos up front — minus our own package names — and build with
+# --nodeps. sudo is only invoked if something is actually missing.
+echo "==> Resolving build dependencies"
+own=()
+deps=()
+for p in "${PACKAGES[@]}"; do
+    srcinfo="$(cd "$PKGBUILDS_DIR/$p" && makepkg --printsrcinfo)"
+    while read -r name; do own+=("$name"); done < <(awk -F' = ' '/^pkgname = /{print $2}' <<< "$srcinfo")
+    while read -r dep; do deps+=("$dep"); done < <(awk -F' = ' '/^\t(depends|makedepends) = /{print $2}' <<< "$srcinfo")
+done
+external=()
+for d in "${deps[@]}"; do
+    name="${d%%[<>=]*}"
+    [[ " ${own[*]} " == *" $name "* ]] || external+=("$d")
+done
+mapfile -t missing < <(pacman -T "${external[@]}" || true)
+if [ "${#missing[@]}" -gt 0 ]; then
+    echo "    installing: ${missing[*]}"
+    sudo pacman -S --needed --noconfirm --asdeps "${missing[@]}"
+fi
+
 echo "==> Building ${#PACKAGES[@]} packages (src=$OGOS_SRC ver=$OGOS_PKGVER signed=${OGOS_SIGN_KEY:+yes})"
 for p in "${PACKAGES[@]}"; do
     echo "--- $p ---"
     dir="$PKGBUILDS_DIR/$p"
     rm -rf "$dir/src" "$dir/pkg" "$dir"/*.pkg.tar.zst "$dir"/*.pkg.tar.zst.sig 2>/dev/null || true
-    ( cd "$dir" && makepkg -f --syncdeps --noconfirm --skipchecksums "${SIGN_ARGS[@]}" )
+    ( cd "$dir" && makepkg -f --nodeps --noconfirm --skipchecksums "${SIGN_ARGS[@]}" )
     cp "$dir"/*.pkg.tar.zst "$OUT/"
     if [ -n "${OGOS_SIGN_KEY:-}" ]; then
         cp "$dir"/*.pkg.tar.zst.sig "$OUT/"
