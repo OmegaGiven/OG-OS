@@ -255,11 +255,37 @@ class GuestSession:
     def press_enter(self) -> None:
         self.key("28:1", "28:0")
 
-    def login_greeter(self, password: str) -> None:
+    def wait_for_greeter_prompt(self, timeout: int = 120) -> None:
+        """Blocks until lightdm has asked the greeter for a password.
+        Typing any earlier loses the keystrokes — seen on the (slower,
+        nested-KVM) CI runner, where ydotoold was up well before the
+        greeter's password field was."""
+        sudo = f"echo {self.password} | sudo -S -p ''"
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            r = self.ssh(f"{sudo} grep -q 'Prompt greeter' /var/log/lightdm/lightdm.log")
+            if r.returncode == 0:
+                return
+            time.sleep(2)
+        raise TimeoutError("lightdm never prompted the greeter for a password")
+
+    def login_greeter(self, password: str, attempts: int = 3) -> None:
         """Types the password at lightdm's greeter (username is already
-        selected — single-user live ISO) and hits Enter."""
-        self.type_text(password)
-        self.press_enter()
+        selected — single-user live ISO) and hits Enter, retrying if no
+        sway session shows up. Waits for the greeter's password prompt
+        first, plus a moment for the new ydotool input device to be picked
+        up by the greeter's X server."""
+        self.wait_for_greeter_prompt()
+        time.sleep(3)
+        for attempt in range(1, attempts + 1):
+            self.type_text(password)
+            self.press_enter()
+            try:
+                self.wait_for_sway_socket(timeout=20)
+                return
+            except TimeoutError:
+                print(f"  no session after greeter login attempt {attempt}/{attempts}")
+        raise TimeoutError("greeter login never produced a sway session")
 
     # --- ground truth: window tree ---
 
