@@ -32,5 +32,5 @@ build() {
 }
 
 package() {
-  install -Dm755 "$srcdir/OG-toolkit/target/release/og-files" "$pkgdir/usr/bin/og-files"
+  install -Dm755 "${CARGO_TARGET_DIR:-$srcdir/OG-toolkit/target}/release/og-files" "$pkgdir/usr/bin/og-files"
 }

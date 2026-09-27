@@ -29,7 +29,7 @@ build() {
 }
 
 package() {
-  install -Dm755 "$srcdir/OG-toolkit/target/release/og-settings" "$pkgdir/usr/bin/og-settings"
+  install -Dm755 "${CARGO_TARGET_DIR:-$srcdir/OG-toolkit/target}/release/og-settings" "$pkgdir/usr/bin/og-settings"
 
   # VPN split-tunnel helper: root-owned, group-inaccessible-to-write
   # (750, root:root — NOT ~/.local/bin, which a normal user can edit; a

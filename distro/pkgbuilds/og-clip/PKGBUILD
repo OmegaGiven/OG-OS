@@ -28,5 +28,5 @@ build() {
 }
 
 package() {
-  install -Dm755 "$srcdir/OG-toolkit/target/release/og-clip" "$pkgdir/usr/bin/og-clip"
+  install -Dm755 "${CARGO_TARGET_DIR:-$srcdir/OG-toolkit/target}/release/og-clip" "$pkgdir/usr/bin/og-clip"
 }

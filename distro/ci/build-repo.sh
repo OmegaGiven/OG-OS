@@ -15,6 +15,8 @@
 #                  repo database are signed with it (the key must already
 #                  be in the gpg keyring). Unset = unsigned repo.
 #   OGOS_PACKAGES  space-separated subset to build (default: all).
+#   CARGO_TARGET_DIR  shared cargo build dir (default:
+#                  ~/.cache/ogos-build/cargo-target, reused across runs).
 set -euo pipefail
 
 DISTRO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -66,6 +68,13 @@ if [ "${#missing[@]}" -gt 0 ]; then
     echo "    installing: ${missing[*]}"
     sudo pacman -S --needed --noconfirm --asdeps "${missing[@]}"
 fi
+
+# One cargo target dir shared by every package (and kept between runs):
+# each PKGBUILD otherwise compiles the entire dependency graph from
+# scratch in its own srcdir. PKGBUILDs install from $CARGO_TARGET_DIR
+# when it's set.
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/ogos-build/cargo-target}"
+mkdir -p "$CARGO_TARGET_DIR"
 
 echo "==> Building ${#PACKAGES[@]} packages (src=$OGOS_SRC ver=$OGOS_PKGVER signed=${OGOS_SIGN_KEY:+yes})"
 for p in "${PACKAGES[@]}"; do

@@ -35,6 +35,6 @@ build() {
 }
 
 package() {
-  install -Dm755 "$srcdir/og-links/target/release/og-links" "$pkgdir/usr/bin/og-links"
+  install -Dm755 "${CARGO_TARGET_DIR:-$srcdir/og-links/target}/release/og-links" "$pkgdir/usr/bin/og-links"
   install -Dm644 "$srcdir/og-links.service" "$pkgdir/usr/lib/systemd/user/og-links.service"
 }
