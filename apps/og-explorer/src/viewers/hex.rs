@@ -244,6 +244,8 @@ impl Lru {
 // -------------------------------------------------------------------- state
 
 pub struct State {
+    /// selection panel beside the rows (wide) or underneath (narrow)
+    beside: bool,
     path: PathBuf,
     len: u64,
     cache: Lru,
@@ -276,6 +278,7 @@ pub enum Msg {
 impl State {
     pub fn new(o: Opened) -> (Self, Task<Msg>) {
         let mut s = Self {
+            beside: false,
             path: o.path,
             len: o.len,
             cache: Lru::new(CACHE_CHUNKS),
@@ -368,6 +371,10 @@ impl State {
         match msg {
             Msg::Scrolled(v) => {
                 self.vp = Vp::from(v);
+                // decide on the full width (rows + panel when beside) so the
+                // layout doesn't flip-flop at the threshold
+                let total = self.vp.width + if self.beside { 198.0 } else { 0.0 };
+                self.beside = total > 900.0;
                 (self.request(), None)
             }
             Msg::Loaded(idx, r) => {
@@ -508,17 +515,18 @@ impl State {
             } else {
                 button(text("Find next").size(12)).on_press(Msg::FindNext)
             },
-            Space::with_width(Length::Fill),
-            text(format!(
-                "{} bytes ({}) · read-only",
-                self.len,
-                crate::fsops::human_size(self.len)
-            ))
-            .size(12)
-            .color(theme::MUTED),
         ]
         .spacing(6)
-        .align_y(iced::Alignment::Center);
+        .align_y(iced::Alignment::Center)
+        // wraps instead of crushing labels when the viewer is narrow
+        .wrap();
+        let size = text(format!(
+            "{} bytes ({}) · read-only",
+            self.len,
+            crate::fsops::human_size(self.len)
+        ))
+        .size(12)
+        .color(theme::MUTED);
 
         let digits = (64 - self.len.max(1).leading_zeros()).div_ceil(4).max(8) as usize;
         let list = virtual_column(self.rows(), ROW_H, self.vp, |r| {
@@ -536,9 +544,14 @@ impl State {
         } else {
             list.into()
         };
-        column![bar, row![body, self.side()].spacing(8)]
-            .spacing(6)
-            .into()
+        // the byte rows need ~720 px; below that the selection panel moves
+        // underneath instead of squeezing the rows
+        let main: Element<'_, Msg> = if self.beside {
+            row![body, self.side(true)].spacing(8).into()
+        } else {
+            column![body, self.side(false)].spacing(6).into()
+        };
+        column![bar, size, main].spacing(6).into()
     }
 
     fn row_el(&self, r: u64, digits: usize) -> Element<'_, Msg> {
@@ -586,7 +599,7 @@ impl State {
         .into()
     }
 
-    fn side(&self) -> Element<'_, Msg> {
+    fn side(&self, beside: bool) -> Element<'_, Msg> {
         let mono = |s: String| text(s).size(12).font(Font::MONOSPACE);
         let mut col = column![text("Selection").size(12).color(theme::MUTED)].spacing(3);
         match self.sel {
@@ -629,12 +642,12 @@ impl State {
         if let Some(e) = &self.error {
             col = col.push(text(format!("Read error: {e}")).size(11));
         }
-        container(col)
-            .width(190)
-            .height(Length::Fill)
-            .padding(8)
-            .style(theme::panel)
-            .into()
+        let c = container(col).padding(8).style(theme::panel);
+        if beside {
+            c.width(190).height(Length::Fill).into()
+        } else {
+            c.width(Length::Fill).into()
+        }
     }
 
     /// Unsaved edits exist (tab close asks first). Read-only: never.
