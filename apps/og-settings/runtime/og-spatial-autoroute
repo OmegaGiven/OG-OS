@@ -20,6 +20,10 @@ const SINK = 'effect_input.og-spatial';
 const HOME = os.homedir();
 const MODE_F = `${HOME}/.local/state/spatial-mode`;
 const PRESET_F = `${HOME}/.local/state/spatial-preset`;
+// execSync runs under /bin/sh, which never has ~/.local/bin on PATH (same
+// gotcha as sway/waybar) — always call this by absolute path or every
+// invocation below silently no-ops with "command not found".
+const SPATIAL = `${HOME}/.local/bin/spatial`;
 
 const sh = (c) => { try { return execSync(c, { encoding: 'utf8', timeout: 8000 }); } catch { return ''; } };
 const pactlJSON = (what) => { try { return JSON.parse(sh(`pactl -f json list ${what}`)); } catch { return []; } };
@@ -29,7 +33,7 @@ const readMode = () => { try { return mode(); } catch { return 'auto'; } };
 
 function realDefault() {
   // the device the HRTF chain is pinned to, else the live default, else first real sink
-  const pinned = sh('spatial _hw').trim();
+  const pinned = sh(`${SPATIAL} _hw`).trim();
   if (pinned && pinned !== SINK) return pinned;
   const def = sh('pactl get-default-sink').trim();
   if (def && def !== SINK) return def;
@@ -43,7 +47,7 @@ function sinkPresent() {
 
 function ensureSink() {
   if (sinkPresent()) return true;
-  sh(`spatial load ${fs.existsSync(PRESET_F) ? fs.readFileSync(PRESET_F, 'utf8').trim() : 'atmos'}`);
+  sh(`${SPATIAL} load ${fs.existsSync(PRESET_F) ? fs.readFileSync(PRESET_F, 'utf8').trim() : 'atmos'}`);
   for (let i = 0; i < 15; i++) {
     if (sinkPresent()) return true;
     execSync('sleep 0.2');
@@ -51,8 +55,76 @@ function ensureSink() {
   return false;
 }
 
+// ---- follow the headset ----------------------------------------------------
+// The headset plugs into one of two places: the onboard front jack (has jack
+// sense) or the ATR USB mic's monitor jack (no sense, "availability unknown").
+// WirePlumber turns the onboard card's profile OFF whenever the front jack
+// reads unplugged and does not reliably turn it back on, so the default kept
+// collapsing onto whatever sink was left and streams (Brave) followed it.
+// We own that decision instead: wake the onboard card when its headphone jack
+// is live, rank the outputs, and on a plug/unplug *transition* make the best
+// one default, move stereo streams to it and repin the HRTF chain. Between
+// transitions the default is left alone so a manual pick (og-settings "Set
+// Default") sticks.
+let lastPreferred = null;
+
+const hpLive = (ports) => (ports || []).some((p) =>
+  /headphones/.test(p.name) && p.availability === 'available');
+
+function wakeOnboard() {
+  for (const c of pactlJSON('cards')) {
+    if (!c.name.startsWith('alsa_card.pci-') || c.active_profile !== 'off') continue;
+    const hp = c.ports && c.ports['analog-output-headphones'];
+    if (!hp || hp.availability !== 'available') continue;
+    if (!(c.profiles && c.profiles['output:analog-stereo'])) continue;
+    try { execFileSync('pactl', ['set-card-profile', c.name, 'output:analog-stereo']); } catch {}
+  }
+}
+
+function preferredSink() {
+  // 3: onboard analog with headphones plugged in
+  // 2: any USB analog output (ATR monitor jack, G935, ...)
+  // 1: anything else real (HDMI monitor speakers)
+  // 0: onboard analog with nothing plugged in
+  const score = (s) => {
+    if (s.name.startsWith('effect_') || !s.name.startsWith('alsa_output.')) return -1;
+    const analog = /analog/.test(s.name);
+    if (s.name.startsWith('alsa_output.pci-') && analog) return hpLive(s.ports) ? 3 : 0;
+    if (s.name.startsWith('alsa_output.usb-') && analog) return 2;
+    return 1;
+  };
+  const ranked = pactlJSON('sinks').map((s) => [score(s), s.name]).filter(([n]) => n >= 0);
+  if (!ranked.length) return '';
+  const best = Math.max(...ranked.map(([n]) => n));
+  const top = ranked.filter(([n]) => n === best).map(([, name]) => name);
+  const def = sh('pactl get-default-sink').trim();
+  return top.includes(def) ? def : top[0];
+}
+
+function followHeadset(m) {
+  wakeOnboard();
+  const want = preferredSink();
+  if (!want || want === lastPreferred) return;
+  lastPreferred = want;
+
+  if (m !== 'always') {
+    try { execFileSync('pactl', ['set-default-sink', want]); } catch {}
+    try { execFileSync('pw-metadata', ['0', 'default.configured.audio.sink', `{ "name": "${want}" }`]); } catch {}
+  }
+  if (m !== 'off' && sinkPresent() && sh(`${SPATIAL} _hw`).trim() !== want) {
+    sh(`${SPATIAL} load "" ${want}`);
+  }
+  const sinks = Object.fromEntries(pactlJSON('sinks').map((s) => [s.index, s.name]));
+  for (const si of pactlJSON('sink-inputs')) {
+    const cur = sinks[si.sink] || '';
+    if (cur === SINK || cur === want) continue;
+    try { execFileSync('pactl', ['move-sink-input', String(si.index), want]); } catch {}
+  }
+}
+
 function reroute() {
   const m = readMode();
+  followHeadset(m);
   if (m === 'off') return;
   if (!ensureSink()) return;
   const hw = realDefault();
@@ -95,7 +167,7 @@ const bump = () => { clearTimeout(timer); timer = setTimeout(reroute, 300); };
 const sub = spawn('pactl', ['subscribe'], { stdio: ['ignore', 'pipe', 'ignore'] });
 sub.stdout.on('data', (buf) => {
   for (const line of buf.toString().split('\n')) {
-    if (/on sink-input|on sink\b/.test(line)) bump();
+    if (/on sink-input|on sink\b|on card\b/.test(line)) bump();
   }
 });
 sub.on('exit', () => process.exit(1)); // let systemd restart us
