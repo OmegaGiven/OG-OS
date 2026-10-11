@@ -908,6 +908,8 @@ impl App {
                                         self.start_job(jobs::JobSpec { kind: JobKind::Copy, sources: paths, dest_dir: Some(dest) });
                                     }
                                 }
+                                // Feedback on our own drag-out; nothing to do here.
+                                og_wayland::DropEvent::DragOut(_) => {}
                             }
                         }
                     }

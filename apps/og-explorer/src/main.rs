@@ -7,6 +7,7 @@ mod browse;
 mod config;
 mod details;
 mod devices;
+mod extdnd;
 mod filetype;
 mod fsops;
 mod inspector;

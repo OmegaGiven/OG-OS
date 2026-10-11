@@ -3449,6 +3449,7 @@ dependencies = [
  "notify",
  "og-config",
  "og-theme",
+ "og-wayland",
  "serde",
  "serde_json",
  "tokio",
