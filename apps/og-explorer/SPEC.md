@@ -325,29 +325,46 @@ Test hooks:
 
 ## 6. File-manager features
 
-| Feature | Plan | Phase |
+**Interaction model (built):**
+- **Selection:** press selects (Ctrl toggles, Shift selects a range).
+  Pressing a file opens it in a reusable **preview tab**; a double-click
+  pins the tab or enters/expands a folder.
+- **Context menu:** right-click on items or empty space.
+- **Keyboard:**
+  - arrows / Home / End / PageUp / PageDown, plus type-ahead to jump by name
+  - Enter opens, Backspace or Alt+↑ goes to the parent folder
+  - F2 rename, Del trash, Shift+Del delete permanently
+  - Ctrl+C / X / V clipboard, Ctrl+Z undo, Ctrl+A select all
+  - Ctrl+Shift+N new folder, Ctrl+L editable path, Ctrl+F search
+- **Drag and drop inside the app:** drop on a folder, drive or the Trash.
+  Drop moves; Ctrl copies.
+
+| Feature | How | Status |
 |---|---|---|
-| Copy / move / delete with progress, conflicts, undo | port og-files `jobs.rs` | 1 |
-| Trash | freedesktop trash spec including per-volume `.Trash-$uid` (fixes USB) — `trash` crate or ported helper | 1 |
-| Live refresh | port `watcher.rs` (notify); refresh via Task, never sync | 1 |
-| Thumbnails | images ✅ in-process (`image` crate, disk cache, one worker, grid only); svg via resvg, video frames via GStreamer, PDF first page | 0 ✅ / 2 |
-| Devices | UDisks2 over D-Bus (`zbus`, already in workspace): list, mount on click, unmount/eject, power-off. Event-driven via `InterfacesAdded` signals, not 2 s polling | 1 |
-| Network | list existing cifs/nfs/sshfs/rclone mounts ✅; "Connect to server…" for `smb://` and `sftp://`; never `statvfs` a network mount on the UI thread | 2 |
-| Search | ✅ two-pass live search: instant over loaded tree, then a cancellable background walk streaming append-only results. Later: debounce, search content inside text files, fuzzy match (`nucleo`), user-chosen search roots | 0 ✅ / 2 |
-| Drag & drop | in-app move/copy; inbound drop onto a *specific* folder; drag-out to other apps (port og-wayland with fixes: percent-encoded URIs, clear drag state on compositor handoff, bind before pointer-enter, offer Move as well as Copy) | 1 / 2 |
-| Open with | port `desktop.rs` registry for things we don't handle | 1 |
-| Bookmarks | ✅ JSON in `$XDG_CONFIG_HOME/og-explorer/bookmarks.json`; add via context menu | 0 ✅ / 1 |
-| Context menu | iced overlay widget, not hand-positioned spacers | 1 |
-| Keyboard | Ctrl+S/E/W/B/F ✅; arrow navigation that scrolls into view, type-ahead, Ctrl+L path bar, Ctrl+T, Ctrl+Tab | 1 |
+| Copy / move / trash / delete / restore | `ops.rs`: one thread per job, progress in Details, cancel, conflict dialog (replace / skip / keep both, apply to all), undo stack | ✅ |
+| Trash | freedesktop spec: home trash + per-volume `.Trash-$uid` (works on USB), Trash view with restore / delete / empty | ✅ |
+| Live refresh | `devices::watch_dirs` (notify, debounced) on the folders on screen, restarted when they change | ✅ |
+| Thumbnails | images in-process (grid view); video / PDF thumbnails later | ✅ / 2 |
+| Drives | UDisks2 over D-Bus: listed in Devices, mount on expand, unmount, safe eject (unmounts, locks LUKS, powers off), live updates | ✅ (unlocking LUKS: later) |
+| Network | lists cifs/nfs/sshfs/rclone mounts; "Connect to server…" | ✅ / 2 |
+| Search | instant pass + background walk, append-only, 180 ms pause while typing, optional search inside text files | ✅ (fuzzy: 2) |
+| Large folders | tree, list, grid and search results are virtualized | ✅ |
+| Drag and drop with other apps | `extdnd.rs` + fixed `og-wayland` (og-suite builds) | see §7 |
+| Open with | port og-files `desktop.rs` registry | 2 |
+| Bookmarks | add/remove from the context menu, `bookmarks.json` | ✅ |
+| Activity log | persisted to `$XDG_STATE_HOME/og-explorer/activity.jsonl`, "only this file" filter | ✅ |
+| Icons | bundled Bootstrap Icons font, tinted per file type | ✅ |
 
 ## 7. Standalone vs OG-OS suite
 
 - **Default build:** no `og-*` path dependencies. It uses XDG paths, its own
   palette and its own config. It builds with `cargo build -p og-explorer`
   and could be split into its own repo.
-- **Feature `og-suite` (phase 1):** adds `og-config` and `og-theme` so the
-  theme follows the suite's `~/.config/sway-power/config.json`, plus
-  `og-wayland` for cross-app drag. The distro package builds with this flag.
+- **Feature `og-suite` (built):** adds `og-config` and `og-theme`, so the
+  theme follows the suite's `~/.config/sway-power/config.json` and reloads
+  live when it changes. It also adds `og-wayland` for drag-and-drop with
+  other apps. The distro package and the local install build with
+  `--features og-suite`.
 - **Icons:** bundle an icon font (Lucide or Phosphor TTF via `include_bytes!`).
   Don't depend on Nerd Fonts being installed: og-files shows tofu without
   them. Until then the scaffold uses text tags (DIR, IMG, TBL…) because
@@ -364,9 +381,10 @@ atomic writes. Video never overwrites: it exports a new file.
 
 The bottom panel is therefore an **activity log**: opened, edit mode
 entered, saved over, discarded, exported, errors.
-- Session-only now ✅.
-- Phase 1 persists it to `$XDG_STATE_HOME/og-explorer/activity.jsonl` and
-  adds a per-file filter, so selecting a file shows *its* history.
+- Persisted to `$XDG_STATE_HOME/og-explorer/activity.jsonl` (last 2000
+  entries) ✅.
+- "Only this file" filter, so selecting a file shows *its* history ✅.
+- Running file jobs show here with progress bars and Cancel ✅.
 - Optional later: show `git log` for files inside a repo, and btrfs/snapper
   snapshots where the volume has them (OG-OS set those up 2026-09-08). These
   are read-only views of history that already exists, not new copies.
@@ -386,17 +404,17 @@ entered, saved over, discarded, exported, errors.
 - [x] inspector metadata, details activity log
 - [x] placeholders naming each planned backend
 
-**Phase 1: replace og-files for daily use**
-- [ ] port jobs, watcher, desktop, trash (per-volume)
-- [ ] virtualize list, grid, tree and search results (10k+ rows)
-- [ ] UDisks2 devices via zbus (mount, unmount, eject)
-- [ ] context menu, rename, new folder, delete, bookmarks add/remove
-- [ ] keyboard navigation, path bar, search debounce + content search
-- [ ] drag-and-drop in and out (fixed og-wayland)
-- [ ] `og-suite` feature, bundled icon font, persisted per-file activity log
-- [ ] take over the `og-files` name, archive the old crate
-- [ ] unit tests for fsops, natural sort, CSV parser, tree rows; one headless
-      `update()` test per component
+**Phase 1: replace og-files for daily use ✅ (2026-10-11)**
+- [x] file-ops engine (jobs, conflicts, cancel, undo) and freedesktop trash incl. per-volume
+- [x] virtualized tree / list / grid / search results
+- [x] UDisks2 drives via zbus (mount, unmount, eject, live updates)
+- [x] context menu, rename, new folder / file, delete, bookmarks, copy path, combine images into PDF
+- [x] selection model, preview tabs, keyboard navigation, type-ahead, path bar, search pause + content search
+- [x] drag and drop inside the app; with other apps behind `og-suite`
+- [x] `og-suite` feature (suite palette with live reload), bundled icons, persisted per-file activity log
+- [x] confirm dialogs (delete, empty trash, close unsaved tab), selectable read-only text
+- [ ] take over the `og-files` name (waiting on the user)
+- [x] tests: ops, devices, selection / drag state, plus everything from phase 0 (99+)
 
 **Phase 2: media and docs**
 - [ ] audio (symphonia + cpal, waveform, tags)
