@@ -13,6 +13,9 @@ pub struct Tab {
     pub kind: Kind,
     title: String,
     viewer: Viewer,
+    /// single-click preview: replaced by the next preview, pinned by a
+    /// double-click or by editing
+    preview: bool,
 }
 
 #[derive(Default)]
@@ -31,6 +34,8 @@ pub enum Msg {
 
 pub enum Event {
     Status(String),
+    /// closing this tab would lose unsaved changes — ask first
+    ConfirmClose(u64, String),
     /// active tab changed (or closed to nothing) — inspector/details follow
     Focus(Option<(PathBuf, Kind)>),
 }
@@ -50,21 +55,34 @@ impl Tabs {
         Event::Focus(self.active().map(|t| (t.path.clone(), t.kind)))
     }
 
-    pub fn open(&mut self, path: PathBuf, kind: Kind) -> (Task<Msg>, Event) {
-        if let Some(t) = self.tabs.iter().find(|t| t.path == path) {
+    /// Open `path`. `pin` false = preview tab (reused by the next preview
+    /// unless it has unsaved work); true = a normal tab.
+    pub fn open(&mut self, path: PathBuf, kind: Kind, pin: bool) -> (Task<Msg>, Event) {
+        if let Some(t) = self.tabs.iter_mut().find(|t| t.path == path) {
+            if pin {
+                t.preview = false;
+            }
             self.active = Some(t.id);
             return (Task::none(), self.focus_event());
         }
         let id = self.next_id;
         self.next_id += 1;
-        let title = title_for(&path);
-        self.tabs.push(Tab {
+        let tab = Tab {
             id,
             path: path.clone(),
             kind,
-            title,
+            title: title_for(&path),
             viewer: Viewer::Loading,
-        });
+            preview: !pin,
+        };
+        let reusable = self
+            .tabs
+            .iter()
+            .position(|t| t.preview && !t.viewer.is_dirty() && t.viewer.is_editing() != Some(true));
+        match (pin, reusable) {
+            (false, Some(i)) => self.tabs[i] = tab,
+            _ => self.tabs.push(tab),
+        }
         self.active = Some(id);
         let task = viewers::load(path, kind).map(move |m| Msg::Viewer(id, m));
         (task, self.focus_event())
@@ -78,11 +96,14 @@ impl Tabs {
     fn close(&mut self, id: u64) -> Option<Event> {
         let idx = self.tabs.iter().position(|t| t.id == id)?;
         if self.tabs[idx].viewer.is_dirty() {
-            // TODO(phase 1): confirm dialog instead of refusing
-            return Some(Event::Status(
-                "Unsaved changes: Save (Ctrl+S) or Discard before closing".into(),
-            ));
+            return Some(Event::ConfirmClose(id, self.tabs[idx].title.clone()));
         }
+        self.force_close(id)
+    }
+
+    /// Close without asking (unsaved changes are dropped).
+    pub fn force_close(&mut self, id: u64) -> Option<Event> {
+        let idx = self.tabs.iter().position(|t| t.id == id)?;
         self.tabs.remove(idx);
         if self.active == Some(id) {
             self.active = self
@@ -106,6 +127,7 @@ impl Tabs {
             return Task::none();
         };
         let id = tab.id;
+        tab.preview = false;
         tab.viewer.toggle_edit().map(move |m| Msg::Viewer(id, m))
     }
 
@@ -121,6 +143,9 @@ impl Tabs {
                     return (Task::none(), None); // tab closed while loading
                 };
                 let (task, ev) = tab.viewer.update(&tab.path, m);
+                if tab.viewer.is_dirty() || tab.viewer.is_editing() == Some(true) {
+                    tab.preview = false; // work in progress: never replace it
+                }
                 let ev = ev.map(|e| match e {
                     viewers::Event::Status(s) => Event::Status(s),
                     viewers::Event::Renamed(p) => {
@@ -143,14 +168,22 @@ impl Tabs {
                 _ => "",
             };
             row![
-                button(text(format!("{dirty}{}", t.title)).size(13))
-                    .on_press(Msg::Select(t.id))
-                    .style(if active {
-                        button::primary
+                button({
+                    let label = text(format!("{dirty}{}", t.title)).size(13);
+                    // preview tabs read lighter until pinned
+                    if t.preview {
+                        label.color(crate::theme::MUTED)
                     } else {
-                        button::secondary
-                    })
-                    .padding([4, 10]),
+                        label
+                    }
+                })
+                .on_press(Msg::Select(t.id))
+                .style(if active {
+                    button::primary
+                } else {
+                    button::secondary
+                })
+                .padding([4, 10]),
                 button(text("×").size(13))
                     .on_press(Msg::Close(t.id))
                     .style(button::text)

@@ -31,7 +31,6 @@
 //! `start` treats a Move without a destination as "move each source back to
 //! the original recorded for it"; sources with no recorded original fail with
 //! a per-item error. Entries are consumed when used.
-#![cfg_attr(not(test), allow(dead_code))]
 
 use iced::futures::channel::mpsc::{unbounded, UnboundedReceiver, UnboundedSender};
 use iced::futures::Stream;
@@ -119,12 +118,30 @@ pub struct Summary {
 #[derive(Debug, Clone, PartialEq)]
 pub enum JobEvent {
     /// totals known (after a quick scan); `label` e.g. "Copying 3 items to Pictures"
-    Started { id: JobId, label: String, total_items: usize, total_bytes: u64 },
-    Progress { id: JobId, done_items: usize, done_bytes: u64, current: PathBuf },
+    Started {
+        id: JobId,
+        label: String,
+        total_items: usize,
+        total_bytes: u64,
+    },
+    Progress {
+        id: JobId,
+        done_items: usize,
+        done_bytes: u64,
+        current: PathBuf,
+    },
     /// the job is paused until `JobControl::resolve` is called
-    Conflict { id: JobId, src: PathBuf, dst: PathBuf },
+    Conflict {
+        id: JobId,
+        src: PathBuf,
+        dst: PathBuf,
+    },
     /// last event of every job; `undo` is None for Delete or when nothing changed
-    Finished { id: JobId, result: Result<Summary, String>, undo: Option<UndoOp> },
+    Finished {
+        id: JobId,
+        result: Result<Summary, String>,
+        undo: Option<UndoOp>,
+    },
 }
 
 /// Handle to steer a running job. Cheap to clone; safe to drop (the job
@@ -176,7 +193,11 @@ pub fn undo_spec(op: &UndoOp) -> JobSpec {
                 dest: None,
             }
         }
-        UndoOp::RemoveCopies(paths) => JobSpec { kind: JobKind::Trash, sources: paths.clone(), dest: None },
+        UndoOp::RemoveCopies(paths) => JobSpec {
+            kind: JobKind::Trash,
+            sources: paths.clone(),
+            dest: None,
+        },
         UndoOp::Untrash(entries) => JobSpec {
             kind: JobKind::Restore,
             sources: entries.iter().map(|e| e.info.clone()).collect(),
@@ -231,7 +252,8 @@ pub fn restore(entry: &TrashEntry) -> Result<PathBuf, String> {
         return Err(format!("“{name}” is no longer in the Trash"));
     }
     if let Some(parent) = entry.original.parent() {
-        fs::create_dir_all(parent).map_err(|e| format!("Can't recreate the original folder: {}", io_msg(&e)))?;
+        fs::create_dir_all(parent)
+            .map_err(|e| format!("Can't recreate the original folder: {}", io_msg(&e)))?;
     }
     match fs::rename(&entry.trashed, &entry.original) {
         Ok(()) => {}
@@ -240,7 +262,12 @@ pub fn restore(entry: &TrashEntry) -> Result<PathBuf, String> {
                 let _ = remove_any(&entry.original);
                 return Err(io_msg(&e));
             }
-            remove_any(&entry.trashed).map_err(|e| format!("Restored a copy, but couldn't remove it from the Trash: {}", io_msg(&e)))?;
+            remove_any(&entry.trashed).map_err(|e| {
+                format!(
+                    "Restored a copy, but couldn't remove it from the Trash: {}",
+                    io_msg(&e)
+                )
+            })?;
         }
         Err(e) => return Err(io_msg(&e)),
     }
@@ -260,7 +287,13 @@ pub fn new_folder(dir: &Path, name: &str) -> Result<PathBuf, String> {
 
 /// Create an empty file `name` in `dir` (unique like new_folder).
 pub fn new_file(dir: &Path, name: &str) -> Result<PathBuf, String> {
-    create_unique(dir, name, |p| OpenOptions::new().write(true).create_new(true).open(p).map(|_| ()))
+    create_unique(dir, name, |p| {
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(p)
+            .map(|_| ())
+    })
 }
 
 /// Rename within the same folder. Refuses empty names, '/' and existing
@@ -270,7 +303,8 @@ pub fn rename(path: &Path, new_name: &str) -> Result<PathBuf, String> {
     let (Some(parent), Some(cur)) = (path.parent(), path.file_name()) else {
         return Err("Can't rename this item".into());
     };
-    let meta = fs::symlink_metadata(path).map_err(|_| format!("“{}” no longer exists", cur.to_string_lossy()))?;
+    let meta = fs::symlink_metadata(path)
+        .map_err(|_| format!("“{}” no longer exists", cur.to_string_lossy()))?;
     if cur == OsStr::new(new_name) {
         return Ok(path.to_path_buf());
     }
@@ -333,10 +367,26 @@ fn start_with(spec: JobSpec, opts: Opts) -> (JobControl, UnboundedReceiver<JobEv
         .name(format!("ogx-job-{id}"))
         .spawn(move || job.run(spec));
     if spawned.is_err() {
-        let _ = tx.unbounded_send(JobEvent::Started { id, label: "File operation".into(), total_items: 0, total_bytes: 0 });
-        let _ = tx.unbounded_send(JobEvent::Finished { id, result: Err("Couldn't start the job".into()), undo: None });
+        let _ = tx.unbounded_send(JobEvent::Started {
+            id,
+            label: "File operation".into(),
+            total_items: 0,
+            total_bytes: 0,
+        });
+        let _ = tx.unbounded_send(JobEvent::Finished {
+            id,
+            result: Err("Couldn't start the job".into()),
+            undo: None,
+        });
     }
-    (JobControl { id, cancel, answers: atx }, rx)
+    (
+        JobControl {
+            id,
+            cancel,
+            answers: atx,
+        },
+        rx,
+    )
 }
 
 struct Cancelled;
@@ -379,14 +429,27 @@ impl Job {
             });
             JobEvent::Finished { id, result, undo }
         }));
-        let finished = outcome.unwrap_or_else(|_| JobEvent::Finished { id, result: Err("Internal error".into()), undo: None });
+        let finished = outcome.unwrap_or_else(|_| JobEvent::Finished {
+            id,
+            result: Err("Internal error".into()),
+            undo: None,
+        });
         if !started.load(Ordering::SeqCst) {
-            let _ = tx.unbounded_send(JobEvent::Started { id, label: "File operation".into(), total_items: 0, total_bytes: 0 });
+            let _ = tx.unbounded_send(JobEvent::Started {
+                id,
+                label: "File operation".into(),
+                total_items: 0,
+                total_bytes: 0,
+            });
         }
         let _ = tx.unbounded_send(finished);
     }
 
-    fn body(&mut self, spec: &JobSpec, started: &AtomicBool) -> (Result<(), String>, Option<UndoOp>) {
+    fn body(
+        &mut self,
+        spec: &JobSpec,
+        started: &AtomicBool,
+    ) -> (Result<(), String>, Option<UndoOp>) {
         // Restore sources may be .trashinfo or trashed-file paths.
         let entries: Vec<Result<TrashEntry, String>> = if spec.kind == JobKind::Restore {
             spec.sources.iter().map(|p| entry_from_path(p)).collect()
@@ -396,14 +459,23 @@ impl Job {
         let sizes: Vec<(usize, u64)> = if spec.kind == JobKind::Restore {
             entries
                 .iter()
-                .map(|e| e.as_ref().map(|e| scan(&e.trashed, &self.cancel)).unwrap_or((0, 0)))
+                .map(|e| {
+                    e.as_ref()
+                        .map(|e| scan(&e.trashed, &self.cancel))
+                        .unwrap_or((0, 0))
+                })
                 .collect()
         } else {
             spec.sources.iter().map(|p| scan(p, &self.cancel)).collect()
         };
         let total_items = sizes.iter().map(|s| s.0).sum();
         let total_bytes = sizes.iter().map(|s| s.1).sum();
-        self.send(JobEvent::Started { id: self.id, label: label(spec), total_items, total_bytes });
+        self.send(JobEvent::Started {
+            id: self.id,
+            label: label(spec),
+            total_items,
+            total_bytes,
+        });
         started.store(true, Ordering::SeqCst);
         if self.cancelled() {
             return (Err(CANCELLED.into()), None);
@@ -422,7 +494,8 @@ impl Job {
                         break;
                     }
                 }
-                let undo = (!self.created.is_empty()).then(|| UndoOp::RemoveCopies(self.created.clone()));
+                let undo =
+                    (!self.created.is_empty()).then(|| UndoOp::RemoveCopies(self.created.clone()));
                 (res, undo)
             }
             JobKind::Move => {
@@ -484,7 +557,10 @@ impl Job {
                     }
                     self.advance(size.0, size.1);
                 }
-                (res, (!trashed.is_empty()).then_some(UndoOp::Untrash(trashed)))
+                (
+                    res,
+                    (!trashed.is_empty()).then_some(UndoOp::Untrash(trashed)),
+                )
             }
             JobKind::Delete => {
                 let mut res = Ok(());
@@ -524,7 +600,10 @@ impl Job {
                     }
                     self.advance(size.0, size.1);
                 }
-                (res, (!restored.is_empty()).then_some(UndoOp::RemoveCopies(restored)))
+                (
+                    res,
+                    (!restored.is_empty()).then_some(UndoOp::RemoveCopies(restored)),
+                )
             }
         }
     }
@@ -579,7 +658,11 @@ impl Job {
             return Resolution::Cancel;
         }
         self.tick(true);
-        self.send(JobEvent::Conflict { id: self.id, src: src.to_path_buf(), dst: dst.to_path_buf() });
+        self.send(JobEvent::Conflict {
+            id: self.id,
+            src: src.to_path_buf(),
+            dst: dst.to_path_buf(),
+        });
         let (r, all) = loop {
             match self.answers.recv_timeout(Duration::from_millis(250)) {
                 Ok(a) => break a,
@@ -597,7 +680,13 @@ impl Job {
 
     /// Resolve an existing `target`: Ok(Some(path to write)) or Ok(None)
     /// when the item is skipped/failed (already accounted for).
-    fn resolve_conflict(&mut self, src: &Path, src_abs: &Path, target: PathBuf, size: (usize, u64)) -> Result<Option<PathBuf>, Cancelled> {
+    fn resolve_conflict(
+        &mut self,
+        src: &Path,
+        src_abs: &Path,
+        target: PathBuf,
+        size: (usize, u64),
+    ) -> Result<Option<PathBuf>, Cancelled> {
         match self.ask(src, &target) {
             Resolution::Cancel => Err(Cancelled),
             Resolution::Skip => {
@@ -765,7 +854,10 @@ impl Job {
         let mut buf = vec![0u8; (meta.len() as usize).clamp(8 * 1024, CHUNK)];
         loop {
             if self.cancelled() {
-                return Err(CopyErr { io: None, created: true });
+                return Err(CopyErr {
+                    io: None,
+                    created: true,
+                });
             }
             let n = match input.read(&mut buf) {
                 Ok(0) => break,
@@ -791,7 +883,13 @@ impl Job {
     // ── move ──
 
     /// Move `src` to exactly `target`. `back` = undo mode (recreate parents).
-    fn move_item(&mut self, src: &Path, target: PathBuf, size: (usize, u64), back: bool) -> Result<Option<(PathBuf, PathBuf)>, Cancelled> {
+    fn move_item(
+        &mut self,
+        src: &Path,
+        target: PathBuf,
+        size: (usize, u64),
+        back: bool,
+    ) -> Result<Option<(PathBuf, PathBuf)>, Cancelled> {
         self.check()?;
         self.current = src.to_path_buf();
         let meta = match fs::symlink_metadata(src) {
@@ -810,7 +908,10 @@ impl Job {
         if back {
             if let Some(p) = target.parent() {
                 if let Err(e) = fs::create_dir_all(p) {
-                    self.fail(src, &format!("can't recreate the original folder: {}", io_msg(&e)));
+                    self.fail(
+                        src,
+                        &format!("can't recreate the original folder: {}", io_msg(&e)),
+                    );
                     self.advance(size.0, size.1);
                     return Ok(None);
                 }
@@ -870,7 +971,10 @@ impl Job {
             }
             Ok(true) => {
                 if let Err(e) = remove_any(&src_abs) {
-                    self.fail(src, &format!("copied, but couldn't remove the original: {}", io_msg(&e)));
+                    self.fail(
+                        src,
+                        &format!("copied, but couldn't remove the original: {}", io_msg(&e)),
+                    );
                 }
                 self.items_done += 1;
                 Ok(Some((target, src_abs)))
@@ -888,7 +992,10 @@ struct CopyErr {
 
 impl CopyErr {
     fn io(e: io::Error, created: bool) -> Self {
-        CopyErr { io: Some(e), created }
+        CopyErr {
+            io: Some(e),
+            created,
+        }
     }
 }
 
@@ -909,7 +1016,9 @@ fn scan(path: &Path, cancel: &AtomicBool) -> (usize, u64) {
         if cancel.load(Ordering::Relaxed) {
             break;
         }
-        let Ok(m) = fs::symlink_metadata(&p) else { continue };
+        let Ok(m) = fs::symlink_metadata(&p) else {
+            continue;
+        };
         items += 1;
         if m.is_dir() {
             if let Ok(rd) = fs::read_dir(&p) {
@@ -942,12 +1051,15 @@ fn label(spec: &JobSpec) -> String {
 
 fn move_back_registry() -> MutexGuard<'static, HashMap<PathBuf, PathBuf>> {
     static REG: OnceLock<Mutex<HashMap<PathBuf, PathBuf>>> = OnceLock::new();
-    REG.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner())
+    REG.get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
 }
 
 fn take_original(src: &Path) -> Option<PathBuf> {
     let mut reg = move_back_registry();
-    reg.remove(src).or_else(|| absolute_nofollow(src).and_then(|a| reg.remove(&a)))
+    reg.remove(src)
+        .or_else(|| absolute_nofollow(src).and_then(|a| reg.remove(&a)))
 }
 
 // ───────────────────────────── trash ─────────────────────────────
@@ -968,10 +1080,13 @@ fn trash_home() -> Option<PathBuf> {
     }
     #[cfg(not(test))]
     {
-        let xdg = std::env::var_os("XDG_DATA_HOME").map(PathBuf::from).filter(|p| p.is_absolute());
+        let xdg = std::env::var_os("XDG_DATA_HOME")
+            .map(PathBuf::from)
+            .filter(|p| p.is_absolute());
         let data = match xdg {
             Some(p) => p,
-            None => PathBuf::from(std::env::var_os("HOME").filter(|h| !h.is_empty())?).join(".local/share"),
+            None => PathBuf::from(std::env::var_os("HOME").filter(|h| !h.is_empty())?)
+                .join(".local/share"),
         };
         Some(data.join("Trash"))
     }
@@ -979,7 +1094,9 @@ fn trash_home() -> Option<PathBuf> {
 
 /// Device of `p` or of its nearest existing ancestor.
 fn nearest_dev(p: &Path) -> Option<u64> {
-    p.ancestors().find_map(|a| fs::metadata(a).ok()).map(|m| m.dev())
+    p.ancestors()
+        .find_map(|a| fs::metadata(a).ok())
+        .map(|m| m.dev())
 }
 
 /// Topmost ancestor of `start` still on device `dev`.
@@ -1043,7 +1160,12 @@ fn ensure_trash_dirs(root: &Path) -> Result<(), String> {
 
 /// Move `abs` into the trash at `root`. `topdir` = volume mount point for a
 /// volume trash (Path= is then relative to it), None for the home trash.
-fn trash_into(abs: &Path, meta: &fs::Metadata, root: &Path, topdir: Option<&Path>) -> Result<TrashEntry, String> {
+fn trash_into(
+    abs: &Path,
+    meta: &fs::Metadata,
+    root: &Path,
+    topdir: Option<&Path>,
+) -> Result<TrashEntry, String> {
     ensure_trash_dirs(root)?;
     let name = abs.file_name().ok_or("Can't move this item to the Trash")?;
     let recorded = match topdir {
@@ -1051,17 +1173,34 @@ fn trash_into(abs: &Path, meta: &fs::Metadata, root: &Path, topdir: Option<&Path
         None => abs,
     };
     let deleted_at = format_civil(now_local());
-    let content = format!("[Trash Info]\nPath={}\nDeletionDate={}\n", encode_path(recorded), deleted_at);
-    let size = if meta.is_dir() { scan(abs, &AtomicBool::new(false)).1 } else { meta.len() };
+    let content = format!(
+        "[Trash Info]\nPath={}\nDeletionDate={}\n",
+        encode_path(recorded),
+        deleted_at
+    );
+    let size = if meta.is_dir() {
+        scan(abs, &AtomicBool::new(false)).1
+    } else {
+        meta.len()
+    };
     let (stem, ext) = split_name(name.as_bytes());
     let (base, _) = strip_counter(stem);
     for n in 1..10_000u32 {
-        let cand: OsString = if n == 1 { name.to_os_string() } else { numbered(base, ext, n) };
+        let cand: OsString = if n == 1 {
+            name.to_os_string()
+        } else {
+            numbered(base, ext, n)
+        };
         let mut info_name = cand.clone();
         info_name.push(".trashinfo");
         let info = root.join("info").join(&info_name);
         let trashed = root.join("files").join(&cand);
-        match OpenOptions::new().write(true).create_new(true).mode(0o600).open(&info) {
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&info)
+        {
             Ok(mut f) => {
                 if exists(&trashed) {
                     drop(f);
@@ -1076,9 +1215,19 @@ fn trash_into(abs: &Path, meta: &fs::Metadata, root: &Path, topdir: Option<&Path
                 drop(f);
                 if let Err(e) = fs::rename(abs, &trashed) {
                     let _ = fs::remove_file(&info);
-                    return Err(if is_exdev(&e) { "Can't move this item to the Trash on another drive".into() } else { io_msg(&e) });
+                    return Err(if is_exdev(&e) {
+                        "Can't move this item to the Trash on another drive".into()
+                    } else {
+                        io_msg(&e)
+                    });
                 }
-                return Ok(TrashEntry { trashed, info, original: abs.to_path_buf(), deleted_at, size });
+                return Ok(TrashEntry {
+                    trashed,
+                    info,
+                    original: abs.to_path_buf(),
+                    deleted_at,
+                    size,
+                });
             }
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
             Err(e) => return Err(io_msg(&e)),
@@ -1090,11 +1239,32 @@ fn trash_into(abs: &Path, meta: &fs::Metadata, root: &Path, topdir: Option<&Path
 /// Mount points from /proc/mounts (octal escapes decoded), minus pseudo fs.
 fn mount_points() -> Vec<PathBuf> {
     const PSEUDO: &[&str] = &[
-        "proc", "sysfs", "devtmpfs", "devpts", "cgroup", "cgroup2", "securityfs", "pstore", "bpf", "tracefs",
-        "debugfs", "configfs", "fusectl", "mqueue", "hugetlbfs", "autofs", "efivarfs", "binfmt_misc", "rpc_pipefs",
-        "nsfs", "ramfs", "selinuxfs",
+        "proc",
+        "sysfs",
+        "devtmpfs",
+        "devpts",
+        "cgroup",
+        "cgroup2",
+        "securityfs",
+        "pstore",
+        "bpf",
+        "tracefs",
+        "debugfs",
+        "configfs",
+        "fusectl",
+        "mqueue",
+        "hugetlbfs",
+        "autofs",
+        "efivarfs",
+        "binfmt_misc",
+        "rpc_pipefs",
+        "nsfs",
+        "ramfs",
+        "selinuxfs",
     ];
-    let Ok(text) = fs::read_to_string("/proc/mounts") else { return Vec::new() };
+    let Ok(text) = fs::read_to_string("/proc/mounts") else {
+        return Vec::new();
+    };
     text.lines()
         .filter_map(|l| {
             let mut it = l.split_whitespace();
@@ -1109,8 +1279,13 @@ fn unescape_mount(s: &str) -> Vec<u8> {
     let mut out = Vec::with_capacity(b.len());
     let mut i = 0;
     while i < b.len() {
-        if b[i] == b'\\' && i + 3 < b.len() && b[i + 1..i + 4].iter().all(|c| (b'0'..=b'7').contains(c)) {
-            let v = (b[i + 1] - b'0') as u32 * 64 + (b[i + 2] - b'0') as u32 * 8 + (b[i + 3] - b'0') as u32;
+        if b[i] == b'\\'
+            && i + 3 < b.len()
+            && b[i + 1..i + 4].iter().all(|c| (b'0'..=b'7').contains(c))
+        {
+            let v = (b[i + 1] - b'0') as u32 * 64
+                + (b[i + 2] - b'0') as u32 * 8
+                + (b[i + 3] - b'0') as u32;
             out.push(v as u8);
             i += 4;
         } else {
@@ -1128,7 +1303,10 @@ fn all_trash_roots() -> Vec<PathBuf> {
         return roots; // never look at real trashes from tests
     }
     let uid = current_uid();
-    let mut seen: Vec<PathBuf> = roots.iter().filter_map(|r| fs::canonicalize(r).ok()).collect();
+    let mut seen: Vec<PathBuf> = roots
+        .iter()
+        .filter_map(|r| fs::canonicalize(r).ok())
+        .collect();
     for mp in mount_points() {
         let mut cands = Vec::new();
         if shared_trash_ok(&mp) {
@@ -1136,7 +1314,9 @@ fn all_trash_roots() -> Vec<PathBuf> {
         }
         cands.push(mp.join(format!(".Trash-{uid}")));
         for c in cands {
-            let ok = fs::symlink_metadata(&c).map(|m| m.file_type().is_dir()).unwrap_or(false)
+            let ok = fs::symlink_metadata(&c)
+                .map(|m| m.file_type().is_dir())
+                .unwrap_or(false)
                 && fs::read_dir(c.join("info")).is_ok();
             if !ok {
                 continue;
@@ -1152,7 +1332,9 @@ fn all_trash_roots() -> Vec<PathBuf> {
 }
 
 fn list_root(root: &Path) -> Vec<TrashEntry> {
-    let Ok(rd) = fs::read_dir(root.join("info")) else { return Vec::new() };
+    let Ok(rd) = fs::read_dir(root.join("info")) else {
+        return Vec::new();
+    };
     rd.flatten()
         .filter_map(|e| {
             let p = e.path();
@@ -1183,9 +1365,20 @@ fn entry_from_path(p: &Path) -> Result<TrashEntry, String> {
     let info = root.join("info").join(info_name);
     let trashed = root.join("files").join(&stem);
     let (original, deleted_at) = parse_info(&info, root)?;
-    let meta = fs::symlink_metadata(&trashed).map_err(|_| "The trashed item is missing".to_string())?;
-    let size = if meta.is_dir() { scan(&trashed, &AtomicBool::new(false)).1 } else { meta.len() };
-    Ok(TrashEntry { trashed, info, original, deleted_at, size })
+    let meta =
+        fs::symlink_metadata(&trashed).map_err(|_| "The trashed item is missing".to_string())?;
+    let size = if meta.is_dir() {
+        scan(&trashed, &AtomicBool::new(false)).1
+    } else {
+        meta.len()
+    };
+    Ok(TrashEntry {
+        trashed,
+        info,
+        original,
+        deleted_at,
+        size,
+    })
 }
 
 /// Volume topdir for a trash root (`$top/.Trash-$uid` or `$top/.Trash/$uid`).
@@ -1217,11 +1410,17 @@ fn parse_info(info: &Path, root: &Path) -> Result<(PathBuf, String), String> {
             }
         }
     }
-    let path = path.filter(|p| !p.as_os_str().is_empty()).ok_or("Broken trash info")?;
+    let path = path
+        .filter(|p| !p.as_os_str().is_empty())
+        .ok_or("Broken trash info")?;
     if path.components().any(|c| c == Component::ParentDir) {
         return Err("Broken trash info".into());
     }
-    let original = if path.is_absolute() { path } else { topdir_of(root).join(path) };
+    let original = if path.is_absolute() {
+        path
+    } else {
+        topdir_of(root).join(path)
+    };
     Ok((original, date))
 }
 
@@ -1229,7 +1428,9 @@ fn empty_roots(roots: &[PathBuf]) -> Result<usize, String> {
     let (mut removed, mut failed) = (0usize, 0usize);
     for root in roots {
         for sub in ["files", "info"] {
-            let Ok(rd) = fs::read_dir(root.join(sub)) else { continue };
+            let Ok(rd) = fs::read_dir(root.join(sub)) else {
+                continue;
+            };
             for e in rd.flatten() {
                 match remove_any(&e.path()) {
                     Ok(()) if sub == "files" => removed += 1,
@@ -1241,7 +1442,9 @@ fn empty_roots(roots: &[PathBuf]) -> Result<usize, String> {
         let _ = fs::remove_file(root.join("directorysizes"));
     }
     if failed > 0 {
-        Err(format!("Removed {removed} items; {failed} couldn't be removed"))
+        Err(format!(
+            "Removed {removed} items; {failed} couldn't be removed"
+        ))
     } else {
         Ok(removed)
     }
@@ -1266,7 +1469,9 @@ fn decode_path(s: &str) -> PathBuf {
     let mut i = 0;
     while i < b.len() {
         if b[i] == b'%' && i + 2 < b.len() {
-            let hex = std::str::from_utf8(&b[i + 1..i + 3]).ok().and_then(|h| u8::from_str_radix(h, 16).ok());
+            let hex = std::str::from_utf8(&b[i + 1..i + 3])
+                .ok()
+                .and_then(|h| u8::from_str_radix(h, 16).ok());
             if let Some(v) = hex {
                 out.push(v);
                 i += 3;
@@ -1283,7 +1488,10 @@ fn decode_path(s: &str) -> PathBuf {
 
 /// Local wall-clock seconds since the epoch.
 fn now_local() -> i64 {
-    let t = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
+    let t = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
     t + local_offset(t)
 }
 
@@ -1306,11 +1514,15 @@ fn local_offset(t: i64) -> i64 {
         }
         Err(_) => PathBuf::from("/etc/localtime"),
     };
-    fs::read(file).ok().and_then(|d| tzif_offset(&d, t)).unwrap_or(0)
+    fs::read(file)
+        .ok()
+        .and_then(|d| tzif_offset(&d, t))
+        .unwrap_or(0)
 }
 
 fn tzif_offset(d: &[u8], t: i64) -> Option<i64> {
-    let be32 = |o: usize| -> Option<u32> { Some(u32::from_be_bytes(d.get(o..o + 4)?.try_into().ok()?)) };
+    let be32 =
+        |o: usize| -> Option<u32> { Some(u32::from_be_bytes(d.get(o..o + 4)?.try_into().ok()?)) };
     let counts = |h: usize| -> Option<[usize; 6]> {
         if d.get(h..h + 4)? != b"TZif" {
             return None;
@@ -1364,7 +1576,12 @@ fn format_civil(t: i64) -> String {
     let d = doy - (153 * mp + 2) / 5 + 1;
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = yoe + era * 400 + i64::from(m <= 2);
-    format!("{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}", sod / 3600, sod % 3600 / 60, sod % 60)
+    format!(
+        "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}",
+        sod / 3600,
+        sod % 3600 / 60,
+        sod % 60
+    )
 }
 
 // ───────────────────────────── helpers ─────────────────────────────
@@ -1378,7 +1595,9 @@ fn is_exdev(e: &io::Error) -> bool {
 }
 
 fn display_name(p: &Path) -> String {
-    p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| p.display().to_string())
+    p.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| p.display().to_string())
 }
 
 /// Absolute path without resolving the last component (keeps symlinks).
@@ -1458,7 +1677,11 @@ fn validate_name(name: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn create_unique(dir: &Path, name: &str, make: impl Fn(&Path) -> io::Result<()>) -> Result<PathBuf, String> {
+fn create_unique(
+    dir: &Path,
+    name: &str,
+    make: impl Fn(&Path) -> io::Result<()>,
+) -> Result<PathBuf, String> {
     validate_name(name)?;
     if !fs::metadata(dir).map(|m| m.is_dir()).unwrap_or(false) {
         return Err("Folder not found".into());
@@ -1478,7 +1701,14 @@ fn create_unique(dir: &Path, name: &str, make: impl Fn(&Path) -> io::Result<()>)
 /// extension; common `.tar.*` double extensions stay together.
 fn split_name(name: &[u8]) -> (&[u8], &[u8]) {
     let from = usize::from(name.starts_with(b"."));
-    for de in [&b".tar.gz"[..], b".tar.xz", b".tar.bz2", b".tar.zst", b".tar.lz", b".tar.lzma"] {
+    for de in [
+        &b".tar.gz"[..],
+        b".tar.xz",
+        b".tar.bz2",
+        b".tar.zst",
+        b".tar.lz",
+        b".tar.lzma",
+    ] {
         if name.len() > de.len() + from && name.ends_with(de) {
             let i = name.len() - de.len();
             return (&name[..i], &name[i..]);
@@ -1496,7 +1726,10 @@ fn strip_counter(stem: &[u8]) -> (&[u8], u32) {
         if let Some(open) = inner.windows(2).rposition(|w| w == b" (") {
             let digits = &inner[open + 2..];
             if !digits.is_empty() && digits.len() < 7 && digits.iter().all(u8::is_ascii_digit) {
-                let n: u32 = std::str::from_utf8(digits).ok().and_then(|s| s.parse().ok()).unwrap_or(0);
+                let n: u32 = std::str::from_utf8(digits)
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0);
                 if n >= 2 && open > 0 {
                     return (&stem[..open], n + 1);
                 }
@@ -1526,7 +1759,10 @@ fn unique_in(dir: &Path, name: &OsStr) -> PathBuf {
             return p;
         }
     }
-    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.subsec_nanos()).unwrap_or(0);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or(0);
     dir.join(numbered(base, ext, nanos))
 }
 
@@ -1545,14 +1781,20 @@ mod tests {
 
     /// Private home trash for the whole test process (never the real one).
     pub(super) fn home_trash() -> PathBuf {
-        base().join(format!("home-trash-{}", std::process::id())).join("Trash")
+        base()
+            .join(format!("home-trash-{}", std::process::id()))
+            .join("Trash")
     }
 
     struct Tmp(PathBuf);
     impl Tmp {
         fn new(tag: &str) -> Tmp {
             static N: AtomicU64 = AtomicU64::new(0);
-            let p = base().join(format!("{tag}-{}-{}", std::process::id(), N.fetch_add(1, Ordering::SeqCst)));
+            let p = base().join(format!(
+                "{tag}-{}-{}",
+                std::process::id(),
+                N.fetch_add(1, Ordering::SeqCst)
+            ));
             let _ = fs::remove_dir_all(&p);
             fs::create_dir_all(&p).unwrap();
             Tmp(fs::canonicalize(&p).unwrap())
@@ -1602,14 +1844,31 @@ mod tests {
     }
 
     fn check_protocol(evs: &[JobEvent]) {
-        assert!(matches!(evs.first(), Some(JobEvent::Started { .. })), "{evs:?}");
-        assert_eq!(evs.iter().filter(|e| matches!(e, JobEvent::Started { .. })).count(), 1);
-        assert_eq!(evs.iter().filter(|e| matches!(e, JobEvent::Finished { .. })).count(), 1);
+        assert!(
+            matches!(evs.first(), Some(JobEvent::Started { .. })),
+            "{evs:?}"
+        );
+        assert_eq!(
+            evs.iter()
+                .filter(|e| matches!(e, JobEvent::Started { .. }))
+                .count(),
+            1
+        );
+        assert_eq!(
+            evs.iter()
+                .filter(|e| matches!(e, JobEvent::Finished { .. }))
+                .count(),
+            1
+        );
         let _ = finished(evs);
     }
 
     fn spec(kind: JobKind, sources: Vec<PathBuf>, dest: Option<PathBuf>) -> JobSpec {
-        JobSpec { kind, sources, dest }
+        JobSpec {
+            kind,
+            sources,
+            dest,
+        }
     }
 
     #[test]
@@ -1619,16 +1878,33 @@ mod tests {
         write(&t.p("src/sub/b.txt"), "world!");
         fs::set_permissions(t.p("src/a.txt"), fs::Permissions::from_mode(0o640)).unwrap();
         let old = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000_000);
-        File::options().write(true).open(t.p("src/a.txt")).unwrap().set_modified(old).unwrap();
+        File::options()
+            .write(true)
+            .open(t.p("src/a.txt"))
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
         fs::create_dir(t.p("dst")).unwrap();
 
         let evs = run(spec(JobKind::Copy, vec![t.p("src")], Some(t.p("dst"))));
         check_protocol(&evs);
-        let JobEvent::Started { total_items, total_bytes, ref label, .. } = evs[0] else { unreachable!() };
+        let JobEvent::Started {
+            total_items,
+            total_bytes,
+            ref label,
+            ..
+        } = evs[0]
+        else {
+            unreachable!()
+        };
         assert_eq!((total_items, total_bytes), (4, 11));
         assert!(label.contains("“src”"), "{label}");
         let last_prog = evs.iter().rev().find_map(|e| match e {
-            JobEvent::Progress { done_items, done_bytes, .. } => Some((*done_items, *done_bytes)),
+            JobEvent::Progress {
+                done_items,
+                done_bytes,
+                ..
+            } => Some((*done_items, *done_bytes)),
             _ => None,
         });
         assert_eq!(last_prog, Some((4, 11)));
@@ -1636,7 +1912,10 @@ mod tests {
         let s = res.unwrap();
         assert_eq!((s.items_done, s.bytes_done, s.errors.len()), (1, 11, 0));
         assert_eq!(undo, Some(UndoOp::RemoveCopies(vec![t.p("dst/src")])));
-        assert_eq!(fs::read_to_string(t.p("dst/src/sub/b.txt")).unwrap(), "world!");
+        assert_eq!(
+            fs::read_to_string(t.p("dst/src/sub/b.txt")).unwrap(),
+            "world!"
+        );
         let m = fs::metadata(t.p("dst/src/a.txt")).unwrap();
         assert_eq!(m.permissions().mode() & 0o777, 0o640);
         assert_eq!(m.modified().unwrap(), old);
@@ -1661,7 +1940,11 @@ mod tests {
     /// Run a copy answering every conflict with `r`; returns events.
     fn copy_answering(t: &Tmp, r: Resolution, all: bool) -> Vec<JobEvent> {
         let (ctl, mut rx) = start_with(
-            spec(JobKind::Copy, vec![t.p("src/a.txt"), t.p("src/b.txt")], Some(t.p("dst"))),
+            spec(
+                JobKind::Copy,
+                vec![t.p("src/a.txt"), t.p("src/b.txt")],
+                Some(t.p("dst")),
+            ),
             Opts::default(),
         );
         let mut evs = Vec::new();
@@ -1675,7 +1958,9 @@ mod tests {
     }
 
     fn conflicts(evs: &[JobEvent]) -> usize {
-        evs.iter().filter(|e| matches!(e, JobEvent::Conflict { .. })).count()
+        evs.iter()
+            .filter(|e| matches!(e, JobEvent::Conflict { .. }))
+            .count()
     }
 
     #[test]
@@ -1720,7 +2005,10 @@ mod tests {
         let evs = copy_answering(&t, Resolution::Cancel, false);
         assert_eq!(finished(&evs).0, Err(CANCELLED.into()));
         // dropping the control resolves a pending conflict as Cancel
-        let (ctl, rx) = start_with(spec(JobKind::Copy, vec![t.p("src/a.txt")], Some(t.p("dst"))), Opts::default());
+        let (ctl, rx) = start_with(
+            spec(JobKind::Copy, vec![t.p("src/a.txt")], Some(t.p("dst"))),
+            Opts::default(),
+        );
         drop(ctl);
         let evs = collect(rx);
         assert_eq!(finished(&evs).0, Err(CANCELLED.into()));
@@ -1731,8 +2019,14 @@ mod tests {
         let t = Tmp::new("cancel");
         fs::write(t.p("big.bin"), vec![7u8; 8 << 20]).unwrap();
         fs::create_dir(t.p("dst")).unwrap();
-        let opts = Opts { chunk_delay: Some(Duration::from_millis(30)), ..Opts::default() };
-        let (ctl, mut rx) = start_with(spec(JobKind::Copy, vec![t.p("big.bin")], Some(t.p("dst"))), opts);
+        let opts = Opts {
+            chunk_delay: Some(Duration::from_millis(30)),
+            ..Opts::default()
+        };
+        let (ctl, mut rx) = start_with(
+            spec(JobKind::Copy, vec![t.p("big.bin")], Some(t.p("dst"))),
+            opts,
+        );
         let mut evs = Vec::new();
         while let Some(ev) = block_on(rx.next()) {
             if matches!(ev, JobEvent::Progress { done_bytes, .. } if done_bytes > 0) {
@@ -1765,7 +2059,11 @@ mod tests {
         write(&t.p("a/f.txt"), "f");
         write(&t.p("b/g.txt"), "g");
         fs::create_dir(t.p("dst")).unwrap();
-        let evs = run(spec(JobKind::Move, vec![t.p("a/f.txt"), t.p("b/g.txt")], Some(t.p("dst"))));
+        let evs = run(spec(
+            JobKind::Move,
+            vec![t.p("a/f.txt"), t.p("b/g.txt")],
+            Some(t.p("dst")),
+        ));
         check_protocol(&evs);
         let (res, undo) = finished(&evs);
         assert_eq!(res.unwrap().items_done, 2);
@@ -1773,7 +2071,10 @@ mod tests {
         let undo = undo.unwrap();
         assert_eq!(
             undo,
-            UndoOp::MoveBack(vec![(t.p("dst/f.txt"), t.p("a/f.txt")), (t.p("dst/g.txt"), t.p("b/g.txt"))])
+            UndoOp::MoveBack(vec![
+                (t.p("dst/f.txt"), t.p("a/f.txt")),
+                (t.p("dst/g.txt"), t.p("b/g.txt"))
+            ])
         );
         // originals in different folders; also one parent was removed meanwhile
         fs::remove_dir(t.p("b")).unwrap();
@@ -1793,8 +2094,14 @@ mod tests {
         write(&t.p("src/d/deep/two"), "22");
         std::os::unix::fs::symlink("one", t.p("src/d/link")).unwrap();
         fs::create_dir(t.p("dst")).unwrap();
-        let opts = Opts { force_copy: true, ..Opts::default() };
-        let (_c, rx) = start_with(spec(JobKind::Move, vec![t.p("src/d")], Some(t.p("dst"))), opts);
+        let opts = Opts {
+            force_copy: true,
+            ..Opts::default()
+        };
+        let (_c, rx) = start_with(
+            spec(JobKind::Move, vec![t.p("src/d")], Some(t.p("dst"))),
+            opts,
+        );
         let evs = collect(rx);
         let (res, undo) = finished(&evs);
         let s = res.unwrap();
@@ -1802,7 +2109,10 @@ mod tests {
         assert!(!exists(&t.p("src/d")));
         assert_eq!(fs::read_to_string(t.p("dst/d/deep/two")).unwrap(), "22");
         assert_eq!(fs::read_link(t.p("dst/d/link")).unwrap(), Path::new("one"));
-        assert_eq!(undo, Some(UndoOp::MoveBack(vec![(t.p("dst/d"), t.p("src/d"))])));
+        assert_eq!(
+            undo,
+            Some(UndoOp::MoveBack(vec![(t.p("dst/d"), t.p("src/d"))]))
+        );
     }
 
     #[test]
@@ -1814,7 +2124,10 @@ mod tests {
         assert_eq!(finished(&evs).0.unwrap().items_done, 1);
         let m = fs::symlink_metadata(t.p("dst/l")).unwrap();
         assert!(m.file_type().is_symlink());
-        assert_eq!(fs::read_link(t.p("dst/l")).unwrap(), Path::new("/nonexistent/target"));
+        assert_eq!(
+            fs::read_link(t.p("dst/l")).unwrap(),
+            Path::new("/nonexistent/target")
+        );
     }
 
     #[test]
@@ -1822,7 +2135,11 @@ mod tests {
         let t = Tmp::new("delete");
         write(&t.p("d/x/y"), "y");
         write(&t.p("f"), "f");
-        let evs = run(spec(JobKind::Delete, vec![t.p("d"), t.p("f"), t.p("missing")], None));
+        let evs = run(spec(
+            JobKind::Delete,
+            vec![t.p("d"), t.p("f"), t.p("missing")],
+            None,
+        ));
         let (res, undo) = finished(&evs);
         let s = res.unwrap();
         assert_eq!((s.items_done, s.errors.len()), (2, 1));
@@ -1879,7 +2196,9 @@ mod tests {
         let (res, undo) = finished(&evs);
         assert_eq!(res.unwrap().items_done, 2);
         let undo = undo.unwrap();
-        let UndoOp::Untrash(ref entries) = undo else { panic!() };
+        let UndoOp::Untrash(ref entries) = undo else {
+            panic!()
+        };
         assert_eq!(entries.len(), 2);
         assert!(!exists(&t.p("a")));
         let back = undo_spec(&undo);
@@ -1903,13 +2222,19 @@ mod tests {
         let t = Tmp::new("undocopy");
         write(&t.p("src/f"), "f");
         fs::create_dir(t.p("dst")).unwrap();
-        let (_, undo) = finished(&run(spec(JobKind::Copy, vec![t.p("src/f")], Some(t.p("dst")))));
+        let (_, undo) = finished(&run(spec(
+            JobKind::Copy,
+            vec![t.p("src/f")],
+            Some(t.p("dst")),
+        )));
         let back = undo_spec(&undo.unwrap());
         assert_eq!(back, spec(JobKind::Trash, vec![t.p("dst/f")], None));
         let (res, undo) = finished(&run(back));
         assert_eq!(res.unwrap().items_done, 1);
         assert!(!exists(&t.p("dst/f")) && exists(&t.p("src/f")));
-        let UndoOp::Untrash(e) = undo.unwrap() else { panic!() };
+        let UndoOp::Untrash(e) = undo.unwrap() else {
+            panic!()
+        };
         let _ = remove_any(&e[0].trashed);
         let _ = fs::remove_file(&e[0].info);
     }
@@ -1924,7 +2249,10 @@ mod tests {
         trash(&t.p("e2")).unwrap();
         assert!(empty_trash().unwrap() >= 2);
         assert!(list_trash().unwrap().is_empty());
-        assert!(fs::read_dir(home_trash().join("info")).unwrap().next().is_none());
+        assert!(fs::read_dir(home_trash().join("info"))
+            .unwrap()
+            .next()
+            .is_none());
     }
 
     #[test]
@@ -1934,12 +2262,18 @@ mod tests {
         // no .Trash → .Trash-$uid, created 0700
         let d = volume_trash_dir(&t.0, uid, true).unwrap();
         assert_eq!(d, t.p(&format!(".Trash-{uid}")));
-        assert_eq!(fs::metadata(&d).unwrap().permissions().mode() & 0o777, 0o700);
+        assert_eq!(
+            fs::metadata(&d).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
         fs::remove_dir(&d).unwrap();
         assert!(volume_trash_dir(&t.0, uid, false).is_err());
         // .Trash without sticky bit is ignored
         fs::create_dir(t.p(".Trash")).unwrap();
-        assert_eq!(volume_trash_dir(&t.0, uid, true).unwrap(), t.p(&format!(".Trash-{uid}")));
+        assert_eq!(
+            volume_trash_dir(&t.0, uid, true).unwrap(),
+            t.p(&format!(".Trash-{uid}"))
+        );
         fs::remove_dir(t.p(&format!(".Trash-{uid}"))).unwrap();
         // sticky .Trash → .Trash/$uid
         fs::set_permissions(t.p(".Trash"), fs::Permissions::from_mode(0o1777)).unwrap();
@@ -1952,7 +2286,10 @@ mod tests {
         fs::create_dir(t.p("real")).unwrap();
         fs::set_permissions(t.p("real"), fs::Permissions::from_mode(0o1777)).unwrap();
         std::os::unix::fs::symlink("real", t.p(".Trash")).unwrap();
-        assert_eq!(volume_trash_dir(&t.0, uid, true).unwrap(), t.p(&format!(".Trash-{uid}")));
+        assert_eq!(
+            volume_trash_dir(&t.0, uid, true).unwrap(),
+            t.p(&format!(".Trash-{uid}"))
+        );
         // trashing into a volume trash records a relative Path and resolves back
         let root = t.p(&format!(".Trash-{uid}"));
         write(&t.p("media/pic one.jpg"), "jpg");
@@ -1986,7 +2323,10 @@ mod tests {
         // parse_info rejects escapes outside the volume
         let t = Tmp::new("info");
         let root = t.p(".Trash-1");
-        write(&root.join("info/x.trashinfo"), "[Trash Info]\nPath=../../etc/passwd\nDeletionDate=2020-01-01T00:00:00\n");
+        write(
+            &root.join("info/x.trashinfo"),
+            "[Trash Info]\nPath=../../etc/passwd\nDeletionDate=2020-01-01T00:00:00\n",
+        );
         assert!(parse_info(&root.join("info/x.trashinfo"), &root).is_err());
     }
 
@@ -2031,7 +2371,10 @@ mod tests {
     fn new_folder_and_file() {
         let t = Tmp::new("new");
         assert_eq!(new_folder(&t.0, "New Folder").unwrap(), t.p("New Folder"));
-        assert_eq!(new_folder(&t.0, "New Folder").unwrap(), t.p("New Folder (2)"));
+        assert_eq!(
+            new_folder(&t.0, "New Folder").unwrap(),
+            t.p("New Folder (2)")
+        );
         assert_eq!(new_file(&t.0, "n.txt").unwrap(), t.p("n.txt"));
         assert_eq!(new_file(&t.0, "n.txt").unwrap(), t.p("n (2).txt"));
         assert!(t.p("New Folder (2)").is_dir() && t.p("n (2).txt").is_file());

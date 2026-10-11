@@ -51,7 +51,14 @@ pub enum Paper {
 }
 
 impl Paper {
-    pub const ALL: [Paper; 6] = [Paper::A4, Paper::Letter, Paper::A3, Paper::A5, Paper::Legal, Paper::Tabloid];
+    pub const ALL: [Paper; 6] = [
+        Paper::A4,
+        Paper::Letter,
+        Paper::A3,
+        Paper::A5,
+        Paper::Legal,
+        Paper::Tabloid,
+    ];
 
     pub fn size(self) -> (f32, f32) {
         match self {

@@ -31,12 +31,17 @@ pub fn parse(spec: &str, page_count: usize) -> Result<Vec<usize>, String> {
                     if s == "last" {
                         return Ok(page_count);
                     }
-                    s.parse::<usize>().map_err(|_| format!("'{part}' isn't a page or range"))
+                    s.parse::<usize>()
+                        .map_err(|_| format!("'{part}' isn't a page or range"))
                 };
                 let (a, b) = match part.split_once('-') {
                     Some((a, b)) => (
                         if a.trim().is_empty() { 1 } else { num(a)? },
-                        if b.trim().is_empty() { page_count } else { num(b)? },
+                        if b.trim().is_empty() {
+                            page_count
+                        } else {
+                            num(b)?
+                        },
                     ),
                     None => {
                         let n = num(part)?;
@@ -90,6 +95,9 @@ mod tests {
 
     #[test]
     fn groups() {
-        assert_eq!(super::parse_groups("1-2, 3-", 4).unwrap(), vec![vec![0, 1], vec![2, 3]]);
+        assert_eq!(
+            super::parse_groups("1-2, 3-", 4).unwrap(),
+            vec![vec![0, 1], vec![2, 3]]
+        );
     }
 }

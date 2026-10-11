@@ -1,16 +1,24 @@
-//! Tree view of the left pane: Bookmarks / Devices / Network, lazily
-//! expanded. Children load on first expand via `fsops::list_dir`; the
-//! flattened row list is cached and rebuilt only when the tree or the kind
-//! filter changes, never per frame.
+//! Tree view of the files pane: Bookmarks / Devices / Network / Trash,
+//! lazily expanded. Children load on first expand via `fsops::list_dir`;
+//! the flattened line list is cached and rebuilt only when the tree or the
+//! kind filter changes, and only the visible lines are built (virtualized).
 
 use crate::config::{self, Bookmarks};
+use crate::devices::Drive;
 use crate::filetype::Kind;
 use crate::fsops::{self, Entry};
 use crate::search::Hit;
 use crate::theme;
-use iced::widget::{button, column, container, row, scrollable, text, Space};
+use crate::widgets::{self, ItemAct, Selection, Vp};
+use iced::widget::{button, container, row, scrollable, text, Space};
 use iced::{Element, Length, Task};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+
+pub const ROW_H: f32 = 24.0;
+pub const SCROLL_ID: &str = "tree-scroll";
+/// Stand-in path for the Trash entry.
+pub const TRASH: &str = "trash:";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Section {
@@ -40,6 +48,8 @@ struct Node {
     loading: bool,
     children: Option<Vec<Node>>,
     error: Option<String>,
+    /// set for drive rows; unmounted drives have path = device file
+    drive: Option<Drive>,
 }
 
 impl Node {
@@ -56,6 +66,7 @@ impl Node {
             loading: false,
             children: None,
             error: None,
+            drive: None,
         }
     }
 
@@ -84,6 +95,16 @@ impl Node {
             c.collect_matches(q, out);
         }
     }
+
+    /// loaded + expanded folders under (and including) this node
+    fn collect_open(&self, out: &mut Vec<PathBuf>) {
+        if self.expanded && self.children.is_some() {
+            out.push(self.path.clone());
+            for c in self.children.iter().flatten() {
+                c.collect_open(out);
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -95,6 +116,9 @@ struct Row {
     kind: Kind,
     expanded: bool,
     loading: bool,
+    expandable: bool,
+    drive: bool,
+    removable: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -105,25 +129,29 @@ enum Line {
 
 pub struct Tree {
     bookmarks: Bookmarks,
-    removable: Vec<PathBuf>,
+    drives: Vec<Drive>,
     network: Vec<PathBuf>,
     // (section, subheading, nodes) — subheading is "Folders"/"Files"
     groups: Vec<(Section, Option<&'static str>, Vec<Node>)>,
     lines: Vec<Line>,
     filter: Option<Kind>,
+    vp: Vp,
 }
 
 #[derive(Debug, Clone)]
 pub enum Msg {
     Toggle(Section, PathBuf),
     Loaded(Section, PathBuf, Result<Vec<Entry>, String>),
-    Activate(PathBuf, Kind),
-    Mounts(Vec<PathBuf>, Vec<PathBuf>),
+    Item(ItemAct),
+    Network(Vec<PathBuf>),
     BookmarksSaved(Result<(), String>),
+    Scrolled(Vp),
 }
 
 pub enum Event {
-    Open(PathBuf, Kind),
+    Item(ItemAct),
+    /// an unmounted drive was expanded: mount it
+    Mount(Drive),
     Status(String),
 }
 
@@ -131,17 +159,15 @@ impl Tree {
     pub fn new() -> (Self, Task<Msg>) {
         let mut t = Self {
             bookmarks: Bookmarks::load(),
-            removable: Vec::new(),
+            drives: Vec::new(),
             network: Vec::new(),
             groups: Vec::new(),
             lines: Vec::new(),
             filter: None,
+            vp: Vp::default(),
         };
         t.rebuild_groups();
-        (
-            t,
-            Task::perform(fsops::mounts(), |(r, n)| Msg::Mounts(r, n)),
-        )
+        (t, Task::perform(fsops::mounts(), |(_, n)| Msg::Network(n)))
     }
 
     pub fn set_filter(&mut self, f: Option<Kind>) {
@@ -149,12 +175,55 @@ impl Tree {
         self.rebuild_lines();
     }
 
+    pub fn set_drives(&mut self, drives: Vec<Drive>) {
+        self.drives = drives;
+        self.rebuild_groups();
+    }
+
+    pub fn drive_for(&self, path: &Path) -> Option<&Drive> {
+        self.drives
+            .iter()
+            .find(|d| d.mount_point.as_deref() == Some(path) || d.device == path)
+    }
+
+    pub fn is_bookmarked(&self, p: &Path) -> bool {
+        self.bookmarks.folders.iter().any(|b| b == p) || self.bookmarks.files.iter().any(|b| b == p)
+    }
+
+    /// Paths of the rows in display order (for shift-click ranges and
+    /// keyboard navigation).
+    pub fn visible_paths(&self) -> Vec<PathBuf> {
+        self.lines
+            .iter()
+            .filter_map(|l| match l {
+                Line::Row(r) => Some(r.path.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    pub fn kind_of(&self, p: &Path) -> Option<Kind> {
+        self.lines.iter().find_map(|l| match l {
+            Line::Row(r) if r.path == p => Some(r.kind),
+            _ => None,
+        })
+    }
+
+    /// Scroll offset that shows `p`, if it's off screen.
+    pub fn reveal(&self, p: &Path) -> Option<f32> {
+        let i = self
+            .lines
+            .iter()
+            .position(|l| matches!(l, Line::Row(r) if r.path == p))?;
+        self.vp.reveal(i, ROW_H)
+    }
+
     /// Instant first-pass search: matches among everything already loaded.
     pub fn loaded_matches(&self, q: &str) -> Vec<Hit> {
         let mut out = Vec::new();
         for (_, _, nodes) in &self.groups {
             for n in nodes {
-                if n.name.to_lowercase().contains(q) {
+                if n.drive.is_none() && n.name.to_lowercase().contains(q) {
                     out.push(Hit::new(n.path.clone(), n.name.clone(), n.kind));
                 }
                 n.collect_matches(q, &mut out);
@@ -164,12 +233,17 @@ impl Tree {
     }
 
     /// Where the background search walks: home, bookmarked folders, and
-    /// mounted drives. `/` is left out (it would walk the whole system) and
-    /// roots nested inside another root are dropped.
+    /// mounted removable/network drives. `/` is left out and nested roots
+    /// are dropped.
     pub fn search_roots(&self) -> Vec<PathBuf> {
         let mut roots: Vec<PathBuf> = std::iter::once(config::home())
             .chain(self.bookmarks.folders.iter().cloned())
-            .chain(self.removable.iter().cloned())
+            .chain(
+                self.drives
+                    .iter()
+                    .filter(|d| !d.system)
+                    .filter_map(|d| d.mount_point.clone()),
+            )
             .chain(self.network.iter().cloned())
             .collect();
         roots.sort();
@@ -179,32 +253,125 @@ impl Tree {
         roots
     }
 
+    /// Folders the tree is showing (for the folder watcher).
+    pub fn open_dirs(&self) -> Vec<PathBuf> {
+        let mut out = Vec::new();
+        for (_, _, nodes) in &self.groups {
+            for n in nodes {
+                n.collect_open(&mut out);
+            }
+        }
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    /// Re-list any shown folder in `dirs`, keeping expansion state.
+    pub fn refresh(&mut self, dirs: &[PathBuf]) -> Task<Msg> {
+        let mut tasks = Vec::new();
+        for (section, _, nodes) in &self.groups {
+            for n in nodes {
+                let mut open = Vec::new();
+                n.collect_open(&mut open);
+                for p in open.into_iter().filter(|p| dirs.contains(p)) {
+                    let s = *section;
+                    let p2 = p.clone();
+                    tasks.push(Task::perform(fsops::list_dir(p), move |r| {
+                        Msg::Loaded(s, p2.clone(), r)
+                    }));
+                }
+            }
+        }
+        Task::batch(tasks)
+    }
+
+    /// Expand or collapse the row for `p` (double-click / keyboard).
+    pub fn toggle_path(&mut self, p: &Path, expand: Option<bool>) -> (Task<Msg>, Option<Event>) {
+        let section = self.lines.iter().find_map(|l| match l {
+            Line::Row(r) if r.path == p => Some(r.section),
+            _ => None,
+        });
+        let Some(section) = section else {
+            return (Task::none(), None);
+        };
+        let is_open = self
+            .find_mut(section, p)
+            .map(|n| n.expanded)
+            .unwrap_or(false);
+        if expand.is_some_and(|e| e == is_open) {
+            return (Task::none(), None);
+        }
+        self.update(Msg::Toggle(section, p.to_path_buf()))
+    }
+
     fn rebuild_groups(&mut self) {
+        // reuse existing top-level nodes so expansion survives a rebuild
+        let mut old: HashMap<PathBuf, Node> = self
+            .groups
+            .drain(..)
+            .flat_map(|(_, _, nodes)| nodes)
+            .map(|n| (n.path.clone(), n))
+            .collect();
+        let mut take = |path: PathBuf, name: Option<&str>, kind: Kind| -> Node {
+            match old.remove(&path) {
+                Some(mut n) => {
+                    if let Some(name) = name {
+                        n.name = name.to_string();
+                    }
+                    n
+                }
+                None => Node::new(path, name, kind),
+            }
+        };
         let bm_folders = self
             .bookmarks
             .folders
-            .iter()
-            .map(|p| Node::new(p.clone(), None, Kind::Folder))
+            .clone()
+            .into_iter()
+            .map(|p| take(p, None, Kind::Folder))
             .collect();
         let bm_files = self
             .bookmarks
             .files
-            .iter()
-            .map(|p| Node::new(p.clone(), None, Kind::of(p, false)))
+            .clone()
+            .into_iter()
+            .map(|p| {
+                let k = Kind::of(&p, false);
+                take(p, None, k)
+            })
             .collect();
         let mut devices = vec![
-            Node::new(config::home(), Some("Home"), Kind::Folder),
-            Node::new("/".into(), Some("Root  /"), Kind::Folder),
+            take(config::home(), Some("Home"), Kind::Folder),
+            take("/".into(), Some("Root  /"), Kind::Folder),
         ];
-        devices.extend(
-            self.removable
-                .iter()
-                .map(|p| Node::new(p.clone(), None, Kind::Folder)),
-        );
+        for d in self.drives.iter().filter(|d| !d.system || d.removable) {
+            let path = d.mount_point.clone().unwrap_or_else(|| d.device.clone());
+            let label = format!(
+                "{}  {}{}",
+                d.label,
+                fsops::human_size(d.size),
+                if d.encrypted {
+                    "  · locked"
+                } else if d.mount_point.is_none() {
+                    "  · not mounted"
+                } else {
+                    ""
+                }
+            );
+            let mut n = take(path, Some(&label), Kind::Folder);
+            n.drive = Some(d.clone());
+            if d.mount_point.is_none() {
+                n.expanded = false;
+                n.children = None;
+            }
+            devices.push(n);
+        }
+        devices.push(take(PathBuf::from(TRASH), Some("Trash"), Kind::Folder));
         let network = self
             .network
-            .iter()
-            .map(|p| Node::new(p.clone(), None, Kind::Folder))
+            .clone()
+            .into_iter()
+            .map(|p| take(p, None, Kind::Folder))
             .collect();
         self.groups = vec![
             (Section::Bookmarks, Some("Folders"), bm_folders),
@@ -233,6 +400,7 @@ impl Tree {
             if n.kind != Kind::Folder && filter.is_some_and(|k| k != n.kind) {
                 return;
             }
+            let trash = n.path.as_os_str() == TRASH;
             out.push(Line::Row(Row {
                 section: s,
                 depth,
@@ -245,6 +413,11 @@ impl Tree {
                 kind: n.kind,
                 expanded: n.expanded,
                 loading: n.loading,
+                expandable: n.kind == Kind::Folder
+                    && !trash
+                    && !n.drive.as_ref().is_some_and(|d| d.encrypted),
+                drive: n.drive.is_some(),
+                removable: n.drive.as_ref().is_some_and(|d| d.removable),
             }));
             if n.expanded {
                 for c in n.children.iter().flatten() {
@@ -285,6 +458,17 @@ impl Tree {
                 let Some(node) = self.find_mut(section, &path) else {
                     return (Task::none(), None);
                 };
+                if let Some(d) = &node.drive {
+                    if d.mount_point.is_none() {
+                        return (
+                            Task::none(),
+                            (!d.encrypted).then(|| Event::Mount(d.clone())),
+                        );
+                    }
+                }
+                if node.path.as_os_str() == TRASH {
+                    return (Task::none(), None);
+                }
                 node.expanded = !node.expanded;
                 let task = if node.expanded && node.children.is_none() && !node.loading {
                     node.loading = true;
@@ -303,8 +487,24 @@ impl Tree {
                     node.loading = false;
                     match result {
                         Ok(entries) => {
-                            node.children =
-                                Some(entries.into_iter().map(Node::from_entry).collect())
+                            // merge so expanded subfolders survive a refresh
+                            let mut old: HashMap<PathBuf, Node> = node
+                                .children
+                                .take()
+                                .unwrap_or_default()
+                                .into_iter()
+                                .map(|c| (c.path.clone(), c))
+                                .collect();
+                            node.children = Some(
+                                entries
+                                    .into_iter()
+                                    .map(|e| match old.remove(&e.path) {
+                                        Some(o) if o.kind == e.kind => o,
+                                        _ => Node::from_entry(e),
+                                    })
+                                    .collect(),
+                            );
+                            node.error = None;
                         }
                         Err(e) => {
                             node.error = Some(e);
@@ -315,10 +515,9 @@ impl Tree {
                 self.rebuild_lines();
                 (Task::none(), None)
             }
-            Msg::Activate(path, kind) => (Task::none(), Some(Event::Open(path, kind))),
-            Msg::Mounts(removable, network) => {
-                self.removable = removable;
-                self.network = network;
+            Msg::Item(a) => (Task::none(), Some(Event::Item(a))),
+            Msg::Network(n) => {
+                self.network = n;
                 self.rebuild_groups();
                 (Task::none(), None)
             }
@@ -326,70 +525,94 @@ impl Tree {
                 Task::none(),
                 r.err().map(|e| Event::Status(format!("bookmarks: {e}"))),
             ),
+            Msg::Scrolled(vp) => {
+                self.vp = vp;
+                (Task::none(), None)
+            }
         }
     }
 
-    #[allow(dead_code)] // wired to the context menu in phase 1
-    pub fn add_bookmark(&mut self, path: PathBuf, is_dir: bool) -> Task<Msg> {
+    /// Add or remove a bookmark.
+    pub fn toggle_bookmark(&mut self, path: PathBuf, is_dir: bool) -> Task<Msg> {
         let list = if is_dir {
             &mut self.bookmarks.folders
         } else {
             &mut self.bookmarks.files
         };
-        if !list.contains(&path) {
+        if let Some(i) = list.iter().position(|p| *p == path) {
+            list.remove(i);
+        } else {
             list.push(path);
         }
         self.rebuild_groups();
         Task::perform(self.bookmarks.clone().save(), Msg::BookmarksSaved)
     }
 
-    pub fn view(&self) -> Element<'_, Msg> {
-        let lines = self.lines.iter().map(|l| match l {
-            Line::Heading(t, depth) => {
-                let t = text(*t).size(if *depth == 0 { 15 } else { 13 });
-                let t = if *depth == 0 {
-                    t
-                } else {
-                    t.color(theme::MUTED)
-                };
-                container(t)
-                    .padding(iced::Padding {
-                        top: if *depth == 0 { 10.0 } else { 2.0 },
-                        left: 14.0 * *depth as f32,
-                        ..Default::default()
-                    })
-                    .into()
-            }
-            Line::Row(r) => {
-                let marker = match (r.kind, r.expanded, r.loading) {
-                    (_, _, true) => "...",
-                    (Kind::Folder, true, _) => "v",
-                    (Kind::Folder, false, _) => ">",
-                    (k, _, _) => k.icon(),
-                };
-                // folders expand in place; files open in a tab on the right
-                let msg = if r.kind == Kind::Folder {
-                    Msg::Toggle(r.section, r.path.clone())
-                } else {
-                    Msg::Activate(r.path.clone(), r.kind)
-                };
-                let label = row![
-                    text(marker).width(28).size(11).color(theme::MUTED),
-                    text(r.label.clone()).size(13)
-                ]
-                .spacing(6);
-                row![
-                    Space::with_width(14.0 * r.depth as f32),
-                    button(label)
-                        .on_press(msg)
+    pub fn view<'a>(&'a self, sel: &'a Selection) -> Element<'a, Msg> {
+        let list =
+            widgets::virtual_column(self.lines.len(), ROW_H, self.vp, |i| match &self.lines[i] {
+                Line::Heading(t, depth) => {
+                    let t = text(*t).size(if *depth == 0 { 14 } else { 12 });
+                    let t = if *depth == 0 {
+                        t
+                    } else {
+                        t.color(theme::MUTED)
+                    };
+                    container(t)
+                        .padding(iced::Padding {
+                            top: if *depth == 0 { 5.0 } else { 4.0 },
+                            left: 4.0 + 14.0 * *depth as f32,
+                            ..Default::default()
+                        })
+                        .into()
+                }
+                Line::Row(r) => {
+                    use iced_fonts::Bootstrap as B;
+                    let chevron: Element<'_, Msg> = match (r.expandable, r.expanded, r.loading) {
+                        (_, _, true) => text("…").size(11).color(theme::MUTED).into(),
+                        (true, true, _) => widgets::icon(B::ChevronDown)
+                            .size(10)
+                            .color(theme::MUTED)
+                            .into(),
+                        (true, false, _) => widgets::icon(B::ChevronRight)
+                            .size(10)
+                            .color(theme::MUTED)
+                            .into(),
+                        (false, _, _) => Space::with_width(10).into(),
+                    };
+                    let arrow = button(chevron)
+                        .on_press_maybe(
+                            r.expandable.then(|| Msg::Toggle(r.section, r.path.clone())),
+                        )
                         .style(button::text)
-                        .padding([2, 4])
-                        .width(Length::Fill),
-                ]
-                .into()
-            }
-        });
-        scrollable(column(lines).spacing(1))
+                        .padding([3, 4])
+                        .width(22);
+                    // special rows get their own icon
+                    let glyph = if r.path.as_os_str() == TRASH {
+                        widgets::icon(B::Trash).color(theme::MUTED)
+                    } else if r.path == config::home() {
+                        widgets::icon(B::HouseFill).color(iced::color!(0xe0b85c))
+                    } else if r.drive {
+                        widgets::icon(if r.removable { B::UsbDrive } else { B::HddFill })
+                            .color(theme::MUTED)
+                    } else {
+                        widgets::kind_icon(r.kind)
+                    };
+                    let label = row![glyph.size(13).width(18), text(r.label.clone()).size(13)]
+                        .spacing(6)
+                        .align_y(iced::Alignment::Center);
+                    row![
+                        Space::with_width(14.0 * r.depth as f32),
+                        arrow,
+                        widgets::item(label, &r.path, r.kind, sel, Msg::Item),
+                    ]
+                    .align_y(iced::Alignment::Center)
+                    .into()
+                }
+            });
+        scrollable(list)
+            .id(scrollable::Id::new(SCROLL_ID))
+            .on_scroll(|v| Msg::Scrolled(Vp::from(v)))
             .height(Length::Fill)
             .into()
     }

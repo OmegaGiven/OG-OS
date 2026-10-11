@@ -15,7 +15,10 @@ pub struct State {
 
 impl State {
     pub fn new(path: PathBuf, kind: Kind) -> Self {
-        Self { kind, convert: super::convert::convertible(&path, kind) }
+        Self {
+            kind,
+            convert: super::convert::convertible(&path, kind),
+        }
     }
 
     pub fn view<M: Clone + 'static>(&self, on_convert: M) -> Element<'_, M> {
@@ -29,14 +32,21 @@ impl State {
             _ => "Phase 2: hex view for binary files.",
         };
         let mut c = column![
-            text(self.kind.icon()).size(40).color(theme::MUTED),
+            crate::widgets::kind_icon(self.kind).size(56),
             text(format!("{} viewer not built yet", self.kind.label())).size(18),
             text(plan).color(theme::MUTED),
         ]
         .spacing(8)
         .align_x(iced::Alignment::Center);
         if let Some(server) = self.convert {
-            c = c.push(button(text(if server { "Convert to PDF (Stirling server)" } else { "Convert to PDF" })).on_press(on_convert));
+            c = c.push(
+                button(text(if server {
+                    "Convert to PDF (Stirling server)"
+                } else {
+                    "Convert to PDF"
+                }))
+                .on_press(on_convert),
+            );
         }
         center(c).into()
     }

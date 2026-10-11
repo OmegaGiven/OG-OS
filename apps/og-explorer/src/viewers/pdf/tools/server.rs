@@ -129,7 +129,10 @@ impl std::fmt::Display for Target {
 /// Quick reachability + auth check for the settings UI.
 pub fn ping(cfg: &ServerConfig) -> Result<String, String> {
     let url = join(&cfg.url, "/api/v1/info/status")?;
-    let resp = agent(PING_TIMEOUT).get(&url).set("X-API-KEY", &cfg.api_key).call();
+    let resp = agent(PING_TIMEOUT)
+        .get(&url)
+        .set("X-API-KEY", &cfg.api_key)
+        .call();
     let resp = check(resp)?;
     let body = read_body(resp)?;
     let json: serde_json::Value = serde_json::from_slice(&body)
@@ -141,20 +144,32 @@ pub fn ping(cfg: &ServerConfig) -> Result<String, String> {
     })
 }
 
-pub fn ocr(cfg: &ServerConfig, pdf: &[u8], languages: &[String], mode: OcrMode) -> Result<Reply, String> {
+pub fn ocr(
+    cfg: &ServerConfig,
+    pdf: &[u8],
+    languages: &[String],
+    mode: OcrMode,
+) -> Result<Reply, String> {
     let mut form = Form::new();
     form.pdf(pdf);
-    let langs: Vec<&str> = languages.iter().map(|l| l.trim()).filter(|l| !l.is_empty()).collect();
+    let langs: Vec<&str> = languages
+        .iter()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty())
+        .collect();
     if langs.is_empty() {
         form.text("languages", "eng");
     }
     for l in langs {
         form.text("languages", l);
     }
-    form.text("ocrType", match mode {
-        OcrMode::Skip => "skip-text",
-        OcrMode::Force => "force-ocr",
-    });
+    form.text(
+        "ocrType",
+        match mode {
+            OcrMode::Skip => "skip-text",
+            OcrMode::Force => "force-ocr",
+        },
+    );
     form.text("ocrRenderType", "hocr");
     post(cfg, "/api/v1/misc/ocr-pdf", form, "pdf")
 }
@@ -188,20 +203,44 @@ pub fn convert_from_pdf(cfg: &ServerConfig, pdf: &[u8], target: Target) -> Resul
     let mut form = Form::new();
     form.pdf(pdf);
     let (path, fallback) = match target {
-        Target::Docx => (form.with("outputFormat", "docx", "/api/v1/convert/pdf/word"), "docx"),
-        Target::Odt => (form.with("outputFormat", "odt", "/api/v1/convert/pdf/word"), "odt"),
-        Target::Pptx => (form.with("outputFormat", "pptx", "/api/v1/convert/pdf/presentation"), "pptx"),
-        Target::Text => (form.with("outputFormat", "txt", "/api/v1/convert/pdf/text"), "txt"),
-        Target::Rtf => (form.with("outputFormat", "rtf", "/api/v1/convert/pdf/text"), "rtf"),
-        Target::Xlsx => (form.with("pageNumbers", "all", "/api/v1/convert/pdf/xlsx"), "xlsx"),
-        Target::Csv => (form.with("pageNumbers", "all", "/api/v1/convert/pdf/csv"), "csv"),
+        Target::Docx => (
+            form.with("outputFormat", "docx", "/api/v1/convert/pdf/word"),
+            "docx",
+        ),
+        Target::Odt => (
+            form.with("outputFormat", "odt", "/api/v1/convert/pdf/word"),
+            "odt",
+        ),
+        Target::Pptx => (
+            form.with("outputFormat", "pptx", "/api/v1/convert/pdf/presentation"),
+            "pptx",
+        ),
+        Target::Text => (
+            form.with("outputFormat", "txt", "/api/v1/convert/pdf/text"),
+            "txt",
+        ),
+        Target::Rtf => (
+            form.with("outputFormat", "rtf", "/api/v1/convert/pdf/text"),
+            "rtf",
+        ),
+        Target::Xlsx => (
+            form.with("pageNumbers", "all", "/api/v1/convert/pdf/xlsx"),
+            "xlsx",
+        ),
+        Target::Csv => (
+            form.with("pageNumbers", "all", "/api/v1/convert/pdf/csv"),
+            "csv",
+        ),
         Target::Html => ("/api/v1/convert/pdf/html", "html"),
         Target::Markdown => ("/api/v1/convert/pdf/markdown", "md"),
         Target::Xml => ("/api/v1/convert/pdf/xml", "xml"),
         Target::Epub => {
             form.text("detectChapters", "true");
             form.text("targetDevice", "TABLET_PHONE_IMAGES");
-            ("/api/v1/convert/pdf/epub", form.with("outputFormat", "EPUB", "epub"))
+            (
+                "/api/v1/convert/pdf/epub",
+                form.with("outputFormat", "EPUB", "epub"),
+            )
         }
     };
     post(cfg, path, form, fallback)
@@ -233,7 +272,12 @@ pub fn convert_to_pdf(cfg: &ServerConfig, file_name: &str, bytes: &[u8]) -> Resu
             "/api/v1/convert/svg/pdf"
         }
         "epub" | "mobi" | "azw3" | "fb2" => {
-            for k in ["embedAllFonts", "includeTableOfContents", "includePageNumbers", "optimizeForEbook"] {
+            for k in [
+                "embedAllFonts",
+                "includeTableOfContents",
+                "includePageNumbers",
+                "optimizeForEbook",
+            ] {
                 form.text(k, "false");
             }
             "/api/v1/convert/ebook/pdf"
@@ -307,12 +351,27 @@ pub fn auto_split(cfg: &ServerConfig, pdf: &[u8]) -> Result<Reply, String> {
 }
 
 /// Detect and split multiple photos from one scanned image (zip of images).
-pub fn scanner_image_split(cfg: &ServerConfig, image_name: &str, image: &[u8]) -> Result<Reply, String> {
+pub fn scanner_image_split(
+    cfg: &ServerConfig,
+    image_name: &str,
+    image: &[u8],
+) -> Result<Reply, String> {
     let ext = extension_of(image_name).unwrap_or_else(|| "png".into());
     let mut form = Form::new();
-    form.file("fileInput", &safe_name(image_name, &ext), mime_for(&ext), image);
+    form.file(
+        "fileInput",
+        &safe_name(image_name, &ext),
+        mime_for(&ext),
+        image,
+    );
     // primitive ints upstream: unsent fields would become 0, so send defaults
-    for (k, v) in [("angleThreshold", "5"), ("tolerance", "20"), ("minArea", "8000"), ("minContourArea", "500"), ("borderSize", "1")] {
+    for (k, v) in [
+        ("angleThreshold", "5"),
+        ("tolerance", "20"),
+        ("minArea", "8000"),
+        ("minContourArea", "500"),
+        ("borderSize", "1"),
+    ] {
         form.text(k, v);
     }
     post(cfg, "/api/v1/misc/extract-image-scans", form, "zip")
@@ -362,8 +421,11 @@ fn post(cfg: &ServerConfig, path: &str, form: Form, fallback_ext: &str) -> Resul
         .set("Content-Type", &content_type)
         .send_bytes(&body);
     let resp = check(resp)?;
-    let ext = reply_ext(resp.header("Content-Disposition"), resp.header("Content-Type"))
-        .unwrap_or_else(|| fallback_ext.to_string());
+    let ext = reply_ext(
+        resp.header("Content-Disposition"),
+        resp.header("Content-Type"),
+    )
+    .unwrap_or_else(|| fallback_ext.to_string());
     let bytes = read_body(resp)?;
     if bytes.is_empty() {
         return Err("Stirling returned an empty file".into());
@@ -432,7 +494,9 @@ fn reply_ext(disposition: Option<&str>, content_type: Option<&str>) -> Option<St
 fn disposition_filename(h: &str) -> Option<String> {
     let mut plain = None;
     for part in h.split(';').map(str::trim) {
-        let Some((k, v)) = part.split_once('=') else { continue };
+        let Some((k, v)) = part.split_once('=') else {
+            continue;
+        };
         let k = k.trim().to_ascii_lowercase();
         let v = v.trim();
         if k == "filename*" {
@@ -470,12 +534,19 @@ fn percent_decode(s: &str) -> String {
 fn extension_of(name: &str) -> Option<String> {
     let base = name.rsplit(['/', '\\']).next().unwrap_or(name);
     let (stem, ext) = base.rsplit_once('.')?;
-    (!stem.is_empty() && (1..=8).contains(&ext.len()) && ext.chars().all(|c| c.is_ascii_alphanumeric()))
-        .then(|| ext.to_ascii_lowercase())
+    (!stem.is_empty()
+        && (1..=8).contains(&ext.len())
+        && ext.chars().all(|c| c.is_ascii_alphanumeric()))
+    .then(|| ext.to_ascii_lowercase())
 }
 
 fn ext_for_mime(ct: &str) -> Option<&'static str> {
-    let ct = ct.split(';').next().unwrap_or("").trim().to_ascii_lowercase();
+    let ct = ct
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
     Some(match ct.as_str() {
         "application/pdf" => "pdf",
         "application/zip" | "application/x-zip-compressed" | "application/x-zip" => "zip",
@@ -538,8 +609,15 @@ fn mime_for(ext: &str) -> &'static str {
 /// Base name usable in a multipart header (no path, quotes or newlines).
 fn safe_name(name: &str, ext: &str) -> String {
     let base = name.rsplit(['/', '\\']).next().unwrap_or(name);
-    let clean: String = base.chars().filter(|c| !c.is_control() && *c != '"').collect();
-    if clean.trim().is_empty() { format!("input.{ext}") } else { clean }
+    let clean: String = base
+        .chars()
+        .filter(|c| !c.is_control() && *c != '"')
+        .collect();
+    if clean.trim().is_empty() {
+        format!("input.{ext}")
+    } else {
+        clean
+    }
 }
 
 /// Human-readable text from the validate-signature JSON (a list of result
@@ -592,13 +670,21 @@ impl Form {
             .map(|d| d.as_nanos() as u64)
             .unwrap_or(0);
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let mix = (nanos ^ n.wrapping_mul(0x9E37_79B9_7F4A_7C15)) ^ ((std::process::id() as u64) << 32);
-        Form { boundary: format!("----ogExplorer{mix:016x}{n:08x}"), body: Vec::new() }
+        let mix =
+            (nanos ^ n.wrapping_mul(0x9E37_79B9_7F4A_7C15)) ^ ((std::process::id() as u64) << 32);
+        Form {
+            boundary: format!("----ogExplorer{mix:016x}{n:08x}"),
+            body: Vec::new(),
+        }
     }
 
     fn text(&mut self, name: &str, value: &str) {
         self.body.extend_from_slice(
-            format!("--{}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n", self.boundary).as_bytes(),
+            format!(
+                "--{}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n",
+                self.boundary
+            )
+            .as_bytes(),
         );
         self.body.extend_from_slice(value.as_bytes());
         self.body.extend_from_slice(b"\r\n");
@@ -627,8 +713,12 @@ impl Form {
     }
 
     fn finish(mut self) -> (String, Vec<u8>) {
-        self.body.extend_from_slice(format!("--{}--\r\n", self.boundary).as_bytes());
-        (format!("multipart/form-data; boundary={}", self.boundary), self.body)
+        self.body
+            .extend_from_slice(format!("--{}--\r\n", self.boundary).as_bytes());
+        (
+            format!("multipart/form-data; boundary={}", self.boundary),
+            self.body,
+        )
     }
 }
 
@@ -648,7 +738,9 @@ mod tests {
         fn header(&self, name: &str) -> Option<String> {
             self.head.lines().find_map(|l| {
                 let (k, v) = l.split_once(':')?;
-                k.trim().eq_ignore_ascii_case(name).then(|| v.trim().to_string())
+                k.trim()
+                    .eq_ignore_ascii_case(name)
+                    .then(|| v.trim().to_string())
             })
         }
         fn body_str(&self) -> String {
@@ -658,11 +750,18 @@ mod tests {
 
     /// One-shot HTTP server on 127.0.0.1: captures the request, answers
     /// with `status`, extra `headers` and `body`.
-    fn mock(status: &str, headers: &[(&str, &str)], body: &[u8]) -> (ServerConfig, mpsc::Receiver<Captured>) {
+    fn mock(
+        status: &str,
+        headers: &[(&str, &str)],
+        body: &[u8],
+    ) -> (ServerConfig, mpsc::Receiver<Captured>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         let (tx, rx) = mpsc::channel();
-        let mut response = format!("HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n", body.len());
+        let mut response = format!(
+            "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n",
+            body.len()
+        );
         for (k, v) in headers {
             response.push_str(&format!("{k}: {v}\r\n"));
         }
@@ -670,7 +769,9 @@ mod tests {
         let mut response = response.into_bytes();
         response.extend_from_slice(body);
         std::thread::spawn(move || {
-            let Ok((mut s, _)) = listener.accept() else { return };
+            let Ok((mut s, _)) = listener.accept() else {
+                return;
+            };
             let mut buf = Vec::new();
             let mut chunk = [0u8; 8192];
             let head_end = loop {
@@ -688,7 +789,8 @@ mod tests {
                 .lines()
                 .find_map(|l| {
                     let (k, v) = l.split_once(':')?;
-                    k.eq_ignore_ascii_case("content-length").then(|| v.trim().parse::<usize>().ok())?
+                    k.eq_ignore_ascii_case("content-length")
+                        .then(|| v.trim().parse::<usize>().ok())?
                 })
                 .unwrap_or(0);
             while buf.len() < head_end + len {
@@ -703,18 +805,38 @@ mod tests {
             let _ = s.flush();
             let _ = tx.send(Captured { head, body });
         });
-        (ServerConfig { url: format!("http://127.0.0.1:{port}/"), api_key: "secret-key".into() }, rx)
+        (
+            ServerConfig {
+                url: format!("http://127.0.0.1:{port}/"),
+                api_key: "secret-key".into(),
+            },
+            rx,
+        )
     }
 
     #[test]
     fn ocr_sends_multipart_and_key() {
-        let (cfg, rx) = mock("200 OK", &[("Content-Type", "application/pdf"), ("Content-Disposition", "attachment; filename=\"document_ocr.pdf\"")], b"%PDF-1.7 ocr");
+        let (cfg, rx) = mock(
+            "200 OK",
+            &[
+                ("Content-Type", "application/pdf"),
+                (
+                    "Content-Disposition",
+                    "attachment; filename=\"document_ocr.pdf\"",
+                ),
+            ],
+            b"%PDF-1.7 ocr",
+        );
         let langs = vec!["eng".to_string(), "deu".to_string()];
         let reply = ocr(&cfg, b"%PDF-1.4 fake", &langs, OcrMode::Force).unwrap();
         assert_eq!(reply.ext, "pdf");
         assert_eq!(reply.bytes, b"%PDF-1.7 ocr");
         let req = rx.recv().unwrap();
-        assert!(req.head.starts_with("POST /api/v1/misc/ocr-pdf HTTP/1.1"), "{}", req.head);
+        assert!(
+            req.head.starts_with("POST /api/v1/misc/ocr-pdf HTTP/1.1"),
+            "{}",
+            req.head
+        );
         assert_eq!(req.header("x-api-key").as_deref(), Some("secret-key"));
         let ct = req.header("content-type").unwrap();
         let boundary = ct.split("boundary=").nth(1).unwrap().to_string();
@@ -732,17 +854,25 @@ mod tests {
     fn convert_from_pdf_picks_endpoint_and_ext() {
         let (cfg, rx) = mock(
             "200 OK",
-            &[("Content-Type", "application/vnd.openxmlformats-officedocument.wordprocessingml.document")],
+            &[(
+                "Content-Type",
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            )],
             b"PK..",
         );
         let reply = convert_from_pdf(&cfg, b"%PDF", Target::Docx).unwrap();
         assert_eq!(reply.ext, "docx");
         let req = rx.recv().unwrap();
         assert!(req.head.starts_with("POST /api/v1/convert/pdf/word "));
-        assert!(req.body_str().contains("name=\"outputFormat\"\r\n\r\ndocx\r\n"));
+        assert!(req
+            .body_str()
+            .contains("name=\"outputFormat\"\r\n\r\ndocx\r\n"));
 
         let (cfg, rx) = mock("200 OK", &[("Content-Type", "application/zip")], b"PK");
-        assert_eq!(convert_from_pdf(&cfg, b"%PDF", Target::Epub).unwrap().ext, "zip");
+        assert_eq!(
+            convert_from_pdf(&cfg, b"%PDF", Target::Epub).unwrap().ext,
+            "zip"
+        );
         let body = rx.recv().unwrap().body_str();
         assert!(body.contains("name=\"outputFormat\"\r\n\r\nEPUB\r\n"));
         assert!(body.contains("name=\"detectChapters\"\r\n\r\ntrue\r\n"));
@@ -770,7 +900,11 @@ mod tests {
     #[test]
     fn convert_to_pdf_routes_by_extension() {
         for (name, path, mime) in [
-            ("report.docx", "/api/v1/convert/file/pdf", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
+            (
+                "report.docx",
+                "/api/v1/convert/file/pdf",
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            ),
             ("page.HTML", "/api/v1/convert/html/pdf", "text/html"),
             ("notes.md", "/api/v1/convert/markdown/pdf", "text/markdown"),
             ("mail.eml", "/api/v1/convert/eml/pdf", "message/rfc822"),
@@ -780,16 +914,31 @@ mod tests {
             let reply = convert_to_pdf(&cfg, &format!("/home/x/{name}"), b"data").unwrap();
             assert_eq!(reply.ext, "pdf");
             let req = rx.recv().unwrap();
-            assert!(req.head.starts_with(&format!("POST {path} ")), "{name}: {}", req.head);
-            assert!(req.body_str().contains(&format!("filename=\"{name}\"\r\nContent-Type: {mime}\r\n")), "{name}");
+            assert!(
+                req.head.starts_with(&format!("POST {path} ")),
+                "{name}: {}",
+                req.head
+            );
+            assert!(
+                req.body_str()
+                    .contains(&format!("filename=\"{name}\"\r\nContent-Type: {mime}\r\n")),
+                "{name}"
+            );
         }
-        let cfg = ServerConfig { url: "http://127.0.0.1:1".into(), api_key: String::new() };
+        let cfg = ServerConfig {
+            url: "http://127.0.0.1:1".into(),
+            api_key: String::new(),
+        };
         assert!(convert_to_pdf(&cfg, "noext", b"x").is_err());
     }
 
     #[test]
     fn cert_sign_fields() {
-        let (cfg, rx) = mock("200 OK", &[("Content-Type", "application/pdf")], b"%PDF signed");
+        let (cfg, rx) = mock(
+            "200 OK",
+            &[("Content-Type", "application/pdf")],
+            b"%PDF signed",
+        );
         cert_sign(&cfg, b"%PDF", b"P12DATA", "pw", "Approved", "Berlin", true).unwrap();
         let req = rx.recv().unwrap();
         assert!(req.head.starts_with("POST /api/v1/security/cert-sign "));
@@ -808,31 +957,63 @@ mod tests {
 
     #[test]
     fn ping_reports_version() {
-        let (cfg, rx) = mock("200 OK", &[("Content-Type", "application/json")], br#"{"status":"UP","version":"1.4.0"}"#);
+        let (cfg, rx) = mock(
+            "200 OK",
+            &[("Content-Type", "application/json")],
+            br#"{"status":"UP","version":"1.4.0"}"#,
+        );
         assert_eq!(ping(&cfg).unwrap(), "Stirling-PDF 1.4.0 (UP)");
         let req = rx.recv().unwrap();
         assert!(req.head.starts_with("GET /api/v1/info/status "));
         assert_eq!(req.header("X-API-KEY").as_deref(), Some("secret-key"));
-        let (cfg, _rx) = mock("200 OK", &[("Content-Type", "text/html")], b"<html>nginx</html>");
+        let (cfg, _rx) = mock(
+            "200 OK",
+            &[("Content-Type", "text/html")],
+            b"<html>nginx</html>",
+        );
         assert!(ping(&cfg).is_err());
     }
 
     #[test]
     fn error_statuses_map_to_messages() {
         let (cfg, _rx) = mock("401 Unauthorized", &[], b"nope");
-        assert_eq!(repair(&cfg, b"%PDF").unwrap_err(), "Stirling rejected the API key");
+        assert_eq!(
+            repair(&cfg, b"%PDF").unwrap_err(),
+            "Stirling rejected the API key"
+        );
         let (cfg, _rx) = mock("403 Forbidden", &[], b"");
         assert_eq!(ping(&cfg).unwrap_err(), "Stirling rejected the API key");
         let (cfg, _rx) = mock("404 Not Found", &[], b"");
-        assert_eq!(to_pdfa(&cfg, b"%PDF").unwrap_err(), "endpoint not available on this server version");
-        let (cfg, _rx) = mock("500 Internal Server Error", &[("Content-Type", "application/json")], br#"{"message":"Ghostscript   failed\n badly"}"#);
-        assert_eq!(compress(&cfg, b"%PDF", 5).unwrap_err(), "Stirling error 500: Ghostscript failed badly");
+        assert_eq!(
+            to_pdfa(&cfg, b"%PDF").unwrap_err(),
+            "endpoint not available on this server version"
+        );
+        let (cfg, _rx) = mock(
+            "500 Internal Server Error",
+            &[("Content-Type", "application/json")],
+            br#"{"message":"Ghostscript   failed\n badly"}"#,
+        );
+        assert_eq!(
+            compress(&cfg, b"%PDF", 5).unwrap_err(),
+            "Stirling error 500: Ghostscript failed badly"
+        );
         let (cfg, _rx) = mock("302 Found", &[("Location", "/login")], b"");
-        assert!(auto_split(&cfg, b"%PDF").unwrap_err().contains("redirected"));
+        assert!(auto_split(&cfg, b"%PDF")
+            .unwrap_err()
+            .contains("redirected"));
         // nothing listening
-        let port = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
-        let cfg = ServerConfig { url: format!("http://127.0.0.1:{port}"), api_key: String::new() };
-        assert!(repair(&cfg, b"%PDF").unwrap_err().starts_with("can't reach Stirling server"));
+        let port = TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let cfg = ServerConfig {
+            url: format!("http://127.0.0.1:{port}"),
+            api_key: String::new(),
+        };
+        assert!(repair(&cfg, b"%PDF")
+            .unwrap_err()
+            .starts_with("can't reach Stirling server"));
     }
 
     #[test]
@@ -851,8 +1032,18 @@ mod tests {
 
     #[test]
     fn scanner_split_and_url() {
-        let (cfg, rx) = mock("200 OK", &[("Content-Disposition", "attachment; filename*=UTF-8''scan%20parts.zip")], b"PK");
-        assert_eq!(scanner_image_split(&cfg, "scan.png", b"IMG").unwrap().ext, "zip");
+        let (cfg, rx) = mock(
+            "200 OK",
+            &[(
+                "Content-Disposition",
+                "attachment; filename*=UTF-8''scan%20parts.zip",
+            )],
+            b"PK",
+        );
+        assert_eq!(
+            scanner_image_split(&cfg, "scan.png", b"IMG").unwrap().ext,
+            "zip"
+        );
         let body = rx.recv().unwrap().body_str();
         assert!(body.contains("filename=\"scan.png\"\r\nContent-Type: image/png\r\n"));
         assert!(body.contains("name=\"minArea\"\r\n\r\n8000\r\n"));
@@ -860,16 +1051,34 @@ mod tests {
         url_to_pdf(&cfg, " https://example.org/page ").unwrap();
         let req = rx.recv().unwrap();
         assert!(req.head.starts_with("POST /api/v1/convert/url/pdf "));
-        assert!(req.body_str().contains("name=\"urlInput\"\r\n\r\nhttps://example.org/page\r\n"));
+        assert!(req
+            .body_str()
+            .contains("name=\"urlInput\"\r\n\r\nhttps://example.org/page\r\n"));
         assert!(url_to_pdf(&cfg, "ftp://x").is_err());
     }
 
     #[test]
     fn reply_ext_from_headers() {
-        assert_eq!(reply_ext(Some("attachment; filename=\"a.b.DOCX\""), Some("application/pdf")).as_deref(), Some("docx"));
-        assert_eq!(reply_ext(Some("attachment; filename=out.zip"), None).as_deref(), Some("zip"));
-        assert_eq!(reply_ext(Some("inline; filename*=UTF-8''r%C3%A9sum%C3%A9.odt"), None).as_deref(), Some("odt"));
-        assert_eq!(reply_ext(Some("attachment"), Some("application/pdf;charset=UTF-8")).as_deref(), Some("pdf"));
+        assert_eq!(
+            reply_ext(
+                Some("attachment; filename=\"a.b.DOCX\""),
+                Some("application/pdf")
+            )
+            .as_deref(),
+            Some("docx")
+        );
+        assert_eq!(
+            reply_ext(Some("attachment; filename=out.zip"), None).as_deref(),
+            Some("zip")
+        );
+        assert_eq!(
+            reply_ext(Some("inline; filename*=UTF-8''r%C3%A9sum%C3%A9.odt"), None).as_deref(),
+            Some("odt")
+        );
+        assert_eq!(
+            reply_ext(Some("attachment"), Some("application/pdf;charset=UTF-8")).as_deref(),
+            Some("pdf")
+        );
         assert_eq!(reply_ext(None, Some("text/csv")).as_deref(), Some("csv"));
         assert_eq!(reply_ext(None, Some("application/x-unknown")), None);
         assert_eq!(reply_ext(None, None), None);
@@ -877,9 +1086,18 @@ mod tests {
 
     #[test]
     fn url_join() {
-        assert_eq!(join("https://h:8081/", "/api/v1/x").unwrap(), "https://h:8081/api/v1/x");
-        assert_eq!(join("h.ts.net:8081", "api/v1/x").unwrap(), "https://h.ts.net:8081/api/v1/x");
-        assert_eq!(join("http://h/stirling", "/a").unwrap(), "http://h/stirling/a");
+        assert_eq!(
+            join("https://h:8081/", "/api/v1/x").unwrap(),
+            "https://h:8081/api/v1/x"
+        );
+        assert_eq!(
+            join("h.ts.net:8081", "api/v1/x").unwrap(),
+            "https://h.ts.net:8081/api/v1/x"
+        );
+        assert_eq!(
+            join("http://h/stirling", "/a").unwrap(),
+            "http://h/stirling/a"
+        );
         assert!(join("  ", "/a").is_err());
         assert!(join("ftp://h", "/a").is_err());
     }

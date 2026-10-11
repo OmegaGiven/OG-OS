@@ -10,6 +10,14 @@ pub fn home() -> PathBuf {
         .unwrap_or_else(|| "/".into())
 }
 
+/// `~/x` → `$HOME/x`; anything else unchanged.
+pub fn expand_home(p: &str) -> PathBuf {
+    match p.strip_prefix("~/") {
+        Some(rest) => home().join(rest),
+        None => PathBuf::from(p),
+    }
+}
+
 fn xdg(var: &str, fallback: &str) -> PathBuf {
     std::env::var_os(var)
         .map(PathBuf::from)

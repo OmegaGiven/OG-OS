@@ -101,7 +101,9 @@ impl Viewer {
                 return (Viewer::Pdf(st), t.map(Msg::Pdf));
             }
             Loaded::Locked(p) => Viewer::Locked(convert::Locked::new(p)),
-            Loaded::Placeholder(k) => Viewer::Placeholder(placeholder::State::new(path.to_path_buf(), k)),
+            Loaded::Placeholder(k) => {
+                Viewer::Placeholder(placeholder::State::new(path.to_path_buf(), k))
+            }
         };
         (v, Task::none())
     }
@@ -144,7 +146,9 @@ impl Viewer {
                 (t, None)
             }
             (this @ Viewer::Locked(_), Msg::Locked(m)) => {
-                let Viewer::Locked(l) = this else { unreachable!() };
+                let Viewer::Locked(l) = this else {
+                    unreachable!()
+                };
                 let (t, opened) = l.update(m);
                 match opened {
                     Some(src) => {
@@ -155,9 +159,10 @@ impl Viewer {
                     None => (t.map(Msg::Locked), None),
                 }
             }
-            (_, Msg::Convert) | (Viewer::Image(_), Msg::Image(image::Msg::ToPdf)) => {
-                (Task::perform(convert::to_pdf(path.to_path_buf()), Msg::Converted), Some(Event::Status("Converting to PDF…".into())))
-            }
+            (_, Msg::Convert) | (Viewer::Image(_), Msg::Image(image::Msg::ToPdf)) => (
+                Task::perform(convert::to_pdf(path.to_path_buf()), Msg::Converted),
+                Some(Event::Status("Converting to PDF…".into())),
+            ),
             (Viewer::Image(_), Msg::Image(image::Msg::SplitScan)) => (
                 Task::perform(convert::split_scan(path.to_path_buf()), Msg::Converted),
                 Some(Event::Status("Splitting scanned photos…".into())),

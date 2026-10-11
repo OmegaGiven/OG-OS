@@ -1997,6 +1997,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "iced_fonts"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "df7deb0800a850ee25c8a42559f72c0f249e577feb3aad37b9b65dc1e517e52a"
+dependencies = [
+ "iced_core",
+]
+
+[[package]]
 name = "iced_futures"
 version = "0.13.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3433,6 +3442,7 @@ version = "0.1.0"
 dependencies = [
  "hayro",
  "iced",
+ "iced_fonts",
  "image 0.25.10",
  "lopdf",
  "mime_guess",

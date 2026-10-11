@@ -49,7 +49,13 @@ pub struct FakeScan {
 
 impl Default for FakeScan {
     fn default() -> Self {
-        Self { tilt: 0.8, noise: 0.25, blur: 0.2, yellow: 0.15, grayscale: true }
+        Self {
+            tilt: 0.8,
+            noise: 0.25,
+            blur: 0.2,
+            yellow: 0.15,
+            grayscale: true,
+        }
     }
 }
 
@@ -62,7 +68,12 @@ const FILTER_QUALITY: u8 = 85;
 const BLANK_DPI: f32 = 20.0;
 
 /// Render `pages` to image files named `page-01.png` … (zero-padded).
-pub fn render_pages(pdf: &[u8], pages: &[usize], dpi: f32, format: ImageFormat) -> Result<Vec<(String, Vec<u8>)>, String> {
+pub fn render_pages(
+    pdf: &[u8],
+    pages: &[usize],
+    dpi: f32,
+    format: ImageFormat,
+) -> Result<Vec<(String, Vec<u8>)>, String> {
     let doc = open_hayro(pdf)?;
     let count = doc.pages().len();
     let wanted = select(pages, count)?;
@@ -85,14 +96,18 @@ pub fn render_pages(pdf: &[u8], pages: &[usize], dpi: f32, format: ImageFormat) 
 pub fn rasterize(pdf: &[u8], pages: &[usize], dpi: f32, quality: u8) -> Result<Vec<u8>, String> {
     let doc = open_hayro(pdf)?;
     let wanted = select(pages, doc.pages().len())?;
-    process(pdf, &doc, &wanted, dpi, quality, |_, img| Ok(PageImage::Rgb(rgba_to_rgb(&img))))
+    process(pdf, &doc, &wanted, dpi, quality, |_, img| {
+        Ok(PageImage::Rgb(rgba_to_rgb(&img)))
+    })
 }
 
 /// Whole document to greyscale (rasterized at `dpi`).
 pub fn grayscale(pdf: &[u8], dpi: f32) -> Result<Vec<u8>, String> {
     let doc = open_hayro(pdf)?;
     let all: Vec<usize> = (0..doc.pages().len()).collect();
-    process(pdf, &doc, &all, dpi, FILTER_QUALITY, |_, img| Ok(PageImage::Gray(to_gray(&rgba_to_rgb(&img)))))
+    process(pdf, &doc, &all, dpi, FILTER_QUALITY, |_, img| {
+        Ok(PageImage::Gray(to_gray(&rgba_to_rgb(&img))))
+    })
 }
 
 /// Invert colours (dark mode for printing / reading), rasterized.
@@ -109,11 +124,25 @@ pub fn invert(pdf: &[u8], dpi: f32) -> Result<Vec<u8>, String> {
 }
 
 pub fn adjust_colors(pdf: &[u8], adjust: Adjust, dpi: f32) -> Result<Vec<u8>, String> {
-    let fin = |v: f32| if v.is_finite() { v.clamp(-1.0, 1.0) } else { 0.0 };
-    let (b, c, s) = (fin(adjust.brightness), fin(adjust.contrast), fin(adjust.saturation));
+    let fin = |v: f32| {
+        if v.is_finite() {
+            v.clamp(-1.0, 1.0)
+        } else {
+            0.0
+        }
+    };
+    let (b, c, s) = (
+        fin(adjust.brightness),
+        fin(adjust.contrast),
+        fin(adjust.saturation),
+    );
     let offset = b * 255.0;
     // contrast > 0 steepens towards a hard threshold, < 0 flattens to grey
-    let factor = if c >= 0.0 { 1.0 / (1.0 - c * 0.99) } else { 1.0 + c };
+    let factor = if c >= 0.0 {
+        1.0 / (1.0 - c * 0.99)
+    } else {
+        1.0 + c
+    };
     let sat = 1.0 + s;
     let doc = open_hayro(pdf)?;
     let all: Vec<usize> = (0..doc.pages().len()).collect();
@@ -134,8 +163,18 @@ pub fn adjust_colors(pdf: &[u8], adjust: Adjust, dpi: f32) -> Result<Vec<u8>, St
 
 /// Make the document look scanned.
 pub fn fake_scan(pdf: &[u8], opts: FakeScan, dpi: f32) -> Result<Vec<u8>, String> {
-    let unit = |v: f32| if v.is_finite() { v.clamp(0.0, 1.0) } else { 0.0 };
-    let tilt = if opts.tilt.is_finite() { opts.tilt.abs().min(45.0) } else { 0.0 };
+    let unit = |v: f32| {
+        if v.is_finite() {
+            v.clamp(0.0, 1.0)
+        } else {
+            0.0
+        }
+    };
+    let tilt = if opts.tilt.is_finite() {
+        opts.tilt.abs().min(45.0)
+    } else {
+        0.0
+    };
     let (noise, blur, yellow) = (unit(opts.noise), unit(opts.blur), unit(opts.yellow));
     let doc = open_hayro(pdf)?;
     let all: Vec<usize> = (0..doc.pages().len()).collect();
@@ -168,7 +207,11 @@ pub fn fake_scan(pdf: &[u8], opts: FakeScan, dpi: f32) -> Result<Vec<u8>, String
                 p.0 = p.0.map(|v| (v as f32 + n).round().clamp(0.0, 255.0) as u8);
             }
         }
-        Ok(if opts.grayscale { PageImage::Gray(to_gray(&rgb)) } else { PageImage::Rgb(rgb) })
+        Ok(if opts.grayscale {
+            PageImage::Gray(to_gray(&rgb))
+        } else {
+            PageImage::Rgb(rgb)
+        })
     })
 }
 
@@ -176,13 +219,20 @@ pub fn fake_scan(pdf: &[u8], opts: FakeScan, dpi: f32) -> Result<Vec<u8>, String
 /// with the regions painted solid black, so the covered content is gone.
 /// Regions are (page, x0, y0, x1, y1) in 0..1 of the page's visible area,
 /// origin top-left.
-pub fn redact_regions(pdf: &[u8], regions: &[(usize, f32, f32, f32, f32)], dpi: f32) -> Result<Vec<u8>, String> {
+pub fn redact_regions(
+    pdf: &[u8],
+    regions: &[(usize, f32, f32, f32, f32)],
+    dpi: f32,
+) -> Result<Vec<u8>, String> {
     let doc = open_hayro(pdf)?;
     let count = doc.pages().len();
     let mut by_page: BTreeMap<usize, Vec<[f32; 4]>> = BTreeMap::new();
     for &(page, x0, y0, x1, y1) in regions {
         if page >= count {
-            return Err(format!("page {} doesn't exist (document has {count})", page + 1));
+            return Err(format!(
+                "page {} doesn't exist (document has {count})",
+                page + 1
+            ));
         }
         if ![x0, y0, x1, y1].iter().all(|v| v.is_finite()) {
             return Err("invalid redaction rectangle".into());
@@ -197,11 +247,23 @@ pub fn redact_regions(pdf: &[u8], regions: &[(usize, f32, f32, f32, f32)], dpi: 
         let mut rgb = rgba_to_rgb(&img);
         let (w, h) = (rgb.width() as f32, rgb.height() as f32);
         for r in by_page.get(&page).into_iter().flatten() {
-            let (xa, xb) = (r[0].min(r[2]).clamp(0.0, 1.0), r[0].max(r[2]).clamp(0.0, 1.0));
-            let (ya, yb) = (r[1].min(r[3]).clamp(0.0, 1.0), r[1].max(r[3]).clamp(0.0, 1.0));
+            let (xa, xb) = (
+                r[0].min(r[2]).clamp(0.0, 1.0),
+                r[0].max(r[2]).clamp(0.0, 1.0),
+            );
+            let (ya, yb) = (
+                r[1].min(r[3]).clamp(0.0, 1.0),
+                r[1].max(r[3]).clamp(0.0, 1.0),
+            );
             // round outwards: never leave a sliver of the covered content
-            let (px0, px1) = ((xa * w).floor() as u32, ((xb * w).ceil() as u32).min(rgb.width()));
-            let (py0, py1) = ((ya * h).floor() as u32, ((yb * h).ceil() as u32).min(rgb.height()));
+            let (px0, px1) = (
+                (xa * w).floor() as u32,
+                ((xb * w).ceil() as u32).min(rgb.width()),
+            );
+            let (py0, py1) = (
+                (ya * h).floor() as u32,
+                ((yb * h).ceil() as u32).min(rgb.height()),
+            );
             for y in py0..py1 {
                 for x in px0..px1 {
                     rgb.put_pixel(x, y, Rgb([0, 0, 0]));
@@ -215,14 +277,21 @@ pub fn redact_regions(pdf: &[u8], regions: &[(usize, f32, f32, f32, f32)], dpi: 
 /// Indices of pages that are (nearly) blank: fewer than `max_ink` (0..1) of
 /// pixels darker than near-white at a low-resolution render.
 pub fn blank_pages(pdf: &[u8], max_ink: f32) -> Result<Vec<usize>, String> {
-    let max_ink = if max_ink.is_finite() { max_ink.clamp(0.0, 1.0) } else { 0.0 };
+    let max_ink = if max_ink.is_finite() {
+        max_ink.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
     let doc = open_hayro(pdf)?;
     let cache = RenderCache::new();
     let mut blank = Vec::new();
     for i in 0..doc.pages().len() {
         let (img, _) = render_page(&doc, &cache, i, BLANK_DPI)?;
         let total = (img.width() as u64 * img.height() as u64).max(1);
-        let ink = img.pixels().filter(|p| p.0[..3].iter().any(|&c| c < 230)).count() as u64;
+        let ink = img
+            .pixels()
+            .filter(|p| p.0[..3].iter().any(|&c| c < 230))
+            .count() as u64;
         if ink as f64 / total as f64 <= max_ink as f64 {
             blank.push(i);
         }
@@ -253,7 +322,10 @@ fn select(pages: &[usize], count: usize) -> Result<Vec<usize>, String> {
     }
     let set: BTreeSet<usize> = pages.iter().copied().collect();
     if let Some(&bad) = set.iter().find(|&&p| p >= count) {
-        return Err(format!("page {} doesn't exist (document has {count})", bad + 1));
+        return Err(format!(
+            "page {} doesn't exist (document has {count})",
+            bad + 1
+        ));
     }
     Ok(set.into_iter().collect())
 }
@@ -269,8 +341,16 @@ fn effective_scale(dpi: f32, w: f32, h: f32) -> Result<f32, String> {
 
 /// Render page `i` on white; returns the RGBA bitmap and the page's visible
 /// size in points (rotation applied).
-fn render_page<'a>(doc: &'a Pdf, cache: &RenderCache<'a>, i: usize, dpi: f32) -> Result<(RgbaImage, (f32, f32)), String> {
-    let page = doc.pages().get(i).ok_or_else(|| format!("no page {}", i + 1))?;
+fn render_page<'a>(
+    doc: &'a Pdf,
+    cache: &RenderCache<'a>,
+    i: usize,
+    dpi: f32,
+) -> Result<(RgbaImage, (f32, f32)), String> {
+    let page = doc
+        .pages()
+        .get(i)
+        .ok_or_else(|| format!("no page {}", i + 1))?;
     let (w, h) = page.render_dimensions();
     if !(w.is_finite() && h.is_finite() && w > 0.0 && h > 0.0) {
         return Err(format!("page {} has no size", i + 1));
@@ -282,7 +362,12 @@ fn render_page<'a>(doc: &'a Pdf, cache: &RenderCache<'a>, i: usize, dpi: f32) ->
             page,
             cache,
             &settings,
-            &RenderSettings { x_scale: scale, y_scale: scale, bg_color: WHITE, ..Default::default() },
+            &RenderSettings {
+                x_scale: scale,
+                y_scale: scale,
+                bg_color: WHITE,
+                ..Default::default()
+            },
         )
     }))
     .map_err(|_| format!("page {} failed to render", i + 1))?;
@@ -315,7 +400,9 @@ fn to_gray(img: &RgbImage) -> GrayImage {
     let mut out: GrayImage = ImageBuffer::new(img.width(), img.height());
     for (d, s) in out.pixels_mut().zip(img.pixels()) {
         let [r, g, b] = s.0.map(|v| v as f32);
-        *d = Luma([(0.299 * r + 0.587 * g + 0.114 * b).round().clamp(0.0, 255.0) as u8]);
+        *d = Luma([(0.299 * r + 0.587 * g + 0.114 * b)
+            .round()
+            .clamp(0.0, 255.0) as u8]);
     }
     out
 }
@@ -342,7 +429,12 @@ fn rotate_white(img: &RgbImage, rad: f32) -> RgbImage {
             let (x0, y0) = (sx.floor(), sy.floor());
             let (fx, fy) = (sx - x0, sy - y0);
             let (x0, y0) = (x0 as i64, y0 as i64);
-            let (a, b, c, d) = (sample(x0, y0), sample(x0 + 1, y0), sample(x0, y0 + 1), sample(x0 + 1, y0 + 1));
+            let (a, b, c, d) = (
+                sample(x0, y0),
+                sample(x0 + 1, y0),
+                sample(x0, y0 + 1),
+                sample(x0 + 1, y0 + 1),
+            );
             let mut px = [0u8; 3];
             for k in 0..3 {
                 let top = a[k] + (b[k] - a[k]) * fx;
@@ -385,7 +477,8 @@ impl XorShift {
 
 fn encode_png(img: &RgbaImage) -> Result<Vec<u8>, String> {
     let mut buf = std::io::Cursor::new(Vec::new());
-    img.write_to(&mut buf, image::ImageFormat::Png).map_err(|e| format!("PNG encoding failed: {e}"))?;
+    img.write_to(&mut buf, image::ImageFormat::Png)
+        .map_err(|e| format!("PNG encoding failed: {e}"))?;
     Ok(buf.into_inner())
 }
 
@@ -407,7 +500,14 @@ fn encode_jpeg_gray(img: &GrayImage, quality: u8) -> Result<Vec<u8>, String> {
 
 /// Render each page in `pages`, transform it with `f`, and splice the
 /// results into the document as image-only pages.
-fn process<F>(pdf: &[u8], doc: &Pdf, pages: &[usize], dpi: f32, quality: u8, mut f: F) -> Result<Vec<u8>, String>
+fn process<F>(
+    pdf: &[u8],
+    doc: &Pdf,
+    pages: &[usize],
+    dpi: f32,
+    quality: u8,
+    mut f: F,
+) -> Result<Vec<u8>, String>
 where
     F: FnMut(usize, RgbaImage) -> Result<PageImage, String>,
 {
@@ -416,7 +516,8 @@ where
     }
     let mut ldoc = Document::load_mem(pdf).map_err(|e| format!("can't read PDF ({e})"))?;
     if ldoc.is_encrypted() {
-        ldoc.decrypt("").map_err(|_| "PDF is password-protected".to_string())?;
+        ldoc.decrypt("")
+            .map_err(|_| "PDF is password-protected".to_string())?;
     }
     let page_ids: Vec<ObjectId> = ldoc.get_pages().into_values().collect();
     if page_ids.len() != doc.pages().len() {
@@ -426,14 +527,25 @@ where
     for &i in pages {
         let (img, (w, h)) = render_page(doc, &cache, i, dpi)?;
         let (jpeg, cs, iw, ih) = match f(i, img)? {
-            PageImage::Rgb(rgb) => (encode_jpeg_rgb(&rgb, quality)?, "DeviceRGB", rgb.width(), rgb.height()),
-            PageImage::Gray(g) => (encode_jpeg_gray(&g, quality)?, "DeviceGray", g.width(), g.height()),
+            PageImage::Rgb(rgb) => (
+                encode_jpeg_rgb(&rgb, quality)?,
+                "DeviceRGB",
+                rgb.width(),
+                rgb.height(),
+            ),
+            PageImage::Gray(g) => (
+                encode_jpeg_gray(&g, quality)?,
+                "DeviceGray",
+                g.width(),
+                g.height(),
+            ),
         };
         replace_page(&mut ldoc, page_ids[i], jpeg, cs, (iw, ih), (w, h))?;
     }
     ldoc.prune_objects();
     let mut buf = Vec::new();
-    ldoc.save_to(&mut buf).map_err(|e| format!("can't write PDF ({e})"))?;
+    ldoc.save_to(&mut buf)
+        .map_err(|e| format!("can't write PDF ({e})"))?;
     Ok(buf)
 }
 
@@ -469,9 +581,21 @@ fn replace_page(
     let media_box: Vec<Object> = vec![0.into(), 0.into(), Object::Real(w), Object::Real(h)];
     let dict = doc.get_dictionary_mut(page).map_err(|e| e.to_string())?;
     dict.set("Contents", content_id);
-    dict.set("Resources", dictionary! { "XObject" => dictionary! { "Im0" => image_id } });
+    dict.set(
+        "Resources",
+        dictionary! { "XObject" => dictionary! { "Im0" => image_id } },
+    );
     dict.set("MediaBox", media_box.clone());
-    for k in [&b"CropBox"[..], b"BleedBox", b"TrimBox", b"ArtBox", b"Rotate", b"Annots", b"Thumb", b"Group"] {
+    for k in [
+        &b"CropBox"[..],
+        b"BleedBox",
+        b"TrimBox",
+        b"ArtBox",
+        b"Rotate",
+        b"Annots",
+        b"Thumb",
+        b"Group",
+    ] {
         dict.remove(k);
     }
     // inheritable keys would otherwise come back from the page tree
@@ -497,7 +621,9 @@ fn inherited(doc: &Document, page: ObjectId, key: &[u8]) -> bool {
         if guard > 64 {
             return false;
         }
-        let Ok(d) = doc.get_dictionary(pid) else { return false };
+        let Ok(d) = doc.get_dictionary(pid) else {
+            return false;
+        };
         if d.has(key) {
             return true;
         }
@@ -509,7 +635,11 @@ fn inherited(doc: &Document, page: ObjectId, key: &[u8]) -> bool {
 fn fmt_num(v: f32) -> String {
     let s = format!("{v:.3}");
     let s = s.trim_end_matches('0').trim_end_matches('.');
-    if s.is_empty() || s == "-" { "0".into() } else { s.to_string() }
+    if s.is_empty() || s == "-" {
+        "0".into()
+    } else {
+        s.to_string()
+    }
 }
 
 #[cfg(test)]
@@ -536,7 +666,10 @@ mod tests {
                     Operation::new("BT", vec![]),
                     Operation::new("Tf", vec!["F1".into(), 24.into()]),
                     Operation::new("Td", vec![72.into(), 700.into()]),
-                    Operation::new("Tj", vec![Object::string_literal(format!("{tag} page {}", i + 1))]),
+                    Operation::new(
+                        "Tj",
+                        vec![Object::string_literal(format!("{tag} page {}", i + 1))],
+                    ),
                     Operation::new("ET", vec![]),
                     Operation::new("rg", vec![0.into(), 0.into(), 0.into()]),
                     Operation::new("re", vec![72.into(), 72.into(), 200.into(), 200.into()]),
@@ -546,8 +679,10 @@ mod tests {
             let content = Content { operations };
             let c = doc.add_object(Stream::new(dictionary! {}, content.encode().unwrap()));
             kids.push(
-                doc.add_object(dictionary! { "Type" => "Page", "Parent" => pages_id, "Contents" => c })
-                    .into(),
+                doc.add_object(
+                    dictionary! { "Type" => "Page", "Parent" => pages_id, "Contents" => c },
+                )
+                .into(),
             );
         }
         doc.objects.insert(
@@ -583,7 +718,10 @@ mod tests {
 
     fn text_of(pdf: &[u8], page: u32) -> String {
         let doc = Document::load_mem(pdf).unwrap();
-        doc.extract_text(&[page]).unwrap_or_default().trim().to_string()
+        doc.extract_text(&[page])
+            .unwrap_or_default()
+            .trim()
+            .to_string()
     }
 
     fn page_count(pdf: &[u8]) -> usize {
@@ -640,7 +778,10 @@ mod tests {
         doc.save_to(&mut rotated).unwrap();
         let out = rasterize(&rotated, &[0], 30.0, 80).unwrap();
         let img = render(&out, 0, 30.0);
-        assert!(img.width() > img.height(), "landscape after baking rotation");
+        assert!(
+            img.width() > img.height(),
+            "landscape after baking rotation"
+        );
     }
 
     #[test]
@@ -655,23 +796,53 @@ mod tests {
 
         let inv = invert(&pdf, 40.0).unwrap();
         let r = render(&inv, 0, 36.0);
-        assert!(px(&r, WHITE_SPOT.0, WHITE_SPOT.1).iter().all(|&c| c < 40), "white became dark");
-        assert!(px(&r, RECT.0, RECT.1).iter().all(|&c| c > 215), "black became light");
+        assert!(
+            px(&r, WHITE_SPOT.0, WHITE_SPOT.1).iter().all(|&c| c < 40),
+            "white became dark"
+        );
+        assert!(
+            px(&r, RECT.0, RECT.1).iter().all(|&c| c > 215),
+            "black became light"
+        );
 
-        let dark = adjust_colors(&pdf, Adjust { brightness: -0.5, contrast: 0.0, saturation: 0.0 }, 40.0).unwrap();
+        let dark = adjust_colors(
+            &pdf,
+            Adjust {
+                brightness: -0.5,
+                contrast: 0.0,
+                saturation: 0.0,
+            },
+            40.0,
+        )
+        .unwrap();
         let r = render(&dark, 1, 36.0);
         let w = px(&r, WHITE_SPOT.0, WHITE_SPOT.1);
         assert!(w.iter().all(|&c| (110..=150).contains(&c)), "{w:?}");
 
-        let flat = adjust_colors(&pdf, Adjust { brightness: 0.0, contrast: -1.0, saturation: 0.0 }, 40.0).unwrap();
+        let flat = adjust_colors(
+            &pdf,
+            Adjust {
+                brightness: 0.0,
+                contrast: -1.0,
+                saturation: 0.0,
+            },
+            40.0,
+        )
+        .unwrap();
         let r = render(&flat, 0, 36.0);
-        assert!(px(&r, RECT.0, RECT.1).iter().all(|&c| (110..=150).contains(&c)));
+        assert!(px(&r, RECT.0, RECT.1)
+            .iter()
+            .all(|&c| (110..=150).contains(&c)));
     }
 
     #[test]
     fn fake_scan_is_deterministic_and_changes_pixels() {
         let pdf = sample(2, "S", &[]);
-        let opts = FakeScan { grayscale: false, yellow: 1.0, ..FakeScan::default() };
+        let opts = FakeScan {
+            grayscale: false,
+            yellow: 1.0,
+            ..FakeScan::default()
+        };
         let a = fake_scan(&pdf, opts, 40.0).unwrap();
         let b = fake_scan(&pdf, opts, 40.0).unwrap();
         assert_eq!(page_count(&a), 2);
@@ -692,13 +863,24 @@ mod tests {
     fn redact_paints_black_and_removes_text() {
         let pdf = sample(2, "SECRET", &[]);
         // text baseline at y=700 → top-left y ≈ 92/792
-        let out = redact_regions(&pdf, &[(0, 0.5, 0.4, 0.9, 0.6), (0, 0.1, 0.08, 0.6, 0.13)], 40.0).unwrap();
+        let out = redact_regions(
+            &pdf,
+            &[(0, 0.5, 0.4, 0.9, 0.6), (0, 0.1, 0.08, 0.6, 0.13)],
+            40.0,
+        )
+        .unwrap();
         assert_eq!(page_count(&out), 2);
         assert!(text_of(&out, 1).is_empty());
         assert!(text_of(&out, 2).contains("SECRET page 2"));
         let r = render(&out, 0, 36.0);
-        assert!(px(&r, WHITE_SPOT.0, WHITE_SPOT.1).iter().all(|&c| c < 30), "region black");
-        assert!(px(&r, 100.0, 300.0).iter().all(|&c| c > 220), "outside untouched");
+        assert!(
+            px(&r, WHITE_SPOT.0, WHITE_SPOT.1).iter().all(|&c| c < 30),
+            "region black"
+        );
+        assert!(
+            px(&r, 100.0, 300.0).iter().all(|&c| c > 220),
+            "outside untouched"
+        );
         assert!(redact_regions(&pdf, &[(4, 0.0, 0.0, 1.0, 1.0)], 40.0).is_err());
         assert!(redact_regions(&pdf, &[], 40.0).is_err());
     }

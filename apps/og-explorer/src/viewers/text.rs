@@ -69,7 +69,7 @@ impl State {
     pub fn update(&mut self, msg: Msg) -> (Task<Msg>, Option<Event>) {
         match msg {
             Msg::Edit(a) => {
-                // the editor is disabled outside edit mode, but guard anyway
+                // read-only: selection and cursor moves only, no edits
                 if self.editing || !a.is_edit() {
                     self.dirty |= a.is_edit();
                     self.content.perform(a);
@@ -162,12 +162,12 @@ impl State {
             .align_y(iced::Alignment::Center)
             .into()
         };
-        let mut editor = text_editor(&self.content)
+        // always interactive so read-only text can still be selected and
+        // copied; `update` drops edit actions unless in edit mode
+        let editor = text_editor(&self.content)
             .font(Font::MONOSPACE)
-            .height(Length::Fill);
-        if self.editing {
-            editor = editor.on_action(Msg::Edit);
-        }
+            .height(Length::Fill)
+            .on_action(Msg::Edit);
         column![bar, editor].spacing(6).into()
     }
 }

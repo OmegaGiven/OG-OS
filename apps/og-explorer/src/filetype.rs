@@ -64,8 +64,25 @@ impl Kind {
         }
     }
 
-    /// Short text tag instead of a symbol glyph: iced's default font has no
-    /// arrows/geometric shapes (they render as tofu). Real icons: SPEC.md §7.
+    /// Icon from the bundled Bootstrap Icons font (see `widgets::icon`).
+    pub fn glyph(self) -> iced_fonts::Bootstrap {
+        use iced_fonts::Bootstrap as B;
+        match self {
+            Kind::Folder => B::FolderFill,
+            Kind::Text => B::FileEarmarkText,
+            Kind::Image => B::FileEarmarkImage,
+            Kind::Video => B::FileEarmarkPlay,
+            Kind::Audio => B::FileEarmarkMusic,
+            Kind::Table => B::FileEarmarkSpreadsheet,
+            Kind::Doc => B::FileEarmarkRichtext,
+            Kind::Model3d => B::Box,
+            Kind::Archive => B::FileEarmarkZip,
+            Kind::Binary => B::FileEarmarkBinary,
+        }
+    }
+
+    /// Short text tag (used where an icon font isn't appropriate).
+    #[allow(dead_code)]
     pub fn icon(self) -> &'static str {
         match self {
             Kind::Folder => "DIR",

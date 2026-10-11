@@ -29,12 +29,12 @@ use iced::widget::{
     text_input, Space,
 };
 use iced::{Element, Length, Point, Radians, Rotation, Task};
-use toolpanel::{Action, Form, FormMsg, JobOut, Tool};
-use tools::server::ServerConfig;
-use tools::Output;
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use toolpanel::{Action, Form, FormMsg, JobOut, Tool};
+use tools::server::ServerConfig;
+use tools::Output;
 
 const THUMB_W: f32 = 110.0;
 // render a bit above display size so text stays crisp on HiDPI screens
@@ -202,11 +202,20 @@ impl State {
         // OGX_TOOL="Watermark" (a tool label) opens that tool
         if let Ok(want) = std::env::var("OGX_TOOL") {
             s.tools_open = true;
-            s.tool = toolpanel::CATEGORIES.iter().flat_map(|(_, t)| t.iter()).copied().find(|t| t.label() == want);
+            s.tool = toolpanel::CATEGORIES
+                .iter()
+                .flat_map(|(_, t)| t.iter())
+                .copied()
+                .find(|t| t.label() == want);
         }
         let t = s.reset(source);
         let srv = Task::perform(
-            async { tokio::task::spawn_blocking(ServerConfig::load).await.ok().flatten() },
+            async {
+                tokio::task::spawn_blocking(ServerConfig::load)
+                    .await
+                    .ok()
+                    .flatten()
+            },
             Msg::ServerLoaded,
         );
         (s, Task::batch([t, srv]))
@@ -332,7 +341,11 @@ impl State {
     fn doc_thunk(&self) -> impl FnOnce() -> Result<Arc<Vec<u8>>, String> + Send + 'static {
         let identity = self.sources.len() == 1
             && self.plan.len() == self.sources[0].sizes.len()
-            && self.plan.iter().enumerate().all(|(i, p)| p.src == 0 && p.page == i && p.rot == 0);
+            && self
+                .plan
+                .iter()
+                .enumerate()
+                .all(|(i, p)| p.src == 0 && p.page == i && p.rot == 0);
         let srcs = self.sources_bytes();
         let plan = self.plan_tuples(&(0..self.plan.len()).collect::<Vec<_>>());
         move || {
@@ -345,7 +358,9 @@ impl State {
     }
 
     fn run_tool(&mut self, new_file: bool) -> (Task<Msg>, Option<Event>) {
-        let Some(tool) = self.tool else { return (Task::none(), None) };
+        let Some(tool) = self.tool else {
+            return (Task::none(), None);
+        };
         if self.busy {
             return (Task::none(), None);
         }
@@ -353,12 +368,21 @@ impl State {
             page_count: self.plan.len(),
             current: self.current,
             selected: self.selected.iter().copied().collect(),
-            file_name: self.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+            file_name: self
+                .path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default(),
             server: self.server.clone(),
         };
         let job = match toolpanel::job(tool, &self.form, input) {
             Ok(j) => j,
-            Err(e) => return (Task::none(), Some(Event::Status(format!("{}: {e}", tool.label())))),
+            Err(e) => {
+                return (
+                    Task::none(),
+                    Some(Event::Status(format!("{}: {e}", tool.label()))),
+                )
+            }
         };
         self.busy = true;
         let doc = self.doc_thunk();
@@ -370,7 +394,10 @@ impl State {
             },
             move |r| Msg::ToolDone(tool, new_file, r),
         );
-        (task, Some(Event::Status(format!("Running {}…", tool.label()))))
+        (
+            task,
+            Some(Event::Status(format!("Running {}…", tool.label()))),
+        )
     }
 
     fn write_files(&self, files: Vec<(String, Vec<u8>)>) -> Task<Msg> {
@@ -398,7 +425,10 @@ impl State {
         }
         let (w, h) = self.sources[pg.src].sizes[pg.page];
         let (dw, dh) = (w * self.zoom(), h * self.zoom());
-        Some(((self.mouse.0 / dw).clamp(0.0, 1.0), (self.mouse.1 / dh).clamp(0.0, 1.0)))
+        Some((
+            (self.mouse.0 / dw).clamp(0.0, 1.0),
+            (self.mouse.1 / dh).clamp(0.0, 1.0),
+        ))
     }
 
     pub fn update(&mut self, msg: Msg) -> (Task<Msg>, Option<Event>) {
@@ -661,18 +691,30 @@ impl State {
                 self.busy = false;
                 let r = match r {
                     Ok(r) => r,
-                    Err(e) => return (Task::none(), Some(Event::Status(format!("{}: {e}", tool.label())))),
+                    Err(e) => {
+                        return (
+                            Task::none(),
+                            Some(Event::Status(format!("{}: {e}", tool.label()))),
+                        )
+                    }
                 };
-                let slug = tool.label().to_lowercase().replace(|c: char| !c.is_alphanumeric(), "-");
+                let slug = tool
+                    .label()
+                    .to_lowercase()
+                    .replace(|c: char| !c.is_alphanumeric(), "-");
                 let slug = slug.trim_matches('-').replace("--", "-");
                 match r {
-                    JobOut::Out(Output::Pdf(bytes)) | JobOut::Insert(bytes) if new_file || !self.editing => {
+                    JobOut::Out(Output::Pdf(bytes)) | JobOut::Insert(bytes)
+                        if new_file || !self.editing =>
+                    {
                         self.busy = true;
                         (self.write_files(vec![(format!("{slug}.pdf"), bytes)]), None)
                     }
                     JobOut::Out(Output::Pdf(bytes)) => {
                         self.busy = true;
-                        let task = Task::perform(open_bytes(self.path.clone(), bytes), move |r| Msg::WorkingLoaded(tool, r));
+                        let task = Task::perform(open_bytes(self.path.clone(), bytes), move |r| {
+                            Msg::WorkingLoaded(tool, r)
+                        });
                         (task, None)
                     }
                     JobOut::Insert(bytes) => {
@@ -686,12 +728,18 @@ impl State {
                     }
                     JobOut::Out(Output::Report(r)) => {
                         self.report = Some((tool, r));
-                        (Task::none(), Some(Event::Status(format!("{} done", tool.label()))))
+                        (
+                            Task::none(),
+                            Some(Event::Status(format!("{} done", tool.label()))),
+                        )
                     }
                     JobOut::Select(p) => {
                         let n = p.len();
                         self.selected = p.into_iter().collect();
-                        (Task::none(), Some(Event::Status(format!("{n} pages selected"))))
+                        (
+                            Task::none(),
+                            Some(Event::Status(format!("{n} pages selected"))),
+                        )
                     }
                     JobOut::Prefill(v) => {
                         self.form.prefill(v);
@@ -699,7 +747,12 @@ impl State {
                     }
                     JobOut::Rename(name) => {
                         if self.dirty {
-                            return (Task::none(), Some(Event::Status("Save or discard edits before renaming".into())));
+                            return (
+                                Task::none(),
+                                Some(Event::Status(
+                                    "Save or discard edits before renaming".into(),
+                                )),
+                            );
                         }
                         let from = self.path.clone();
                         let task = Task::perform(
@@ -712,7 +765,9 @@ impl State {
                                     to = dir.join(format!("{stem} ({n}).pdf"));
                                     n += 1;
                                 }
-                                tokio::fs::rename(&from, &to).await.map_err(|e| e.to_string())?;
+                                tokio::fs::rename(&from, &to)
+                                    .await
+                                    .map_err(|e| e.to_string())?;
                                 Ok(to)
                             },
                             Msg::Renamed,
@@ -728,9 +783,21 @@ impl State {
                         let t = self.reset(src);
                         self.dirty = true;
                         self.form.regions.clear();
-                        (t, Some(Event::Status(format!("{} applied — Save to keep it, Discard to undo", tool.label()))))
+                        (
+                            t,
+                            Some(Event::Status(format!(
+                                "{} applied — Save to keep it, Discard to undo",
+                                tool.label()
+                            ))),
+                        )
                     }
-                    Err(e) => (Task::none(), Some(Event::Status(format!("{}: result didn't load: {e}", tool.label())))),
+                    Err(e) => (
+                        Task::none(),
+                        Some(Event::Status(format!(
+                            "{}: result didn't load: {e}",
+                            tool.label()
+                        ))),
+                    ),
                 }
             }
             Msg::Renamed(r) => match r {
@@ -741,7 +808,10 @@ impl State {
                     }
                     (Task::none(), Some(Event::Renamed(p)))
                 }
-                Err(e) => (Task::none(), Some(Event::Status(format!("Rename failed: {e}")))),
+                Err(e) => (
+                    Task::none(),
+                    Some(Event::Status(format!("Rename failed: {e}"))),
+                ),
             },
             Msg::PageMove(p) => {
                 self.mouse = (p.x, p.y);
@@ -756,15 +826,24 @@ impl State {
                     self.form.sig_at = Some(pt);
                     none
                 }
-                (Some(Tool::RedactAreas | Tool::Signature), None) => {
-                    (Task::none(), Some(Event::Status("Save pending rotations first, then place boxes".into())))
-                }
+                (Some(Tool::RedactAreas | Tool::Signature), None) => (
+                    Task::none(),
+                    Some(Event::Status(
+                        "Save pending rotations first, then place boxes".into(),
+                    )),
+                ),
                 _ => none,
             },
             Msg::PageRelease => {
                 if let (Some((x0, y0)), Some((x1, y1))) = (self.drag.take(), self.pointer_norm()) {
                     if (x1 - x0).abs() > 0.005 && (y1 - y0).abs() > 0.005 {
-                        self.form.regions.push((self.current, x0.min(x1), y0.min(y1), x0.max(x1), y0.max(y1)));
+                        self.form.regions.push((
+                            self.current,
+                            x0.min(x1),
+                            y0.min(y1),
+                            x0.max(x1),
+                            y0.max(y1),
+                        ));
                     }
                 }
                 none
@@ -777,7 +856,10 @@ impl State {
                 self.plan.splice(at..at, copies);
                 self.selected.clear();
                 self.current = at;
-                (self.edited(), Some(Event::Status(format!("Duplicated {n} page(s)"))))
+                (
+                    self.edited(),
+                    Some(Event::Status(format!("Duplicated {n} page(s)"))),
+                )
             }
             Msg::InsertBlank if self.editing => {
                 let pg = self.plan[self.current];
@@ -786,9 +868,10 @@ impl State {
                 self.busy = true;
                 let task = Task::perform(
                     async move {
-                        let bytes = tokio::task::spawn_blocking(move || tools::layout::blank_page(w, h))
-                            .await
-                            .map_err(|e| e.to_string())??;
+                        let bytes =
+                            tokio::task::spawn_blocking(move || tools::layout::blank_page(w, h))
+                                .await
+                                .map_err(|e| e.to_string())??;
                         open_bytes(p, bytes).await
                     },
                     Msg::Inserted,
@@ -801,7 +884,9 @@ impl State {
                 let base = self.path.clone();
                 let task = Task::perform(
                     async move {
-                        let bytes = tokio::task::spawn_blocking(doc).await.map_err(|e| e.to_string())??;
+                        let bytes = tokio::task::spawn_blocking(doc)
+                            .await
+                            .map_err(|e| e.to_string())??;
                         let out = unique_sibling(&base, "copy.pdf").await;
                         fsops::write_bytes(out.clone(), bytes.to_vec()).await?;
                         Ok(vec![out])
@@ -812,22 +897,38 @@ impl State {
             }
             Msg::SaveReport => match &self.report {
                 Some((tool, r)) => {
-                    let slug = tool.label().to_lowercase().replace(|c: char| !c.is_alphanumeric(), "-");
+                    let slug = tool
+                        .label()
+                        .to_lowercase()
+                        .replace(|c: char| !c.is_alphanumeric(), "-");
                     self.busy = true;
-                    (self.write_files(vec![(format!("{}.txt", slug.trim_matches('-')), r.clone().into_bytes())]), None)
+                    (
+                        self.write_files(vec![(
+                            format!("{}.txt", slug.trim_matches('-')),
+                            r.clone().into_bytes(),
+                        )]),
+                        None,
+                    )
                 }
                 None => none,
             },
             Msg::ServerLoaded(cfg) => {
                 if let Some(c) = &cfg {
-                    self.form.prefill(vec![("srv_url", c.url.clone()), ("srv_key", c.api_key.clone())]);
+                    self.form.prefill(vec![
+                        ("srv_url", c.url.clone()),
+                        ("srv_key", c.api_key.clone()),
+                    ]);
                 }
                 self.server = cfg;
                 none
             }
             Msg::ServerSave => {
                 let cfg = ServerConfig {
-                    url: self.form_text("srv_url").trim().trim_end_matches('/').to_string(),
+                    url: self
+                        .form_text("srv_url")
+                        .trim()
+                        .trim_end_matches('/')
+                        .to_string(),
                     api_key: self.form_text("srv_key").trim().to_string(),
                 };
                 let task = Task::perform(
@@ -835,14 +936,22 @@ impl State {
                         let path = crate::config::config_dir().join("stirling.json");
                         let json = serde_json::to_string_pretty(&cfg).map_err(|e| e.to_string())?;
                         if let Some(d) = path.parent() {
-                            tokio::fs::create_dir_all(d).await.map_err(|e| e.to_string())?;
+                            tokio::fs::create_dir_all(d)
+                                .await
+                                .map_err(|e| e.to_string())?;
                         }
-                        tokio::fs::write(&path, json).await.map_err(|e| e.to_string())?;
+                        tokio::fs::write(&path, json)
+                            .await
+                            .map_err(|e| e.to_string())?;
                         // the key is a secret: keep the file private
                         #[cfg(unix)]
                         {
                             use std::os::unix::fs::PermissionsExt;
-                            let _ = tokio::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).await;
+                            let _ = tokio::fs::set_permissions(
+                                &path,
+                                std::fs::Permissions::from_mode(0o600),
+                            )
+                            .await;
                         }
                         Ok(cfg)
                     },
@@ -853,9 +962,15 @@ impl State {
             Msg::ServerSaved(r) => match r {
                 Ok(c) => {
                     self.server = (!c.url.is_empty()).then_some(c);
-                    (Task::none(), Some(Event::Status("Server settings saved".into())))
+                    (
+                        Task::none(),
+                        Some(Event::Status("Server settings saved".into())),
+                    )
                 }
-                Err(e) => (Task::none(), Some(Event::Status(format!("Couldn't save server settings: {e}")))),
+                Err(e) => (
+                    Task::none(),
+                    Some(Event::Status(format!("Couldn't save server settings: {e}"))),
+                ),
             },
             Msg::ServerTest => match self.server.clone() {
                 Some(c) => (
@@ -869,7 +984,10 @@ impl State {
                     ),
                     None,
                 ),
-                None => (Task::none(), Some(Event::Status("Save the server settings first".into()))),
+                None => (
+                    Task::none(),
+                    Some(Event::Status("Save the server settings first".into())),
+                ),
             },
             Msg::ServerTested(r) => (
                 Task::none(),
@@ -933,7 +1051,11 @@ impl State {
                 .style(button::secondary),
             button(small("Tools"))
                 .on_press(Msg::ToggleTools)
-                .style(if self.tools_open { button::primary } else { button::secondary }),
+                .style(if self.tools_open {
+                    button::primary
+                } else {
+                    button::secondary
+                }),
             if self.editing {
                 button(small("Done"))
                     .on_press_maybe((!self.dirty).then_some(Msg::ToggleEdit))
@@ -1079,28 +1201,71 @@ impl State {
         // box tools: track the pointer over the page and draw marks on top
         if matches!(self.tool, Some(Tool::RedactAreas | Tool::Signature)) && self.tools_open {
             let mut layers = vec![page];
-            let boxed = |x0: f32, y0: f32, x1: f32, y1: f32, fill: iced::Color, border: iced::Color| -> Element<'_, Msg> {
+            let boxed = |x0: f32,
+                         y0: f32,
+                         x1: f32,
+                         y1: f32,
+                         fill: iced::Color,
+                         border: iced::Color|
+             -> Element<'_, Msg> {
                 container(
-                    container(Space::new(Length::Fixed((x1 - x0) * dw), Length::Fixed((y1 - y0) * dh))).style(move |_| container::Style {
+                    container(Space::new(
+                        Length::Fixed((x1 - x0) * dw),
+                        Length::Fixed((y1 - y0) * dh),
+                    ))
+                    .style(move |_| container::Style {
                         background: Some(fill.into()),
-                        border: iced::Border { color: border, width: 1.5, radius: 2.0.into() },
+                        border: iced::Border {
+                            color: border,
+                            width: 1.5,
+                            radius: 2.0.into(),
+                        },
                         ..Default::default()
                     }),
                 )
-                .padding(iced::Padding { top: y0 * dh, left: x0 * dw, ..Default::default() })
+                .padding(iced::Padding {
+                    top: y0 * dh,
+                    left: x0 * dw,
+                    ..Default::default()
+                })
                 .into()
             };
-            let black = iced::Color { a: 0.7, ..iced::Color::BLACK };
+            let black = iced::Color {
+                a: 0.7,
+                ..iced::Color::BLACK
+            };
             for &(p, x0, y0, x1, y1) in &self.form.regions {
                 if p == self.current {
-                    layers.push(boxed(x0, y0, x1, y1, black, iced::Color::from_rgb8(0xff, 0x40, 0x40)));
+                    layers.push(boxed(
+                        x0,
+                        y0,
+                        x1,
+                        y1,
+                        black,
+                        iced::Color::from_rgb8(0xff, 0x40, 0x40),
+                    ));
                 }
             }
             if let (Some((x0, y0)), Some((x1, y1))) = (self.drag, self.pointer_norm()) {
-                layers.push(boxed(x0.min(x1), y0.min(y1), x0.max(x1), y0.max(y1), iced::Color { a: 0.3, ..iced::Color::BLACK }, iced::Color::WHITE));
+                layers.push(boxed(
+                    x0.min(x1),
+                    y0.min(y1),
+                    x0.max(x1),
+                    y0.max(y1),
+                    iced::Color {
+                        a: 0.3,
+                        ..iced::Color::BLACK
+                    },
+                    iced::Color::WHITE,
+                ));
             }
             if let (Some(Tool::Signature), Some((x, y))) = (self.tool, self.form.sig_at) {
-                let sw = self.form_text("width").trim().parse::<f32>().unwrap_or(160.0) / w;
+                let sw = self
+                    .form_text("width")
+                    .trim()
+                    .parse::<f32>()
+                    .unwrap_or(160.0)
+                    / w;
                 let sh = sw * w * toolpanel::SIG_ASPECT / h;
                 layers.push(boxed(
                     (x - sw / 2.0).max(0.0),
@@ -1131,7 +1296,12 @@ impl State {
         ]
         .spacing(8);
         if self.tools_open {
-            body = body.push(container(self.tools_view()).width(340).height(Length::Fill).style(theme::panel));
+            body = body.push(
+                container(self.tools_view())
+                    .width(340)
+                    .height(Length::Fill)
+                    .style(theme::panel),
+            );
         }
 
         column![bars, body].spacing(8).into()
@@ -1145,29 +1315,38 @@ impl State {
                     list = list.push(text(cat).size(14)).push(Space::with_height(2));
                     for &t in tools {
                         let srv = t.needs_server();
-                        let label = if srv { format!("{}  · server", t.label()) } else { t.label().to_string() };
+                        let label = if srv {
+                            format!("{}  · server", t.label())
+                        } else {
+                            t.label().to_string()
+                        };
                         list = list.push(
-                            button(text(label).size(12).color(if srv && self.server.is_none() { theme::MUTED } else { iced::Color::WHITE }))
-                                .on_press(Msg::PickTool(Some(t)))
-                                .style(button::text)
-                                .padding([2, 6])
-                                .width(Length::Fill),
+                            button(text(label).size(12).color(if srv && self.server.is_none() {
+                                theme::MUTED
+                            } else {
+                                iced::Color::WHITE
+                            }))
+                            .on_press(Msg::PickTool(Some(t)))
+                            .style(button::text)
+                            .padding([2, 6])
+                            .width(Length::Fill),
                         );
                     }
                     list = list.push(Space::with_height(8));
                 }
                 // Stirling server settings
-                let srv_field = |label: &'static str, key: &'static str, secure: bool| -> Element<'_, Msg> {
-                    column![
-                        text(label).size(11).color(theme::MUTED),
-                        text_input("", &self.form_text(key))
-                            .on_input(move |v| Msg::Form(FormMsg::Text(key, v)))
-                            .secure(secure)
-                            .size(12),
-                    ]
-                    .spacing(2)
-                    .into()
-                };
+                let srv_field =
+                    |label: &'static str, key: &'static str, secure: bool| -> Element<'_, Msg> {
+                        column![
+                            text(label).size(11).color(theme::MUTED),
+                            text_input("", &self.form_text(key))
+                                .on_input(move |v| Msg::Form(FormMsg::Text(key, v)))
+                                .secure(secure)
+                                .size(12),
+                        ]
+                        .spacing(2)
+                        .into()
+                    };
                 list = list
                     .push(text("Server settings (Stirling-PDF)").size(14))
                     .push(
@@ -1191,14 +1370,23 @@ impl State {
             }
             Some(tool) => {
                 let mut col = column![
-                    button(text("< All tools").size(12)).on_press(Msg::PickTool(None)).style(button::text),
+                    button(text("< All tools").size(12))
+                        .on_press(Msg::PickTool(None))
+                        .style(button::text),
                     text(tool.label()).size(16),
                     text(tool.help()).size(12).color(theme::MUTED),
                     Space::with_height(4),
-                    toolpanel::view_form(tool, &self.form, self.editing, self.server.is_some(), Msg::Form, |a| match a {
-                        Action::Run => Msg::RunTool(false),
-                        Action::RunNewFile => Msg::RunTool(true),
-                    }),
+                    toolpanel::view_form(
+                        tool,
+                        &self.form,
+                        self.editing,
+                        self.server.is_some(),
+                        Msg::Form,
+                        |a| match a {
+                            Action::Run => Msg::RunTool(false),
+                            Action::RunNewFile => Msg::RunTool(true),
+                        }
+                    ),
                 ]
                 .spacing(6);
                 if self.busy {
@@ -1212,17 +1400,25 @@ impl State {
                                 row![
                                     text("Result").size(14),
                                     Space::with_width(Length::Fill),
-                                    button(text("Save as .txt").size(11)).on_press(Msg::SaveReport).style(button::secondary),
+                                    button(text("Save as .txt").size(11))
+                                        .on_press(Msg::SaveReport)
+                                        .style(button::secondary),
                                 ]
                                 .align_y(iced::Alignment::Center),
                             )
-                            .push(container(text(r.clone()).size(12).font(iced::Font::MONOSPACE)).padding(6).style(theme::panel));
+                            .push(
+                                container(text(r.clone()).size(12).font(iced::Font::MONOSPACE))
+                                    .padding(6)
+                                    .style(theme::panel),
+                            );
                     }
                 }
                 col.into()
             }
         };
-        scrollable(container(inner).padding(10)).height(Length::Fill).into()
+        scrollable(container(inner).padding(10))
+            .height(Length::Fill)
+            .into()
     }
 }
 

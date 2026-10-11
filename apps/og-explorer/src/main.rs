@@ -18,11 +18,13 @@ mod theme;
 mod thumbs;
 mod tree;
 mod viewers;
+mod widgets;
 
 fn main() -> iced::Result {
     iced::application("OG Explorer", app::App::update, app::App::view)
         .theme(app::App::theme)
         .subscription(app::App::subscription)
         .window_size((1400.0, 860.0))
+        .font(iced_fonts::BOOTSTRAP_FONT_BYTES)
         .run_with(app::App::new)
 }

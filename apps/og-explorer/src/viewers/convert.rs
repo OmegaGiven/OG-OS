@@ -15,12 +15,15 @@ use iced::{Element, Task};
 use std::path::{Path, PathBuf};
 
 const SERVER_EXTS: [&str; 18] = [
-    "doc", "docx", "odt", "rtf", "ppt", "pptx", "odp", "xls", "xlsx", "ods", "epub", "html", "htm", "md", "markdown",
-    "eml", "txt", "csv",
+    "doc", "docx", "odt", "rtf", "ppt", "pptx", "odp", "xls", "xlsx", "ods", "epub", "html", "htm",
+    "md", "markdown", "eml", "txt", "csv",
 ];
 
 fn ext(path: &Path) -> String {
-    path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase()
+    path.extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase()
 }
 
 /// Can this file be turned into a PDF, and does it need the server?
@@ -35,13 +38,17 @@ pub fn convertible(path: &Path, kind: Kind) -> Option<bool> {
 pub async fn to_pdf(path: PathBuf) -> Result<PathBuf, String> {
     let bytes = tokio::fs::read(&path).await.map_err(|e| e.to_string())?;
     let is_image = crate::filetype::Kind::of(&path, false) == Kind::Image;
-    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
     let pdf = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, String> {
         if is_image {
             return layout::images_to_pdf(&[bytes], None, 0.0);
         }
-        let cfg = server::ServerConfig::load()
-            .ok_or("this needs the Stirling server — set it up under PDF Tools → Server settings")?;
+        let cfg = server::ServerConfig::load().ok_or(
+            "this needs the Stirling server — set it up under PDF Tools → Server settings",
+        )?;
         let r = server::convert_to_pdf(&cfg, &name, &bytes)?;
         if r.ext != "pdf" {
             return Err(format!("server returned .{} instead of a PDF", r.ext));
@@ -51,7 +58,10 @@ pub async fn to_pdf(path: PathBuf) -> Result<PathBuf, String> {
     .await
     .map_err(|e| e.to_string())??;
     let dir = path.parent().unwrap_or(Path::new(".")).to_path_buf();
-    let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "converted".into());
+    let stem = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "converted".into());
     let mut out = dir.join(format!("{stem}.pdf"));
     let mut n = 2;
     while tokio::fs::try_exists(&out).await.unwrap_or(false) {
@@ -66,16 +76,23 @@ pub async fn to_pdf(path: PathBuf) -> Result<PathBuf, String> {
 /// come back as separate images (usually a zip), written beside the scan.
 pub async fn split_scan(path: PathBuf) -> Result<PathBuf, String> {
     let bytes = tokio::fs::read(&path).await.map_err(|e| e.to_string())?;
-    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
     let reply = tokio::task::spawn_blocking(move || {
-        let cfg = server::ServerConfig::load()
-            .ok_or("this needs the Stirling server — set it up under PDF Tools → Server settings")?;
+        let cfg = server::ServerConfig::load().ok_or(
+            "this needs the Stirling server — set it up under PDF Tools → Server settings",
+        )?;
         server::scanner_image_split(&cfg, &name, &bytes)
     })
     .await
     .map_err(|e| e.to_string())??;
     let dir = path.parent().unwrap_or(Path::new(".")).to_path_buf();
-    let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "scan".into());
+    let stem = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "scan".into());
     let mut out = dir.join(format!("{stem}-photos.{}", reply.ext));
     let mut n = 2;
     while tokio::fs::try_exists(&out).await.unwrap_or(false) {
@@ -111,7 +128,12 @@ pub enum LockedMsg {
 
 impl Locked {
     pub fn new(path: PathBuf) -> Self {
-        Self { path, password: String::new(), error: None, busy: false }
+        Self {
+            path,
+            password: String::new(),
+            error: None,
+            busy: false,
+        }
     }
 
     /// Returns the opened source when unlocking succeeds.
@@ -128,9 +150,10 @@ impl Locked {
                 let task = Task::perform(
                     async move {
                         let bytes = tokio::fs::read(&path).await.map_err(|e| e.to_string())?;
-                        let plain = tokio::task::spawn_blocking(move || structure::decrypt(&bytes, &pw))
-                            .await
-                            .map_err(|e| e.to_string())??;
+                        let plain =
+                            tokio::task::spawn_blocking(move || structure::decrypt(&bytes, &pw))
+                                .await
+                                .map_err(|e| e.to_string())??;
                         super::pdf::open_bytes(path, plain).await
                     },
                     LockedMsg::Unlocked,

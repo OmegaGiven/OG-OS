@@ -6,8 +6,6 @@
 //!
 //! Timers use `tokio::time`, which is compiled in because iced's `tokio`
 //! feature enables tokio's `time` driver.
-// UI not wired to this module yet.
-#![cfg_attr(not(test), allow(dead_code))]
 
 use iced::futures::{SinkExt, Stream, StreamExt};
 use std::collections::{HashMap, HashSet};
