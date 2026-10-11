@@ -1,0 +1,436 @@
+# OG Explorer — spec
+
+The successor to `og-files`: a file manager whose right side is a set of
+tabbed viewers and editors, so browsing a folder and working on what's in it
+happen in one window. It has to run as a standalone app on any Linux desktop,
+not only inside OG-OS.
+
+Status: **scaffold** (2026-10-11). Built so far: the pane layout, the
+files pane (tree, list and grid views, kind filter, live background search,
+focus mode), tabs with an explicit edit mode, the inspector, the details log
+and three working viewers. Everything else is described here.
+
+The crate is `og-explorer` while it's being built. When it replaces og-files
+at the end of phase 1, it **takes over the `og-files` name** (binary and
+app_id) and the old crate gets archived.
+
+```bash
+cargo run -p og-explorer -- ~/Documents               # folder: shown in the files pane
+cargo run -p og-explorer -- notes.md                  # file: opened in a tab
+cargo run -p og-explorer -- --view grid --focus ~/Pictures
+cargo run -p og-explorer -- --search invoice          # start with a search running
+```
+
+---
+
+## 1. Goals
+
+1. **Files left, work right.** The files pane is the main place to see
+   files: a tree, list or grid that can widen to fill the window. Whatever
+   you click opens in a tab on the right with the tools for that file type.
+2. **Handle the common file types in-app.** Video, audio, images, tables,
+   documents and 3D models get a built-in viewer and a basic editor, so
+   day-to-day work doesn't hand off to `xdg-open` and five other apps.
+3. **Never lag.** Scrolling, typing and navigating stay smooth in folders
+   with 10k+ entries and on slow or dead network mounts.
+4. **Standalone.** One binary that builds without the rest of OG-OS. Suite
+   integration (theme, cross-app drag) is an optional extra.
+
+**Not goals:** a pro editor in any category (no NLE timeline, no Photoshop,
+no Excel formulas engine, no Blender). "Basic" means quick fixes: trim, crop,
+rotate, edit a cell, fix a typo, look at a model.
+
+## 2. Why a rewrite instead of fixing og-files
+
+Audit of `apps/og-files` (5.6k LOC, one commit, no tests):
+
+| Problem in og-files | Why it matters here |
+|---|---|
+| `refresh_preview()` runs a blocking `get_file_details` (stat, EXIF, image decode, dir count) after **every** message, including scroll, cursor move and a 20 Hz drop-poll tick | This is the scroll lag. Fixing it means touching most `update` arms. |
+| Sync disk/subprocess work on the UI thread: watcher refresh, compress/extract, unmount, `statvfs` on network mounts every 2 s | A dead SMB mount freezes the whole app. |
+| tiny-skia (CPU) renderer only | Video and 3D need wgpu and shader widgets. |
+| `app.rs` is 1.8k lines, flat 85-variant `Message`, hand-placed overlays | The new 4-pane layout would throw away about 70% of it anyway. |
+| Trash is a plain `rename` into `~/.local/share/Trash` | Fails across devices (USB drives). |
+| Drag-out: stuck drag state, no percent-encoding, surface race | Explains "can't drag files into other apps". |
+
+**Port from og-files** (good code, about 1.3k LOC): `jobs.rs` (threaded
+copy/move with progress, conflicts, undo), `watcher.rs`, `thumbs.rs`
+(move the stat out of `view`), selection/sort from `tab.rs`, `desktop.rs`
+(open-with registry), trash/EXIF helpers, and the og-wayland drag code with
+its bugs fixed (§6).
+
+## 3. Layout
+
+From the sketch, as built:
+
+```
+┌──────────────────────────┬──────────────────────────┬───────────┐
+│ File manager             │ [tab][tab][tab]…          │ Inspector │
+│ [Tree|List|Grid] [Focus] │                           │ properties│
+│ [Search]                 │      CONTENT VIEWER       │ tools for │
+│ All·3D·Table·Doc·Img·Vid │  text · image · table     │ this type │
+│ Bookmarks / Devices /    │  (video · audio · doc ·   │           │
+│ Network  — or —  search  │   3D coming)              │           │
+│ results                  ├──────────────────────────┴───────────┤
+│                          │ File details & history                │
+└──────────────────────────┴───────────────────────────────────────┘
+```
+
+**Panes**
+- Every pane is a `pane_grid` pane. Split lines resize, and title bars drag
+  so panes can be rearranged. That covers the sketch's "swap direction if
+  better" note.
+
+**Files pane** (left). It is the main place to see files, so it shows both
+folders and files.
+- **Views:**
+  - **Tree:** Bookmarks (Folders / Files), Devices (Home, Root, mounted
+    drives) and Network (mounted shares). Folders expand in place, and files
+    open in a tab.
+  - **List:** one folder at a time, with breadcrumb and Up. Shows name,
+    size and modified date.
+  - **Grid:** the same folder as tiles with **thumbnails**. Thumbnails are
+    generated in-process, cached, and made only while the grid is showing.
+- **Kind filter** (All / 3D / Table / Document / Image / Video / Audio)
+  applies to whatever is visible: expanded tree branches, the list or grid,
+  and search results. Folders always stay visible so you can keep drilling
+  down.
+- **Search** (button or `Ctrl+F`):
+  - **First pass:** instant matches among everything already loaded in the
+    tree.
+  - **Second pass:** a background walk of home, bookmarked folders and
+    mounted drives that keeps finding more while you work. It shows a
+    "still searching…" status and a count of files scanned.
+  - **Results are append-only.** New hits are added at the bottom and never
+    sorted or inserted above, so the list never jumps under a user who has
+    scrolled.
+  - Typing a new query cancels the old walk.
+- **Size:**
+  - `Ctrl+B` hides the pane.
+  - **Focus** widens it to about 85% of the window for pure browsing and
+    searching. It also hides the inspector so nothing gets squeezed.
+  - Opening a file from focus mode returns to the normal layout.
+
+**Viewer, inspector and details**
+- **Tabs:** one per file, and reopening a file focuses its existing tab.
+  Folders don't get tabs: browsing happens in the files pane.
+- **Edit mode:** files open **read-only**. Editing is an explicit mode, by
+  the Edit button or `Ctrl+E`:
+  - The tab shows `EDIT` while editing, and `*` once there are unsaved
+    changes.
+  - **Save** (`Ctrl+S`) **writes over the original file**, atomically.
+  - **Discard** reloads the file from disk.
+  - Leaving edit mode or closing the tab is refused while there are unsaved
+    changes.
+  - Every viewer that can edit follows this same model: text and markdown
+    now, tables, docs and images later.
+- **Video is the exception:** edits (trim, snapshot) are **exported as a new
+  file** next to the original. The default name is `<name>-edit.<ext>` and
+  can be changed. The source video is never modified.
+- **Inspector:** properties of the focused tab, plus a per-type tools area.
+- **Details & history:** an activity log of what you opened, saved,
+  discarded and any errors (§8).
+
+## 4. Architecture
+
+```
+src/
+  main.rs           iced::application entry
+  app.rs            pane_grid shell, shortcuts, routes child events
+  sidebar.rs        files pane: header, view mode, kind filter, focus, search box
+  tree.rs           tree view: sections, lazy nodes, cached flattened rows
+  browse.rs         list + grid views of one folder, breadcrumb, thumbnails
+  search.rs         two-pass live search, append-only results, cancellable walk
+  thumbs.rs         in-process thumbnail generation + disk cache (one worker)
+  tabs.rs           tab strip, tabs addressed by stable id
+  inspector.rs      metadata of focused tab + tools area
+  details.rs        details & history strip
+  viewers/
+    mod.rs          Viewer enum, async loader, dispatch
+    text.rs         text_editor: read-only / edit mode, save-over, discard
+    image.rs        fit / pan-zoom
+    table.rs        CSV/TSV grid (own parser for now)
+    placeholder.rs  stand-in that names each planned backend
+  fsops.rs          all filesystem access, async, never called from view()
+  filetype.rs       path → Kind (viewer family)
+  config.rs         XDG config/cache, bookmarks.json
+  theme.rs          standalone palette
+```
+
+**Hard rules.** These are the lessons from og-files. Review every PR
+against them.
+
+1. `view()` never touches the filesystem, spawns a process or sorts/filters
+   a big list. Derived lists (tree rows, folder `visible`) are cached and
+   rebuilt only when their inputs change.
+2. `update()` never blocks. Disk, network and subprocess work goes through
+   `Task::perform` + `spawn_blocking` (see `fsops::blocking`).
+3. Async results carry their target (tab id, path), and stale results are
+   dropped (see `Tabs::update`, `Inspector::update`).
+4. Lists that grow while visible (search results) are append-only, so a
+   scrolled user's position never moves.
+5. Messages are nested per component (`Message::Tabs(tabs::Msg::Viewer(id,
+   viewers::Msg::Text(..)))`). There is no flat god-enum.
+6. Subscriptions are event-driven (channels, `Subscription::run`). No
+   polling ticks: og-files ran three of them.
+7. Writes are atomic (temp file + rename). Editing is explicit (edit mode)
+   and saves overwrite in place, except video, which exports a new file.
+
+**Viewer contract.** Each viewer family is a module that provides:
+
+- `supported(path) -> bool`, used when a family covers only some formats
+  (for example table = csv/tsv until calamine lands).
+- A loader arm in `viewers::load` that produces plain-data `Loaded`. It must
+  be `Clone`, because iced messages must be.
+- `State::new(Loaded data)`. Live state may hold non-Clone things such as
+  `text_editor::Content`, decoders or GPU buffers.
+- `update(Msg) -> (Task, Option<Event>)`, where `Event` is `Open` or `Status`.
+- `view() -> Element`.
+- An optional `save()`, plus `is_dirty()` via `Viewer::is_dirty`.
+
+Dispatch is an enum, not trait objects. That keeps iced's generic Element
+types simple. Adding a family means adding an enum arm in `viewers/mod.rs`.
+
+## 5. File types: viewers, editors, backends
+
+"In-app, no outside dependencies" means **no shelling out to other
+programs** (og-files called ffmpeg, pdftoppm, rsvg-convert, tar, zip,
+udisksctl, lsblk, xdg-open). Pure-Rust crates are preferred. Two families
+can't reasonably be pure Rust:
+
+- **Video:** no production pure-Rust H.264/HEVC decoder exists. Use
+  GStreamer as a *library*. It's on every desktop distro already and handles
+  hardware decode.
+- **PDF:** solved in pure Rust after all: `hayro` renders and `lopdf`
+  edits. See §5a.
+
+| Family | Formats | View | Basic edit | Backend (crate) | Phase |
+|---|---|---|---|---|---|
+| Folder (files pane) | dirs | tree / list / grid + thumbnails, kind filter ✅ | rename, new, delete via jobs | std + ported `jobs.rs` | 0 ✅ / 1 |
+| Text / code | txt, md, json, toml, rs, … | ✅ read-only / edit mode | ✅ edit, save over, discard; find/replace, syntax colours | iced `text_editor` ✅, `syntect` or iced `highlighter` | 0 ✅ / 2 |
+| Image | png, jpg, webp, gif, bmp, tiff, svg, avif | ✅ fit + pan/zoom | crop, rotate, resize, exposure; save over (edit mode) | `image` ✅, `resvg` (svg), `kamadak-exif` | 0 ✅ / 3 |
+| Table | csv, tsv ✅; xlsx, xls, ods | ✅ read-only grid | edit cells, add/remove rows, sort; write csv | own parser ✅ → `csv`, `calamine` (read xlsx/ods), `rust_xlsxwriter` | 0 ✅ / 2 |
+| Doc | md ✅ (as text); **pdf ✅**; docx, odt; epub | PDF ✅ pages + thumbnails + zoom; md rendered preview; docx text | PDF ✅ page editing (§5a); md as text | `hayro` ✅ (render), `lopdf` ✅ (edit), `pulldown-cmark`, `docx-rs`, `zip` + xhtml | 0 ✅ / 2 |
+| Audio | mp3, flac, ogg, opus, wav, m4a/aac | waveform, play/seek, tags | trim, normalize, edit tags, export wav/flac | `symphonia` (decode), `cpal` (output), `lofty` (tags), `hound` (wav write) | 2 |
+| Video | mp4, mkv, webm, mov | play/seek, frame-step, scrub thumbnails | trim, snapshot frame, always **exported as a new file** (`<name>-edit.<ext>`), never saved over | GStreamer via `gstreamer-rs` into a wgpu texture (or `iced_video_player` if its iced 0.13 release fits) | 2 / 3 |
+| 3D model | glTF/glb, obj, stl, ply | orbit/zoom, wireframe, normals, bounding-box size | none (view only; maybe re-export stl→glb) | `gltf`, `tobj`, `stl_io`, iced `shader` widget on wgpu | 3 |
+| Archive | zip, tar(.gz/.xz/.zst), 7z | browse as a folder | extract / compress via jobs | `zip`, `tar`, `flate2`, `xz2`, `zstd`, `sevenz-rust` | 2 |
+| Binary | anything else | hex view (virtualized) | none | own | 2 |
+
+**Renderer:** og-explorer uses iced's default features (wgpu first, with
+tiny-skia as fallback). Video and 3D need wgpu. On machines without a GPU
+those two viewers show a "needs GPU" placeholder and everything else works.
+
+**Large files:** the text viewer caps at 16 MB (`viewers::TEXT_LIMIT`) and
+the table viewer at 5,000 rows. Phase 2 replaces both caps with windowed or
+streamed loading.
+
+## 5a. PDF toolkit (Stirling-PDF, rebuilt natively)
+
+The goal is to bring the homelab Stirling-PDF (`stirling-homelab` on `go`,
+fork `OmegaGiven/Stirling-PDF@homelab-edition`) into the file manager.
+
+**Licensing.** The fork's only change from upstream is unlocking the
+enterprise features. Stirling's `app/core` is MIT. `app/proprietary` is
+under a commercial license, so **nothing is ported from it**. Everything
+here is a fresh Rust implementation on different libraries; no Java is
+translated.
+
+**Engine**
+
+| Part | Crate | Notes |
+|---|---|---|
+| Render | `hayro` 0.7 (pure Rust, MIT/Apache, CPU) | One worker thread per open PDF that keeps its parse and font cache (`viewers/pdf/engine.rs`). Panics are caught per page. Bitmaps are capped at 40 MP. Limits: no blending/knockout groups yet, and password-protected files fail to open. |
+| Edit | `lopdf` 0.45 (pure Rust, MIT) | `compose::build(sources, plan)` turns a plan of (source, page, rotation) into a new PDF. That single primitive covers reorder, delete, rotate, duplicate, merge/insert, extract and split. Inherited page attributes are pushed down, and unused objects are pruned. |
+| Heavy tools | Stirling REST API on `go` (optional) | For jobs that need Tesseract, Ghostscript, qpdf or LibreOffice. The app uploads the file and saves the result next to the original. Config goes in `$XDG_CONFIG_HOME/og-explorer/stirling.json` (`{ "url": "https://go.tail6c6721.ts.net:8081", "api_key": "…" }`, sent as `X-API-KEY`). Without it those tools are just hidden, so the app stays standalone. |
+
+**Model.** The same rules as every other viewer apply: view mode is
+read-only, and **Edit pages** (`Ctrl+E`) enables page operations. **Save**
+writes over the original and **Discard** reloads it. Exports (extract,
+split, and any tool that makes a different document) always write
+**new files** next to the original (`<name>-pages-1-3.pdf`,
+`<name>-part-01.pdf`), work in either mode, and include unsaved edits.
+
+**Tools panel.** The **Tools** button in the PDF toolbar opens 54 tools
+in five groups. Each tool has a form, and the page fields default to the
+ticked pages. The buttons are:
+- **Apply** (edit mode): the result becomes the working copy. Save
+  overwrites, Discard undoes.
+- **Save as new file**: writes `<name>-<tool>.pdf` beside the original.
+- **Run / Save files**: for reports and tools that produce other files.
+
+Other PDF toolbar additions: **Save copy**, plus **Duplicate** and **Blank
+page** in edit mode. Outside the PDF viewer: password-protected PDFs open
+behind an unlock screen. Images get **Make PDF** (native) and **Split
+scanned photos** (server). Office, HTML, Markdown and e-book files get
+**Convert to PDF** (server).
+
+**Status: all Stirling core tools are built** (2026-10-11). "native" means
+in-process Rust; "server" means the Stirling REST API.
+
+| Group | Tools | Engine |
+|---|---|---|
+| Page editing | view, thumbnails, zoom, rotate, delete, reorder, duplicate, blank page, insert PDF, extract, split every N, select | native (plan + compose) |
+| Organize | split by ranges / bookmarks / file size, select pages by range, remove blank pages, crop, n-up (2–16), booklet, fit to paper, scale, split into sections, one long page, overlay PDF, insert images | native |
+| Organize | auto-split at QR pages, insert web page | server |
+| Add & edit | page numbers, text stamp, watermark (centred / tiled), image stamp, **drawn signature** (canvas pad + click to place), attachments, bookmarks editor, metadata editor / wipe | native |
+| Security | AES-256 password + permissions, remove password, sanitize (JS, files, XMP, info, links, fonts), redact text, **redact areas** (drag boxes on the page, true removal by rasterizing), remove annotations / images, flatten forms, flatten to images, unlock forms, remove signatures, show JavaScript | native |
+| Security | sign with certificate (PKCS#12), validate signatures | server |
+| Convert & extract | pages → PNG/JPEG, extract images, extract attachments, document info, compare (text diff), auto-rename | native |
+| Convert & extract | PDF → Word/ODT/Excel/PowerPoint/HTML/Markdown/text/RTF/XML/CSV/EPUB; Office/HTML/MD/EML/e-book/image → PDF | server |
+| Optimize & colour | lossless compress, repair, greyscale, invert, adjust colours, fake scan | native |
+| Optimize & colour | strong compress (Ghostscript/qpdf), repair via server, OCR (Tesseract), PDF/A-2b | server |
+
+**Server endpoints** (paths and fields taken from upstream `app/core` only,
+listed in `tools/server.rs`): `/api/v1/misc/{ocr-pdf, compress-pdf, repair,
+auto-split-pdf, extract-image-scans}`,
+`/api/v1/convert/{pdf/pdfa, pdf/word, pdf/presentation, pdf/text, pdf/xlsx,
+pdf/csv, pdf/html, pdf/markdown, pdf/xml, pdf/epub, file/pdf, html/pdf,
+markdown/pdf, eml/pdf, img/pdf, svg/pdf, ebook/pdf, url/pdf}`,
+`/api/v1/security/{cert-sign, validate-signature}`, and
+`/api/v1/info/status` for **Test connection**. The URL and API key are
+entered in Tools → Server settings and saved to `stirling.json` (mode 600).
+
+**Known limits.** Each module's doc comments list them per function. The
+main ones:
+- Rebuilding pages (n-up, booklet, scale, overlay…) drops those pages'
+  annotations, and the outline of the result.
+- Page edits and every tool save without encryption. Re-apply a password
+  last.
+- Redact text handles simple single-byte fonts only. Text in CID fonts is
+  reported as "not found", so use Redact areas for those.
+- Raster tools (colour filters, redact areas, flatten to images) remove
+  text selection on the affected pages.
+- The signature box assumes an unrotated page.
+- Decrypt can't tell whether a password was actually needed.
+- Phase 2: a `compose::build_from_doc` variant so split-by-size doesn't
+  re-parse the file on every probe.
+
+Pipelines and "recipes" (saved tool chains run on a selection) are still
+open: phase 3.
+
+**Tests (62).** `cargo test -p og-explorer` covers:
+- compose, pages, and every public function of structure, layout, raster
+  and server (server tests use a local mock HTTP server, no network);
+- `every_native_tool_runs_end_to_end`, which drives all native tools
+  through the UI path (form → job → output) and checks that each result
+  parses.
+
+Test hooks:
+- **Real files:** `OGX_PDF=file.pdf cargo test -p og-explorer real_file`.
+- **Visual check:** `OGX_PDF=… OGX_DEMO_DIR=/tmp/out cargo test -p
+  og-explorer demo_outputs` writes sample outputs for eyeballing.
+- **Screenshots:** `OGX_TOOL="Watermark" og-explorer file.pdf` opens the
+  Tools panel on that tool (`OGX_TOOL=""` opens the list).
+
+## 6. File-manager features
+
+| Feature | Plan | Phase |
+|---|---|---|
+| Copy / move / delete with progress, conflicts, undo | port og-files `jobs.rs` | 1 |
+| Trash | freedesktop trash spec including per-volume `.Trash-$uid` (fixes USB) — `trash` crate or ported helper | 1 |
+| Live refresh | port `watcher.rs` (notify); refresh via Task, never sync | 1 |
+| Thumbnails | images ✅ in-process (`image` crate, disk cache, one worker, grid only); svg via resvg, video frames via GStreamer, PDF first page | 0 ✅ / 2 |
+| Devices | UDisks2 over D-Bus (`zbus`, already in workspace): list, mount on click, unmount/eject, power-off. Event-driven via `InterfacesAdded` signals, not 2 s polling | 1 |
+| Network | list existing cifs/nfs/sshfs/rclone mounts ✅; "Connect to server…" for `smb://` and `sftp://`; never `statvfs` a network mount on the UI thread | 2 |
+| Search | ✅ two-pass live search: instant over loaded tree, then a cancellable background walk streaming append-only results. Later: debounce, search content inside text files, fuzzy match (`nucleo`), user-chosen search roots | 0 ✅ / 2 |
+| Drag & drop | in-app move/copy; inbound drop onto a *specific* folder; drag-out to other apps (port og-wayland with fixes: percent-encoded URIs, clear drag state on compositor handoff, bind before pointer-enter, offer Move as well as Copy) | 1 / 2 |
+| Open with | port `desktop.rs` registry for things we don't handle | 1 |
+| Bookmarks | ✅ JSON in `$XDG_CONFIG_HOME/og-explorer/bookmarks.json`; add via context menu | 0 ✅ / 1 |
+| Context menu | iced overlay widget, not hand-positioned spacers | 1 |
+| Keyboard | Ctrl+S/E/W/B/F ✅; arrow navigation that scrolls into view, type-ahead, Ctrl+L path bar, Ctrl+T, Ctrl+Tab | 1 |
+
+## 7. Standalone vs OG-OS suite
+
+- **Default build:** no `og-*` path dependencies. It uses XDG paths, its own
+  palette and its own config. It builds with `cargo build -p og-explorer`
+  and could be split into its own repo.
+- **Feature `og-suite` (phase 1):** adds `og-config` and `og-theme` so the
+  theme follows the suite's `~/.config/sway-power/config.json`, plus
+  `og-wayland` for cross-app drag. The distro package builds with this flag.
+- **Icons:** bundle an icon font (Lucide or Phosphor TTF via `include_bytes!`).
+  Don't depend on Nerd Fonts being installed: og-files shows tofu without
+  them. Until then the scaffold uses text tags (DIR, IMG, TBL…) because
+  iced's default font has no arrow or shape glyphs.
+- **Replacing og-files (decided):** when phase 1 is done, the binary and
+  app_id become `og-files`, the crate directory is renamed, and the old crate
+  moves to `archive/`.
+
+## 8. History (bottom panel)
+
+**Decided:** saving writes over the file. There are no app-kept revision
+copies. Safety comes from editing being an explicit mode (§3) and from
+atomic writes. Video never overwrites: it exports a new file.
+
+The bottom panel is therefore an **activity log**: opened, edit mode
+entered, saved over, discarded, exported, errors.
+- Session-only now ✅.
+- Phase 1 persists it to `$XDG_STATE_HOME/og-explorer/activity.jsonl` and
+  adds a per-file filter, so selecting a file shows *its* history.
+- Optional later: show `git log` for files inside a repo, and btrfs/snapper
+  snapshots where the volume has them (OG-OS set those up 2026-09-08). These
+  are read-only views of history that already exists, not new copies.
+
+## 9. Roadmap
+
+**Phase 0: scaffold ✅ (2026-10-11)**
+- [x] pane_grid layout matching the sketch, resizable, draggable
+- [x] files pane: tree / list / grid views, thumbnails, kind filter over everything visible
+- [x] focus mode (files pane ~85%, inspector hidden) and Ctrl+B hide
+- [x] two-pass live search with append-only background results
+- [x] tabs with stable ids, dedupe, dirty guard
+- [x] CLI: `og-explorer [--view tree|list|grid] [--search TEXT] [--focus] [PATH]`
+- [x] viewers: text (read-only → edit mode, save over, discard), image, CSV/TSV
+- [x] PDF: hayro viewer + thumbnails; edit pages (rotate, delete, reorder, insert, duplicate, blank); export (extract, split, save copy)
+- [x] PDF toolkit: all Stirling core tools, 54 in a Tools panel (native + optional Stirling server), unlock screen, convert-to-PDF from other viewers; 62 tests
+- [x] inspector metadata, details activity log
+- [x] placeholders naming each planned backend
+
+**Phase 1: replace og-files for daily use**
+- [ ] port jobs, watcher, desktop, trash (per-volume)
+- [ ] virtualize list, grid, tree and search results (10k+ rows)
+- [ ] UDisks2 devices via zbus (mount, unmount, eject)
+- [ ] context menu, rename, new folder, delete, bookmarks add/remove
+- [ ] keyboard navigation, path bar, search debounce + content search
+- [ ] drag-and-drop in and out (fixed og-wayland)
+- [ ] `og-suite` feature, bundled icon font, persisted per-file activity log
+- [ ] take over the `og-files` name, archive the old crate
+- [ ] unit tests for fsops, natural sort, CSV parser, tree rows; one headless
+      `update()` test per component
+
+**Phase 2: media and docs**
+- [ ] audio (symphonia + cpal, waveform, tags)
+- [ ] video playback (GStreamer to wgpu)
+- [ ] PDF: tool recipes/pipelines, keep outlines through rebuilds, encrypted-save option; markdown preview, docx text
+- [ ] xlsx/ods read, table cell editing, csv write
+- [ ] archives as folders, hex viewer, syntax highlighting
+- [ ] network "connect to server"
+
+**Phase 3: basic editing and history**
+- [ ] image edits (crop, rotate, resize, adjust)
+- [ ] audio trim (save over in edit mode); video trim + frame snapshot (export new file)
+- [ ] 3D viewer
+- [ ] optional git / snapshot history views in the bottom panel
+
+## 10. Decisions and open questions
+
+**Decided (2026-10-11):**
+- **Filter:** applies to everything visible in the files pane (expanded
+  tree, list, grid, search results). Folders stay visible.
+- **Search:** instant first pass, then a background search that keeps
+  adding results without moving the user's scroll.
+- **History / saving:** explicit edit mode, and save overwrites the file. No
+  revision copies.
+- **Video:** edits export as a new file.
+- **Name:** takes over `og-files`.
+- **Files pane:** shows folders and files. Tree, list and grid (thumbnail)
+  views, and it can widen to fill most of the window (focus).
+
+**Still open:**
+1. **Video export depth:** is lossless trim and frame snapshot enough, or
+   do you want re-encode options (resize, convert format, crop)? Re-encoding
+   means bundling GStreamer encoders.
+2. **Search scope:** home + bookmarks + mounted drives now. Should Root `/`
+   or specific excluded folders be configurable?
+3. **Grid in tree mode:** should the tree be able to show thumbnails inline
+   (bigger rows for images), or are thumbnails grid-only?

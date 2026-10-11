@@ -1,0 +1,23 @@
+[package]
+name = "og-explorer"
+version = "0.1.0"
+edition = "2021"
+description = "OG Explorer — file manager with built-in viewers/editors (successor to og-files)"
+
+[[bin]]
+name = "og-explorer"
+path = "src/main.rs"
+
+# Deliberately no og-* path deps: this app must build and run standalone,
+# outside the OG-OS distro. Suite integration (og-config theme, og-wayland
+# drag-out) comes in behind the optional `og-suite` feature — see SPEC.md §7.
+[dependencies]
+iced = { version = "0.13", features = ["image", "tokio", "advanced", "canvas"] }
+tokio = { version = "1.52.3", features = ["fs", "rt", "sync"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+mime_guess = "2"
+hayro = "0.7"
+lopdf = { version = "0.45", default-features = false }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "tiff"] }
+ureq = { version = "2.12", default-features = false, features = ["tls"] }
