@@ -3436,10 +3436,12 @@ dependencies = [
  "image 0.25.10",
  "lopdf",
  "mime_guess",
+ "notify",
  "serde",
  "serde_json",
  "tokio",
  "ureq",
+ "zbus 5.19.0",
 ]
 
 [[package]]
