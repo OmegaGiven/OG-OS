@@ -5,6 +5,10 @@
 //! Loading is two-step so Messages stay Clone: an async loader produces a
 //! plain-data `Loaded`, then `Viewer::from_loaded` builds the live state
 //! (which may hold non-Clone things like a text_editor::Content).
+//!
+//! Phase 2 viewers (audio, video, sheet, archive, hex, doc, 3D) share one
+//! contract — `supported`, `open`, `State::{new, update, view, is_dirty,
+//! is_editing, toggle_edit, save}` — so they're wired below uniformly.
 
 pub mod archive;
 pub mod audio;
@@ -36,6 +40,13 @@ pub enum Loaded {
     Pdf(pdf::Source),
     Locked(PathBuf),
     Placeholder(Kind),
+    Audio(audio::Opened),
+    Video(video::Opened),
+    Sheet(sheet::Opened),
+    Archive(archive::Opened),
+    Hex(hex::Opened),
+    Doc(doc::Opened),
+    Model3d(model3d::Opened),
 }
 
 pub enum Viewer {
@@ -47,6 +58,13 @@ pub enum Viewer {
     Table(table::State),
     Placeholder(placeholder::State),
     Error(String),
+    Audio(audio::State),
+    Video(video::State),
+    Sheet(sheet::State),
+    Archive(archive::State),
+    Hex(hex::State),
+    Doc(doc::State),
+    Model3d(model3d::State),
 }
 
 #[derive(Debug, Clone)]
@@ -59,6 +77,13 @@ pub enum Msg {
     /// "Convert to PDF" from the image/placeholder views
     Convert,
     Converted(Result<PathBuf, String>),
+    Audio(audio::Msg),
+    Video(video::Msg),
+    Sheet(sheet::Msg),
+    Archive(archive::Msg),
+    Hex(hex::Msg),
+    Doc(doc::Msg),
+    Model3d(model3d::Msg),
 }
 
 /// What a viewer asks its tab / the app to do.
@@ -73,6 +98,21 @@ pub enum Event {
 
 pub fn load(path: PathBuf, kind: Kind) -> Task<Msg> {
     let fut = async move {
+        // specialised viewers claim their formats first; order matters where
+        // formats overlap (doc's Markdown preview beats the plain text editor)
+        macro_rules! claim {
+            ($m:ident, $v:ident) => {
+                if !is_pdf(&path) && $m::supported(&path) {
+                    return $m::open(path).await.map(Loaded::$v);
+                }
+            };
+        }
+        claim!(sheet, Sheet);
+        claim!(doc, Doc);
+        claim!(audio, Audio);
+        claim!(video, Video);
+        claim!(archive, Archive);
+        claim!(model3d, Model3d);
         match kind {
             Kind::Image => Ok(Loaded::Image(path)),
             Kind::Doc if is_pdf(&path) => match pdf::open(path.clone()).await {
@@ -87,13 +127,14 @@ pub fn load(path: PathBuf, kind: Kind) -> Task<Msg> {
                     .map(|s| Loaded::Table(table::parse(&s, delim)))
             }
             Kind::Text | Kind::Doc if text::supported(&path, kind) => {
-                match fsops::read_text(path, TEXT_LIMIT).await {
+                match fsops::read_text(path.clone(), TEXT_LIMIT).await {
                     Ok(s) => Ok(Loaded::Text(s)),
-                    // not UTF-8 → binary placeholder (hex view later)
-                    Err(e) if e == "not UTF-8 text" => Ok(Loaded::Placeholder(Kind::Binary)),
+                    // not UTF-8 → bytes
+                    Err(e) if e == "not UTF-8 text" => hex_or_placeholder(path, Kind::Binary).await,
                     Err(e) => Err(e),
                 }
             }
+            Kind::Binary => hex_or_placeholder(path, Kind::Binary).await,
             other => Ok(Loaded::Placeholder(other)),
         }
     };
@@ -111,6 +152,34 @@ impl Viewer {
                 return (Viewer::Pdf(st), t.map(Msg::Pdf));
             }
             Loaded::Locked(p) => Viewer::Locked(convert::Locked::new(p)),
+            Loaded::Audio(o) => {
+                let (st, t) = audio::State::new(o);
+                return (Viewer::Audio(st), t.map(Msg::Audio));
+            }
+            Loaded::Video(o) => {
+                let (st, t) = video::State::new(o);
+                return (Viewer::Video(st), t.map(Msg::Video));
+            }
+            Loaded::Sheet(o) => {
+                let (st, t) = sheet::State::new(o);
+                return (Viewer::Sheet(st), t.map(Msg::Sheet));
+            }
+            Loaded::Archive(o) => {
+                let (st, t) = archive::State::new(o);
+                return (Viewer::Archive(st), t.map(Msg::Archive));
+            }
+            Loaded::Hex(o) => {
+                let (st, t) = hex::State::new(o);
+                return (Viewer::Hex(st), t.map(Msg::Hex));
+            }
+            Loaded::Doc(o) => {
+                let (st, t) = doc::State::new(o);
+                return (Viewer::Doc(st), t.map(Msg::Doc));
+            }
+            Loaded::Model3d(o) => {
+                let (st, t) = model3d::State::new(o);
+                return (Viewer::Model3d(st), t.map(Msg::Model3d));
+            }
             Loaded::Placeholder(k) => {
                 Viewer::Placeholder(placeholder::State::new(path.to_path_buf(), k))
             }
@@ -122,6 +191,13 @@ impl Viewer {
         match self {
             Viewer::Text(t) => t.dirty,
             Viewer::Pdf(p) => p.dirty,
+            Viewer::Audio(s) => s.is_dirty(),
+            Viewer::Video(s) => s.is_dirty(),
+            Viewer::Sheet(s) => s.is_dirty(),
+            Viewer::Archive(s) => s.is_dirty(),
+            Viewer::Hex(s) => s.is_dirty(),
+            Viewer::Doc(s) => s.is_dirty(),
+            Viewer::Model3d(s) => s.is_dirty(),
             _ => false,
         }
     }
@@ -133,6 +209,13 @@ impl Viewer {
         match self {
             Viewer::Text(t) => Some(t.editing),
             Viewer::Pdf(p) => Some(p.editing),
+            Viewer::Audio(s) => s.is_editing(),
+            Viewer::Video(s) => s.is_editing(),
+            Viewer::Sheet(s) => s.is_editing(),
+            Viewer::Archive(s) => s.is_editing(),
+            Viewer::Hex(s) => s.is_editing(),
+            Viewer::Doc(s) => s.is_editing(),
+            Viewer::Model3d(s) => s.is_editing(),
             _ => None,
         }
     }
@@ -141,6 +224,13 @@ impl Viewer {
         match self {
             Viewer::Text(s) => s.toggle_edit().map(Msg::Text),
             Viewer::Pdf(s) => s.toggle_edit().map(Msg::Pdf),
+            Viewer::Audio(s) => s.toggle_edit().map(Msg::Audio),
+            Viewer::Video(s) => s.toggle_edit().map(Msg::Video),
+            Viewer::Sheet(s) => s.toggle_edit().map(Msg::Sheet),
+            Viewer::Archive(s) => s.toggle_edit().map(Msg::Archive),
+            Viewer::Hex(s) => s.toggle_edit().map(Msg::Hex),
+            Viewer::Doc(s) => s.toggle_edit().map(Msg::Doc),
+            Viewer::Model3d(s) => s.toggle_edit().map(Msg::Model3d),
             _ => Task::none(),
         }
     }
@@ -190,6 +280,35 @@ impl Viewer {
                 s.update(m);
                 (Task::none(), None)
             }
+            (Viewer::Audio(s), Msg::Audio(m)) => {
+                let (t, ev) = s.update(m);
+                (t.map(Msg::Audio), ev)
+            }
+            (Viewer::Video(s), Msg::Video(m)) => {
+                let (t, ev) = s.update(m);
+                (t.map(Msg::Video), ev)
+            }
+            (Viewer::Sheet(s), Msg::Sheet(m)) => {
+                let (t, ev) = s.update(m);
+                (t.map(Msg::Sheet), ev)
+            }
+            (Viewer::Archive(s), Msg::Archive(m)) => {
+                let (t, ev) = s.update(m);
+                (t.map(Msg::Archive), ev)
+            }
+            (Viewer::Hex(s), Msg::Hex(m)) => {
+                let (t, ev) = s.update(m);
+                (t.map(Msg::Hex), ev)
+            }
+            (Viewer::Doc(s), Msg::Doc(m)) => {
+                let (t, ev) = s.update(m);
+                (t.map(Msg::Doc), ev)
+            }
+            (Viewer::Model3d(s), Msg::Model3d(m)) => {
+                let (t, ev) = s.update(m);
+                (t.map(Msg::Model3d), ev)
+            }
+
             _ => (Task::none(), None),
         }
     }
@@ -199,6 +318,13 @@ impl Viewer {
         match self {
             Viewer::Text(s) => s.save().map(Msg::Text),
             Viewer::Pdf(s) => s.save().map(Msg::Pdf),
+            Viewer::Audio(s) => s.save().map(Msg::Audio),
+            Viewer::Video(s) => s.save().map(Msg::Video),
+            Viewer::Sheet(s) => s.save().map(Msg::Sheet),
+            Viewer::Archive(s) => s.save().map(Msg::Archive),
+            Viewer::Hex(s) => s.save().map(Msg::Hex),
+            Viewer::Doc(s) => s.save().map(Msg::Doc),
+            Viewer::Model3d(s) => s.save().map(Msg::Model3d),
             _ => Task::none(),
         }
     }
@@ -213,6 +339,13 @@ impl Viewer {
             Viewer::Table(s) => s.view(),
             Viewer::Placeholder(s) => s.view(Msg::Convert),
             Viewer::Locked(s) => s.view().map(Msg::Locked),
+            Viewer::Audio(s) => s.view().map(Msg::Audio),
+            Viewer::Video(s) => s.view().map(Msg::Video),
+            Viewer::Sheet(s) => s.view().map(Msg::Sheet),
+            Viewer::Archive(s) => s.view().map(Msg::Archive),
+            Viewer::Hex(s) => s.view().map(Msg::Hex),
+            Viewer::Doc(s) => s.view().map(Msg::Doc),
+            Viewer::Model3d(s) => s.view().map(Msg::Model3d),
         }
     }
 }
@@ -221,4 +354,15 @@ fn is_pdf(path: &std::path::Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
         .is_some_and(|e| e.eq_ignore_ascii_case("pdf"))
+}
+
+/// Any file can be shown as bytes; fall back to the placeholder if the hex
+/// viewer can't open it.
+async fn hex_or_placeholder(path: PathBuf, kind: Kind) -> Result<Loaded, String> {
+    if hex::supported(&path) {
+        if let Ok(o) = hex::open(path).await {
+            return Ok(Loaded::Hex(o));
+        }
+    }
+    Ok(Loaded::Placeholder(kind))
 }
