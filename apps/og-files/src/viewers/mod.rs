@@ -313,6 +313,31 @@ impl Viewer {
         }
     }
 
+    /// Keyboard input while the viewer pane has focus. None = not consumed
+    /// (the app falls back to its own shortcuts).
+    pub fn key(
+        &mut self,
+        key: &iced::keyboard::Key,
+        mods: iced::keyboard::Modifiers,
+    ) -> Option<Task<Msg>> {
+        let _ = (key, mods);
+        match self {
+            _ => None,
+        }
+    }
+
+    /// The viewer wants the window fullscreen (video).
+    pub fn fullscreen(&self) -> bool {
+        match self {
+            _ => false,
+        }
+    }
+
+    /// The app left/entered fullscreen on its own (e.g. Escape).
+    pub fn set_fullscreen(&mut self, on: bool) {
+        let _ = on;
+    }
+
     /// Ctrl+S from the app. Viewers that can't save ignore it.
     pub fn save(&mut self) -> Task<Msg> {
         match self {

@@ -133,6 +133,29 @@ impl Tabs {
         tab.viewer.toggle_edit().map(move |m| Msg::Viewer(id, m))
     }
 
+    /// Keys while the viewer pane has focus; None if the viewer didn't use it.
+    pub fn key(
+        &mut self,
+        key: &iced::keyboard::Key,
+        mods: iced::keyboard::Modifiers,
+    ) -> Option<Task<Msg>> {
+        let tab = self.active_mut()?;
+        let id = tab.id;
+        tab.viewer
+            .key(key, mods)
+            .map(|t| t.map(move |m| Msg::Viewer(id, m)))
+    }
+
+    pub fn active_fullscreen(&self) -> bool {
+        self.active().is_some_and(|t| t.viewer.fullscreen())
+    }
+
+    pub fn set_fullscreen(&mut self, on: bool) {
+        if let Some(t) = self.active_mut() {
+            t.viewer.set_fullscreen(on);
+        }
+    }
+
     pub fn update(&mut self, msg: Msg) -> (Task<Msg>, Option<Event>) {
         match msg {
             Msg::Select(id) => {

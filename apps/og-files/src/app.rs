@@ -23,7 +23,7 @@ use iced::{task, Element, Length, Point, Subscription, Task, Theme};
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PaneKind {
+pub enum PaneKind {
     Files,
     Viewer,
     Inspector,
@@ -147,6 +147,10 @@ pub struct App {
     dnd: Option<crate::extdnd::Dnd>,
     /// files from another app are hovering over the window
     ext_hover: bool,
+    /// pane under the pointer / pane that receives plain keys
+    hover_pane: Option<PaneKind>,
+    focus_pane: PaneKind,
+    fullscreen: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -188,6 +192,11 @@ pub enum Message {
     MouseUp,
     /// the suite config changed (og-suite builds): re-read the palette
     ThemeChanged,
+    /// a key without Ctrl: goes to the focused pane (viewer first, then files)
+    RawKey(Key, Modifiers),
+    /// pointer entered (true) / left (false) a pane
+    PaneHover(PaneKind, bool),
+    MouseDown,
     DndReady(Result<crate::extdnd::Dnd, String>),
     ExtDrop(crate::extdnd::DropEvent),
     CursorLeft,
@@ -249,6 +258,9 @@ impl App {
             drag: None,
             dnd: None,
             ext_hover: false,
+            hover_pane: None,
+            focus_pane: PaneKind::Files,
+            fullscreen: false,
         };
         // og-files [--view tree|list|grid] [--search TEXT] [--focus] [PATH]
         // a folder PATH opens in the files pane, a file PATH in a tab
@@ -791,6 +803,34 @@ impl App {
         })
     }
 
+    /// Follow the active viewer's fullscreen wish: maximize the viewer pane
+    /// and switch the window mode.
+    fn sync_fullscreen(&mut self) -> Task<Message> {
+        let want = self.tabs.active_fullscreen();
+        if want == self.fullscreen {
+            return Task::none();
+        }
+        self.fullscreen = want;
+        let viewer = self
+            .panes
+            .iter()
+            .find(|(_, k)| **k == PaneKind::Viewer)
+            .map(|(p, _)| *p);
+        if let Some(p) = viewer {
+            if want {
+                self.panes.maximize(p);
+            } else {
+                self.panes.restore();
+            }
+        }
+        let mode = if want {
+            iced::window::Mode::Fullscreen
+        } else {
+            iced::window::Mode::Windowed
+        };
+        iced::window::get_oldest().and_then(move |id| iced::window::change_mode(id, mode))
+    }
+
     fn sidebar_in_trash(&self, t: &Option<Target>) -> bool {
         t.as_ref().is_some_and(|t| t.in_trash)
     }
@@ -962,7 +1002,40 @@ impl App {
             Message::Tabs(m) => {
                 let (task, ev) = self.tabs.update(m);
                 let follow = ev.map(|e| self.on_tabs_event(e)).unwrap_or_else(Task::none);
-                Task::batch([task.map(Message::Tabs), follow])
+                Task::batch([task.map(Message::Tabs), follow, self.sync_fullscreen()])
+            }
+            Message::RawKey(key, mods) => {
+                let esc = matches!(key.as_ref(), Key::Named(key::Named::Escape));
+                if self.dialog.is_none() && self.menu.is_none() {
+                    if self.focus_pane == PaneKind::Viewer {
+                        if let Some(t) = self.tabs.key(&key, mods) {
+                            return Task::batch([t.map(Message::Tabs), self.sync_fullscreen()]);
+                        }
+                    }
+                    if esc && self.fullscreen {
+                        self.tabs.set_fullscreen(false);
+                        return self.sync_fullscreen();
+                    }
+                }
+                match files_key(key, mods) {
+                    Some(m) => self.update_inner(m),
+                    None => Task::none(),
+                }
+            }
+            Message::PaneHover(p, entered) => {
+                if entered {
+                    self.hover_pane = Some(p);
+                } else if self.hover_pane == Some(p) {
+                    // a leave can arrive after the next pane's enter
+                    self.hover_pane = None;
+                }
+                Task::none()
+            }
+            Message::MouseDown => {
+                if let Some(p) = self.hover_pane {
+                    self.focus_pane = p;
+                }
+                Task::none()
             }
             Message::Inspector(m) => {
                 self.inspector.update(m);
@@ -1227,6 +1300,9 @@ impl App {
                     iced::mouse::Button::Left,
                 )) => Some(Message::MouseUp),
                 iced::Event::Mouse(iced::mouse::Event::CursorLeft) => Some(Message::CursorLeft),
+                iced::Event::Mouse(iced::mouse::Event::ButtonPressed(_)) => {
+                    Some(Message::MouseDown)
+                }
                 _ => None,
             }),
             Subscription::run(drive_events),
@@ -1243,7 +1319,14 @@ impl App {
                         .on_right_press(Message::BackgroundMenu)
                         .into(),
                 ),
-                PaneKind::Viewer => ("Viewer", self.tabs.view().map(Message::Tabs)),
+                PaneKind::Viewer => (
+                    if self.focus_pane == PaneKind::Viewer {
+                        "Viewer  ·  keys go here"
+                    } else {
+                        "Viewer"
+                    },
+                    self.tabs.view().map(Message::Tabs),
+                ),
                 PaneKind::Inspector => ("Inspector", self.inspector.view().map(Message::Inspector)),
                 PaneKind::Details => (
                     "Details",
@@ -1254,6 +1337,11 @@ impl App {
                 .style(theme::panel)
                 .width(Length::Fill)
                 .height(Length::Fill);
+            // which pane the pointer is over decides where plain keys go after a click
+            let k = *kind;
+            let body = mouse_area(body)
+                .on_enter(Message::PaneHover(k, true))
+                .on_exit(Message::PaneHover(k, false));
             pane_grid::Content::new(body).title_bar(
                 pane_grid::TitleBar::new(text(title).size(11).color(theme::MUTED)).padding([2, 10]),
             )
@@ -1658,6 +1746,13 @@ fn shortcut(key: Key, mods: Modifiers) -> Option<Message> {
             _ => None,
         };
     }
+    Some(Message::RawKey(key, mods))
+}
+
+/// Plain keys for the files pane (also the fallback when the viewer
+/// doesn't use a key).
+fn files_key(key: Key, mods: Modifiers) -> Option<Message> {
+    use sidebar::Key as K;
     match key.as_ref() {
         Key::Named(key::Named::ArrowUp) => Some(Message::Key(K::Up)),
         Key::Named(key::Named::ArrowDown) => Some(Message::Key(K::Down)),
