@@ -25,13 +25,44 @@ fn xdg(var: &str, fallback: &str) -> PathBuf {
         .unwrap_or_else(|| home().join(fallback))
 }
 
+/// One-time move of data written while the app was called og-explorer
+/// (bookmarks, Stirling settings, activity log) to the og-files folders.
+/// Never overwrites anything that already exists.
+pub fn migrate_old_dirs() {
+    let pairs = [
+        (
+            xdg("XDG_CONFIG_HOME", ".config").join("og-explorer"),
+            config_dir(),
+        ),
+        (
+            xdg("XDG_STATE_HOME", ".local/state").join("og-explorer"),
+            xdg("XDG_STATE_HOME", ".local/state").join("og-files"),
+        ),
+    ];
+    for (old, new) in pairs {
+        let Ok(rd) = std::fs::read_dir(&old) else {
+            continue;
+        };
+        let _ = std::fs::create_dir_all(&new);
+        for e in rd.flatten() {
+            let to = new.join(e.file_name());
+            if !to.exists() {
+                let _ = std::fs::rename(e.path(), to);
+            }
+        }
+        let _ = std::fs::remove_dir(&old); // only if now empty
+    }
+    // the old thumbnail cache is just regenerated
+    let _ = std::fs::remove_dir_all(xdg("XDG_CACHE_HOME", ".cache").join("og-explorer"));
+}
+
 pub fn config_dir() -> PathBuf {
-    xdg("XDG_CONFIG_HOME", ".config").join("og-explorer")
+    xdg("XDG_CONFIG_HOME", ".config").join("og-files")
 }
 
 #[allow(dead_code)] // thumbnail cache lands in phase 1 (SPEC.md §9)
 pub fn cache_dir() -> PathBuf {
-    xdg("XDG_CACHE_HOME", ".cache").join("og-explorer")
+    xdg("XDG_CACHE_HOME", ".cache").join("og-files")
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

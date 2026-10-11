@@ -187,7 +187,7 @@ pub async fn write_text(path: PathBuf, text: String) -> Result<(), String> {
 /// truncate the original.
 pub async fn write_bytes(path: PathBuf, bytes: Vec<u8>) -> Result<(), String> {
     let tmp = path.with_file_name(format!(
-        ".{}.og-explorer.tmp",
+        ".{}.og-files.tmp",
         path.file_name().and_then(|n| n.to_str()).unwrap_or("file")
     ));
     tokio::fs::write(&tmp, bytes)

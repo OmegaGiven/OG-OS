@@ -1,4 +1,4 @@
-# OG Explorer — spec
+# OG Files — spec
 
 The successor to `og-files`: a file manager whose right side is a set of
 tabbed viewers and editors, so browsing a folder and working on what's in it
@@ -10,15 +10,15 @@ files pane (tree, list and grid views, kind filter, live background search,
 focus mode), tabs with an explicit edit mode, the inspector, the details log
 and three working viewers. Everything else is described here.
 
-The crate is `og-explorer` while it's being built. When it replaces og-files
+The crate is `og-files` while it's being built. When it replaces og-files
 at the end of phase 1, it **takes over the `og-files` name** (binary and
 app_id) and the old crate gets archived.
 
 ```bash
-cargo run -p og-explorer -- ~/Documents               # folder: shown in the files pane
-cargo run -p og-explorer -- notes.md                  # file: opened in a tab
-cargo run -p og-explorer -- --view grid --focus ~/Pictures
-cargo run -p og-explorer -- --search invoice          # start with a search running
+cargo run -p og-files -- ~/Documents               # folder: shown in the files pane
+cargo run -p og-files -- notes.md                  # file: opened in a tab
+cargo run -p og-files -- --view grid --focus ~/Pictures
+cargo run -p og-files -- --search invoice          # start with a search running
 ```
 
 ---
@@ -217,7 +217,7 @@ can't reasonably be pure Rust:
 | Archive | zip, tar(.gz/.xz/.zst), 7z | browse as a folder | extract / compress via jobs | `zip`, `tar`, `flate2`, `xz2`, `zstd`, `sevenz-rust` | 2 |
 | Binary | anything else | hex view (virtualized) | none | own | 2 |
 
-**Renderer:** og-explorer uses iced's default features (wgpu first, with
+**Renderer:** og-files uses iced's default features (wgpu first, with
 tiny-skia as fallback). Video and 3D need wgpu. On machines without a GPU
 those two viewers show a "needs GPU" placeholder and everything else works.
 
@@ -242,7 +242,7 @@ translated.
 |---|---|---|
 | Render | `hayro` 0.7 (pure Rust, MIT/Apache, CPU) | One worker thread per open PDF that keeps its parse and font cache (`viewers/pdf/engine.rs`). Panics are caught per page. Bitmaps are capped at 40 MP. Limits: no blending/knockout groups yet, and password-protected files fail to open. |
 | Edit | `lopdf` 0.45 (pure Rust, MIT) | `compose::build(sources, plan)` turns a plan of (source, page, rotation) into a new PDF. That single primitive covers reorder, delete, rotate, duplicate, merge/insert, extract and split. Inherited page attributes are pushed down, and unused objects are pruned. |
-| Heavy tools | Stirling REST API on `go` (optional) | For jobs that need Tesseract, Ghostscript, qpdf or LibreOffice. The app uploads the file and saves the result next to the original. Config goes in `$XDG_CONFIG_HOME/og-explorer/stirling.json` (`{ "url": "https://go.tail6c6721.ts.net:8081", "api_key": "…" }`, sent as `X-API-KEY`). Without it those tools are just hidden, so the app stays standalone. |
+| Heavy tools | Stirling REST API on `go` (optional) | For jobs that need Tesseract, Ghostscript, qpdf or LibreOffice. The app uploads the file and saves the result next to the original. Config goes in `$XDG_CONFIG_HOME/og-files/stirling.json` (`{ "url": "https://go.tail6c6721.ts.net:8081", "api_key": "…" }`, sent as `X-API-KEY`). Without it those tools are just hidden, so the app stays standalone. |
 
 **Model.** The same rules as every other viewer apply: view mode is
 read-only, and **Edit pages** (`Ctrl+E`) enables page operations. **Save**
@@ -309,7 +309,7 @@ main ones:
 Pipelines and "recipes" (saved tool chains run on a selection) are still
 open: phase 3.
 
-**Tests (62).** `cargo test -p og-explorer` covers:
+**Tests (62).** `cargo test -p og-files` covers:
 - compose, pages, and every public function of structure, layout, raster
   and server (server tests use a local mock HTTP server, no network);
 - `every_native_tool_runs_end_to_end`, which drives all native tools
@@ -317,10 +317,10 @@ open: phase 3.
   parses.
 
 Test hooks:
-- **Real files:** `OGX_PDF=file.pdf cargo test -p og-explorer real_file`.
+- **Real files:** `OGX_PDF=file.pdf cargo test -p og-files real_file`.
 - **Visual check:** `OGX_PDF=… OGX_DEMO_DIR=/tmp/out cargo test -p
-  og-explorer demo_outputs` writes sample outputs for eyeballing.
-- **Screenshots:** `OGX_TOOL="Watermark" og-explorer file.pdf` opens the
+  og-files demo_outputs` writes sample outputs for eyeballing.
+- **Screenshots:** `OGX_TOOL="Watermark" og-files file.pdf` opens the
   Tools panel on that tool (`OGX_TOOL=""` opens the list).
 
 ## 6. File-manager features
@@ -352,13 +352,13 @@ Test hooks:
 | Drag and drop with other apps | `extdnd.rs` + fixed `og-wayland` (og-suite builds) | see §7 |
 | Open with | port og-files `desktop.rs` registry | 2 |
 | Bookmarks | add/remove from the context menu, `bookmarks.json` | ✅ |
-| Activity log | persisted to `$XDG_STATE_HOME/og-explorer/activity.jsonl`, "only this file" filter | ✅ |
+| Activity log | persisted to `$XDG_STATE_HOME/og-files/activity.jsonl`, "only this file" filter | ✅ |
 | Icons | bundled Bootstrap Icons font, tinted per file type | ✅ |
 
 ## 7. Standalone vs OG-OS suite
 
 - **Default build:** no `og-*` path dependencies. It uses XDG paths, its own
-  palette and its own config. It builds with `cargo build -p og-explorer`
+  palette and its own config. It builds with `cargo build -p og-files`
   and could be split into its own repo.
 - **Feature `og-suite` (built):** adds `og-config` and `og-theme`, so the
   theme follows the suite's `~/.config/sway-power/config.json` and reloads
@@ -381,7 +381,7 @@ atomic writes. Video never overwrites: it exports a new file.
 
 The bottom panel is therefore an **activity log**: opened, edit mode
 entered, saved over, discarded, exported, errors.
-- Persisted to `$XDG_STATE_HOME/og-explorer/activity.jsonl` (last 2000
+- Persisted to `$XDG_STATE_HOME/og-files/activity.jsonl` (last 2000
   entries) ✅.
 - "Only this file" filter, so selecting a file shows *its* history ✅.
 - Running file jobs show here with progress bars and Cancel ✅.
@@ -397,7 +397,7 @@ entered, saved over, discarded, exported, errors.
 - [x] focus mode (files pane ~85%, inspector hidden) and Ctrl+B hide
 - [x] two-pass live search with append-only background results
 - [x] tabs with stable ids, dedupe, dirty guard
-- [x] CLI: `og-explorer [--view tree|list|grid] [--search TEXT] [--focus] [PATH]`
+- [x] CLI: `og-files [--view tree|list|grid] [--search TEXT] [--focus] [PATH]`
 - [x] viewers: text (read-only → edit mode, save over, discard), image, CSV/TSV
 - [x] PDF: hayro viewer + thumbnails; edit pages (rotate, delete, reorder, insert, duplicate, blank); export (extract, split, save copy)
 - [x] PDF toolkit: all Stirling core tools, 54 in a Tools panel (native + optional Stirling server), unlock screen, convert-to-PDF from other viewers; 62 tests

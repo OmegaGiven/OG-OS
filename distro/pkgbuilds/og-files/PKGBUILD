@@ -1,9 +1,10 @@
 # Maintainer: OmegaGiven
-# Source repo is file-manager; binary/pkg name is og-files. Built on the
-# dev machine, not inside the archiso chroot — see og-os/OS-PLAN.md
-# phase 2. ffmpeg/zip/unzip/tar/alacritty are optional runtime deps
-# (video thumbs, archive ops, terminal spawn) — left out of depends,
-# already covered by base's everyday-utilities group or user config.
+# OG Files (apps/og-files): file manager with built-in viewers/editors
+# (PDF toolkit, audio, video, spreadsheets, archives, documents, 3D). Built
+# on the dev machine, not inside the archiso chroot — see og-os/OS-PLAN.md
+# phase 2. The og-suite feature (suite theme + Wayland drag-and-drop) is
+# the crate default. Video uses the FFmpeg *libraries*, audio goes out via
+# ALSA (pipewire-alsa), drives via the udisks2 D-Bus service, 3D via wgpu.
 # Builds straight from $_ogsrc (the live working tree when built locally, the
 # checked-out commit in CI), not git — these repos
 # carry uncommitted work a git+file:// clone would silently drop.
@@ -14,12 +15,13 @@ pkgname=og-files
 _ogsrc="${OGOS_SRC:-$(cd "$startdir/../../.." && pwd)}"
 pkgver="${OGOS_PKGVER:-20260908}"
 pkgrel=1
-pkgdesc="OG-toolkit file manager"
+pkgdesc="OG Files: file manager with built-in viewers and editors"
 arch=('x86_64')
 url="https://github.com/OmegaGiven/OG-OS"
 license=('MIT')
-depends=('gcc-libs' 'wayland' 'ttf-nerd-fonts-symbols' 'xdg-utils')
-makedepends=('cargo')
+depends=('gcc-libs' 'wayland' 'libxkbcommon' 'vulkan-icd-loader' 'ffmpeg' 'alsa-lib' 'udisks2')
+optdepends=('pipewire-alsa: route audio through PipeWire')
+makedepends=('cargo' 'clang')  # clang: bindgen for the FFmpeg bindings
 # No split -debug package: its RUSTFLAGS path remap differs per package,
 # which would make every package rebuild the shared cargo target from
 # scratch (and build-repo.sh drops -debug packages anyway).

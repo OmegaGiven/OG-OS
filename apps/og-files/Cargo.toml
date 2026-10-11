@@ -2,24 +2,69 @@
 name = "og-files"
 version = "0.1.0"
 edition = "2021"
+description = "OG Files — file manager with built-in viewers and editors"
 
 [[bin]]
 name = "og-files"
 path = "src/main.rs"
 
+# Deliberately no og-* path deps: this app must build and run standalone,
+# outside the OG-OS distro. Suite integration (og-config theme, og-wayland
+# drag-out) comes in behind the optional `og-suite` feature — see SPEC.md §7.
 [dependencies]
-og-config = { path = "../../crates/og-config" }
-og-drag = { path = "../../crates/og-drag" }
-og-theme = { path = "../../crates/og-theme" }
-og-wayland = { path = "../../crates/og-wayland" }
-iced = { version = "0.13", default-features = false, features = ["tiny-skia", "advanced", "tokio", "image"] }
+iced = { version = "0.13", features = ["image", "tokio", "advanced", "canvas", "wgpu", "highlighter", "markdown", "lazy"] }
+tokio = { version = "1.52.3", features = ["fs", "rt", "sync", "time", "io-util"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-chrono = { version = "0.4", features = ["serde"] }
 mime_guess = "2"
-libc = "0.2.186"
-image = "0.24"
-kamadak-exif = "0.5"
-tokio = { version = "1.52.3", features = ["rt"] }
-calloop = "0.14"
+hayro = "0.7"
+lopdf = { version = "0.45", default-features = false }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "tiff"] }
+ureq = { version = "2.12", default-features = false, features = ["tls"] }
+iced_fonts = { version = "0.1", features = ["bootstrap"] }
+zbus = { version = "5", default-features = false, features = ["tokio"] }
 notify = "8"
+og-wayland = { path = "../../crates/og-wayland", optional = true }
+symphonia = { version = "0.5", features = ["mp3", "aac", "alac", "isomp4"] }
+lofty = "0.22"
+hound = "3.5"
+# 3D viewer (viewers/model3d): loaders + math/GPU plumbing
+gltf = { version = "1.4", default-features = false, features = ["utils"] }
+tobj = { version = "4", default-features = false }
+stl_io = "0.8"
+glam = "0.25"
+bytemuck = { version = "1", features = ["derive"] }
+base64 = "0.22"
+ffmpeg-next = "9"
+cpal = "0.18"
+quick-xml = "0.39"
+# spreadsheet viewer
+calamine = "0.36"
+csv = "1"
+rust_xlsxwriter = { version = "0.94", default-features = false }
+spreadsheet-ods = "0.25"
+# archive viewer
+zip = { version = "8", default-features = false, features = ["deflate-flate2-zlib-rs", "aes-crypto"] }
+tar = "0.4"
+flate2 = "1"
+xz2 = "0.1"
+zstd = "0.13"
+bzip2 = "0.4"
+sevenz-rust2 = { version = "0.20", default-features = false, features = ["aes256", "bzip2", "deflate", "ppmd"] }
+
+og-config = { path = "../../crates/og-config", optional = true }
+og-theme = { path = "../../crates/og-theme", optional = true }
+
+[features]
+# OG-OS integration (on by default): suite palette with live reload and,
+# via og-wayland, drag-and-drop with other apps. Build with
+# --no-default-features for a fully standalone binary.
+default = ["og-suite"]
+og-suite = ["dep:og-config", "dep:og-theme", "dep:og-wayland"]
+
+[dev-dependencies]
+tokio = { version = "1.52.3", features = ["macros", "rt", "time", "sync", "fs"] }
+# validates the 3D viewer's WGSL without a GPU (same naga as iced's wgpu)
+naga = { version = "0.19", features = ["wgsl-in"] }
+# test-only: checks the highlighter language tokens resolve (already an iced dep)
+syntect = "5"

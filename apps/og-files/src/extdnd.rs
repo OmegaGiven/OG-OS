@@ -96,7 +96,7 @@ mod imp {
         if let Some(events) = taken {
             let inner = dnd.inner.clone();
             let spawned = std::thread::Builder::new()
-                .name("og-explorer-dnd".into())
+                .name("og-files-dnd".into())
                 .spawn(move || {
                     forward(&events, &tx);
                     if let Ok(mut slot) = inner.events.lock() {
@@ -104,7 +104,7 @@ mod imp {
                     }
                 });
             if let Err(e) = spawned {
-                eprintln!("og-explorer: dnd forwarding thread failed: {e}");
+                eprintln!("og-files: dnd forwarding thread failed: {e}");
             }
         }
         rx

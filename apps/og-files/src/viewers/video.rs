@@ -866,7 +866,7 @@ impl Player {
         });
         let c = ctl.clone();
         let _ = std::thread::Builder::new()
-            .name("og-explorer-video".into())
+            .name("og-files-video".into())
             .spawn(move || {
                 // a broken file: answer requests with "no frame" until closed
                 match Core::open(&path, (MAX_DISPLAY, MAX_DISPLAY), want_audio) {

@@ -1721,7 +1721,7 @@ mod tests {
         );
     }
 
-    /// Visual check: `OGX_PDF=in.pdf OGX_DEMO_DIR=/tmp/out cargo test -p og-explorer demo_outputs`
+    /// Visual check: `OGX_PDF=in.pdf OGX_DEMO_DIR=/tmp/out cargo test -p og-files demo_outputs`
     /// writes a handful of tool results for eyeballing. Skipped otherwise.
     #[test]
     fn demo_outputs() {

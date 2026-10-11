@@ -4257,7 +4257,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "og-explorer"
+name = "og-files"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
@@ -4300,27 +4300,6 @@ dependencies = [
  "zbus 5.19.0",
  "zip 8.6.0",
  "zstd",
-]
-
-[[package]]
-name = "og-files"
-version = "0.1.0"
-dependencies = [
- "calloop 0.14.4",
- "chrono",
- "iced",
- "image 0.24.9",
- "kamadak-exif",
- "libc",
- "mime_guess",
- "notify",
- "og-config",
- "og-drag",
- "og-theme",
- "og-wayland",
- "serde",
- "serde_json",
- "tokio",
 ]
 
 [[package]]

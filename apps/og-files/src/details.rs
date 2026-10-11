@@ -1,6 +1,6 @@
 //! Bottom strip: file details & history — an activity log (opened, saved,
 //! copied, trashed, errors…) persisted to
-//! `$XDG_STATE_HOME/og-explorer/activity.jsonl`, filterable to the focused
+//! `$XDG_STATE_HOME/og-files/activity.jsonl`, filterable to the focused
 //! file. Also hosts the running file jobs.
 
 use crate::theme;
@@ -43,7 +43,7 @@ fn log_path() -> PathBuf {
         .map(PathBuf::from)
         .filter(|p| p.is_absolute())
         .unwrap_or_else(|| crate::config::home().join(".local/state"));
-    base.join("og-explorer").join("activity.jsonl")
+    base.join("og-files").join("activity.jsonl")
 }
 
 pub fn load() -> Task<Msg> {

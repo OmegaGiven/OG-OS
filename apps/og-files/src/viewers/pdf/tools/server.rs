@@ -1,7 +1,7 @@
 //! Optional Stirling-PDF REST backend (the homelab server on `go`) for tools
 //! that need Tesseract / Ghostscript / qpdf / LibreOffice.
 //!
-//! Config: `$XDG_CONFIG_HOME/og-explorer/stirling.json`
+//! Config: `$XDG_CONFIG_HOME/og-files/stirling.json`
 //!   { "url": "https://go.tail6c6721.ts.net:8081", "api_key": "…" }
 //! The key is sent as `X-API-KEY`. No config → `ServerConfig::load()` is
 //! None and the UI hides server tools. All calls are blocking (run them on
@@ -391,7 +391,7 @@ fn agent(read: Duration) -> ureq::Agent {
         .timeout_write(read)
         // a redirect almost always means "login page"; report it instead
         .redirects(0)
-        .user_agent(concat!("og-explorer/", env!("CARGO_PKG_VERSION")))
+        .user_agent(concat!("og-files/", env!("CARGO_PKG_VERSION")))
         .build()
 }
 

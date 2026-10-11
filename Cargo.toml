@@ -9,7 +9,6 @@ members = [
     "apps/og-apps",
     "apps/og-bar",
     "apps/og-clip",
-    "apps/og-explorer",
     "apps/og-files",
     "apps/og-hotkeys",
     "apps/og-notif-center",

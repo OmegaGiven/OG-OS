@@ -635,7 +635,7 @@ fn write_tags(path: &Path, t: &Tags) -> Result<(), String> {
     let year = parse_num(&t.year, "Year")?;
     let track = parse_num(&t.track, "Track")?;
     let tmp = path.with_file_name(format!(
-        ".{}.og-explorer.tmp",
+        ".{}.og-files.tmp",
         path.file_name().and_then(|n| n.to_str()).unwrap_or("audio")
     ));
     std::fs::copy(path, &tmp).map_err(|e| e.to_string())?;

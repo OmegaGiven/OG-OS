@@ -39,7 +39,7 @@ pub async fn open(bytes: Arc<Vec<u8>>) -> Result<(Engine, Vec<(f32, f32)>), Stri
     let (tx, rx) = mpsc::channel::<Req>();
     let (info_tx, info_rx) = oneshot::channel();
     std::thread::Builder::new()
-        .name("og-explorer-pdf".into())
+        .name("og-files-pdf".into())
         .spawn(move || worker(bytes, rx, info_tx))
         .map_err(|e| e.to_string())?;
     let sizes = info_rx

@@ -133,7 +133,7 @@ struct Pipeline {
 impl Pipeline {
     fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Self {
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("og-explorer model3d"),
+            label: Some("og-files model3d"),
             source: wgpu::ShaderSource::Wgsl(include_str!("shader.wgsl").into()),
         });
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {

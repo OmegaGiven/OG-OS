@@ -250,7 +250,7 @@ mod tests {
     }
 }
 
-/// Real-file check: `OGX_PDF=/path/to/file.pdf cargo test -p og-explorer real_file`
+/// Real-file check: `OGX_PDF=/path/to/file.pdf cargo test -p og-files real_file`
 /// reverses and rotates every page, then makes sure hayro still renders all
 /// of them. Skipped when OGX_PDF isn't set.
 #[cfg(test)]
