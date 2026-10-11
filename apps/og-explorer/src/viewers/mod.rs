@@ -6,9 +6,16 @@
 //! plain-data `Loaded`, then `Viewer::from_loaded` builds the live state
 //! (which may hold non-Clone things like a text_editor::Content).
 
+pub mod archive;
+pub mod audio;
 pub mod convert;
+pub mod doc;
+pub mod hex;
 pub mod image;
+pub mod model3d;
 pub mod pdf;
+pub mod sheet;
+pub mod video;
 pub mod placeholder;
 pub mod table;
 pub mod text;
@@ -59,6 +66,9 @@ pub enum Event {
     Status(String),
     /// the file was renamed on disk (auto-rename)
     Renamed(PathBuf),
+    /// open another file in its own tab (e.g. an archive entry extracted to
+    /// the cache)
+    OpenFile(PathBuf),
 }
 
 pub fn load(path: PathBuf, kind: Kind) -> Task<Msg> {

@@ -371,6 +371,10 @@ impl App {
                 self.details.record(s);
                 Task::none()
             }
+            tabs::Event::OpenFile(p) => {
+                let k = Kind::of(&p, false);
+                self.open(p, k, true)
+            }
             tabs::Event::ConfirmClose(id, title) => {
                 self.dialog = Some(Dialog::CloseTab { id, title });
                 Task::none()

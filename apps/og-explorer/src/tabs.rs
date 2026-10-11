@@ -34,6 +34,8 @@ pub enum Msg {
 
 pub enum Event {
     Status(String),
+    /// a viewer asked to open another file
+    OpenFile(PathBuf),
     /// closing this tab would lose unsaved changes — ask first
     ConfirmClose(u64, String),
     /// active tab changed (or closed to nothing) — inspector/details follow
@@ -153,6 +155,7 @@ impl Tabs {
                         tab.path = p.clone();
                         Event::Status(format!("Renamed to {}", p.display()))
                     }
+                    viewers::Event::OpenFile(p) => Event::OpenFile(p),
                 });
                 (task.map(move |m| Msg::Viewer(id, m)), ev)
             }
