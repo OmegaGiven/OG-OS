@@ -7,10 +7,6 @@
 //! (tiny-skia fallback) the shader primitive is dropped by iced; the text
 //! layered underneath the viewport then explains why only info is shown.
 
-// Not wired into viewers::Kind yet (the maintainer does that); until then
-// the non-test build sees the pub API as unused.
-#![cfg_attr(not(test), allow(dead_code))]
-
 mod camera;
 mod load;
 mod render;

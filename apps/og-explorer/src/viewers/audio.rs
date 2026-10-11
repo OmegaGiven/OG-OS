@@ -14,9 +14,6 @@
 //!   original (copy to a hidden sibling, tag that, rename over).
 //! - Edit mode can also drag a selection on the waveform and export it, or a
 //!   peak-normalized (-1 dBFS) copy, as a NEW `<stem>-edit.wav` (24-bit).
-// Not wired into viewers/mod.rs yet (the maintainer does that), so the
-// non-test build would flag the whole module as dead code.
-#![cfg_attr(not(test), allow(dead_code))]
 
 use super::Event;
 use crate::theme;
@@ -76,6 +73,7 @@ pub struct Info {
 }
 
 impl Info {
+    #[cfg(test)]
     pub fn duration(&self) -> Option<f64> {
         self.frames
             .map(|f| f as f64 / self.sample_rate.max(1) as f64)
@@ -405,10 +403,11 @@ impl std::fmt::Debug for Peaks {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "Peaks({} buckets, {} frames @ {} Hz)",
+            "Peaks({} buckets, {} frames @ {} Hz, {} ch)",
             self.buckets.len(),
             self.frames,
-            self.rate
+            self.rate,
+            self.channels
         )
     }
 }

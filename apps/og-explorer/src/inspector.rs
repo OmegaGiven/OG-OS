@@ -104,13 +104,20 @@ impl Inspector {
 
 fn tools_for(kind: Kind) -> &'static str {
     match kind {
-        Kind::Image => "crop · rotate · resize · exposure (phase 3)",
-        Kind::Video => "trim · snapshot frame · export (phase 3)",
-        Kind::Audio => "trim · normalize · tags (phase 3)",
-        Kind::Table => "column types · sort · filter (phase 2)",
-        Kind::Text => "find/replace · word count · syntax (phase 2)",
-        Kind::Doc => "PDF: rotate · delete · reorder · insert (edit mode); extract · split (export). OCR, compress, convert, sign, redact: SPEC.md §5a",
-        Kind::Model3d => "wireframe · normals · dimensions (phase 3)",
-        _ => "—",
+        Kind::Image => "view · Make PDF · split scanned photos (server); editing: phase 3",
+        Kind::Video => {
+            "play · seek · frame step · speed; edit mode: snapshot frame, trim → new file"
+        }
+        Kind::Audio => {
+            "play · waveform seek · loop; edit mode: tags (save over), trim / normalize → new WAV"
+        }
+        Kind::Table => "sheets · edit cells · rows/columns · sort (edit mode)",
+        Kind::Text => "edit mode · syntax colours · find (phase 2)",
+        Kind::Doc => {
+            "PDF: page editing + 54-tool panel (Tools). Markdown / DOCX / ODT / EPUB: reader"
+        }
+        Kind::Model3d => "orbit · pan · zoom · shaded / wire / normals · Y/Z up · dimensions",
+        Kind::Archive => "browse like a folder · open entries · extract",
+        _ => "bytes view (hex)",
     }
 }
