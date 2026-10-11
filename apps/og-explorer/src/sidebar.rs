@@ -69,6 +69,11 @@ pub struct Sidebar {
     pub mods: Modifiers,
     pub sel: Selection,
     last_click: Option<(PathBuf, Instant)>,
+    /// set on press: what a drag starting now would carry (the app takes it)
+    pub pressed: Option<Vec<PathBuf>>,
+    /// pressed an already-selected item: collapse the selection to it on
+    /// release unless a drag happened
+    pending_collapse: Option<PathBuf>,
     typeahead: (String, Option<Instant>),
     tree: Tree,
     browse: Browse,
@@ -114,6 +119,8 @@ impl Sidebar {
             mods: Modifiers::default(),
             sel: Selection::default(),
             last_click: None,
+            pressed: None,
+            pending_collapse: None,
             typeahead: (String::new(), None),
             tree,
             browse: Browse::new(),
@@ -323,7 +330,22 @@ impl Sidebar {
                     self.sel.toggle(p.clone());
                     return (Task::none(), None);
                 }
-                self.sel.only(p.clone());
+                if self.sel.contains(&p) && self.sel.items.len() > 1 && !double {
+                    // keep the multi-selection so it can be dragged
+                    self.pending_collapse = Some(p.clone());
+                    self.sel.cursor = Some(p.clone());
+                } else {
+                    self.sel.only(p.clone());
+                }
+                if p.as_os_str() != TRASH {
+                    self.pressed = Some(
+                        self.sel
+                            .paths()
+                            .into_iter()
+                            .filter(|x| x.as_os_str() != TRASH)
+                            .collect(),
+                    );
+                }
                 if double {
                     return self.activate(p, kind, true);
                 }
@@ -335,12 +357,48 @@ impl Sidebar {
                     (Task::none(), Some(Event::Inspect(p, kind)))
                 }
             }
+            ItemAct::Hover(p, kind, entered) => {
+                if entered {
+                    self.sel.hover = Some(p);
+                    self.sel.hover_kind = Some(kind);
+                } else if self.sel.hover.as_ref() == Some(&p) {
+                    // leave events can arrive after the next enter
+                    self.sel.hover = None;
+                    self.sel.hover_kind = None;
+                }
+                (Task::none(), None)
+            }
             ItemAct::Menu(p) => {
                 if !self.sel.contains(&p) {
                     self.sel.only(p.clone());
                 }
                 (Task::none(), Some(self.menu_event()))
             }
+        }
+    }
+
+    /// Mouse released anywhere (`dragged` = a drag-and-drop just ended).
+    pub fn mouse_up(&mut self, dragged: bool) {
+        if let Some(p) = self.pending_collapse.take() {
+            if !dragged {
+                self.sel.only(p);
+            }
+        }
+        self.pressed = None;
+        self.sel.dragging = false;
+    }
+
+    pub fn is_unmounted_drive(&self, p: &Path) -> bool {
+        self.tree
+            .drive_for(p)
+            .is_some_and(|d| d.mount_point.is_none())
+    }
+
+    /// Folder (or the Trash) under the pointer, as a drop target.
+    pub fn drop_target(&self) -> Option<PathBuf> {
+        match (&self.sel.hover, self.sel.hover_kind) {
+            (Some(p), Some(Kind::Folder)) => Some(p.clone()),
+            _ => None,
         }
     }
 
@@ -666,5 +724,65 @@ impl Sidebar {
             }
         };
         col.push(body).into()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn press(s: &mut Sidebar, p: &str, mods: Modifiers) -> Option<Event> {
+        s.mods = mods;
+        s.item(ItemAct::Press(PathBuf::from(p), Kind::Text)).1
+    }
+
+    #[test]
+    fn click_ctrl_shift_and_drag_selection() {
+        let (mut s, _) = Sidebar::new();
+        // single press selects and previews
+        assert!(matches!(
+            press(&mut s, "/a", Modifiers::empty()),
+            Some(Event::Open(_, _, false))
+        ));
+        assert_eq!(s.sel.paths(), vec![PathBuf::from("/a")]);
+        assert_eq!(s.pressed.take(), Some(vec![PathBuf::from("/a")]));
+        // ctrl adds
+        press(&mut s, "/b", Modifiers::CTRL);
+        assert_eq!(s.sel.items.len(), 2);
+        // pressing a selected item keeps the group for dragging…
+        press(&mut s, "/a", Modifiers::empty());
+        assert_eq!(s.sel.items.len(), 2);
+        assert_eq!(s.pressed.take().map(|p| p.len()), Some(2));
+        // …and a drag keeps it after release
+        s.mouse_up(true);
+        assert_eq!(s.sel.items.len(), 2);
+        // a plain click (no drag) on a selected item collapses to it
+        press(&mut s, "/b", Modifiers::empty());
+        s.mouse_up(false);
+        assert_eq!(s.sel.paths(), vec![PathBuf::from("/b")]);
+    }
+
+    #[test]
+    fn hover_leave_after_enter_keeps_new_target() {
+        let (mut s, _) = Sidebar::new();
+        s.item(ItemAct::Hover(PathBuf::from("/new"), Kind::Folder, true));
+        // the old item's leave arrives late
+        s.item(ItemAct::Hover(PathBuf::from("/old"), Kind::Folder, false));
+        assert_eq!(s.drop_target(), Some(PathBuf::from("/new")));
+        s.item(ItemAct::Hover(PathBuf::from("/new"), Kind::Folder, false));
+        assert_eq!(s.drop_target(), None);
+        // files aren't drop targets
+        s.item(ItemAct::Hover(PathBuf::from("/f.txt"), Kind::Text, true));
+        assert_eq!(s.drop_target(), None);
+    }
+
+    #[test]
+    fn double_press_opens_pinned() {
+        let (mut s, _) = Sidebar::new();
+        press(&mut s, "/a.txt", Modifiers::empty());
+        assert!(matches!(
+            press(&mut s, "/a.txt", Modifiers::empty()),
+            Some(Event::Open(_, _, true))
+        ));
     }
 }

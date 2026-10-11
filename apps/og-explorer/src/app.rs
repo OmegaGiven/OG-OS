@@ -45,6 +45,16 @@ const INSPECTOR_RATIO: f32 = 0.76;
 const DIALOG_INPUT: &str = "dialog-input";
 const MENU_W: f32 = 230.0;
 
+/// Files being dragged inside the app.
+struct Drag {
+    paths: Vec<PathBuf>,
+    origin: Point,
+    active: bool,
+}
+
+/// pointer travel before a press becomes a drag
+const DRAG_START: f32 = 6.0;
+
 struct JobUi {
     id: JobId,
     label: String,
@@ -131,6 +141,7 @@ pub struct App {
     clipboard: Option<(Vec<PathBuf>, bool)>,
     watched: Vec<PathBuf>,
     watcher: Option<task::Handle>,
+    drag: Option<Drag>,
 }
 
 #[derive(Debug, Clone)]
@@ -169,6 +180,7 @@ pub enum Message {
     DriveDone(Result<String, String>),
     DirsChanged(Vec<PathBuf>),
     Copied,
+    MouseUp,
 }
 
 impl App {
@@ -224,6 +236,7 @@ impl App {
             clipboard: None,
             watched: Vec::new(),
             watcher: None,
+            drag: None,
         };
         // og-explorer [--view tree|list|grid] [--search TEXT] [--focus] [PATH]
         // a folder PATH opens in the files pane, a file PATH in a tab
@@ -702,6 +715,40 @@ impl App {
         }
     }
 
+    /// Dropped `paths` on folder `target`: move (Ctrl = copy), or trash when
+    /// dropped on the Trash.
+    fn drop_on(&mut self, paths: Vec<PathBuf>, target: PathBuf) -> Task<Message> {
+        if target.as_os_str() == crate::tree::TRASH {
+            return self.start_job(JobSpec {
+                kind: JobKind::Trash,
+                sources: paths,
+                dest: None,
+            });
+        }
+        if self.sidebar.is_unmounted_drive(&target) {
+            self.details.record("Mount the drive first");
+            return Task::none();
+        }
+        // nothing into itself / its own subfolder / where it already is
+        let paths: Vec<PathBuf> = paths
+            .into_iter()
+            .filter(|p| !target.starts_with(p) && p.parent() != Some(target.as_path()))
+            .collect();
+        if paths.is_empty() {
+            return Task::none();
+        }
+        let kind = if self.sidebar.mods.command() {
+            JobKind::Copy
+        } else {
+            JobKind::Move
+        };
+        self.start_job(JobSpec {
+            kind,
+            sources: paths,
+            dest: Some(target),
+        })
+    }
+
     fn sidebar_in_trash(&self, t: &Option<Target>) -> bool {
         t.as_ref().is_some_and(|t| t.in_trash)
     }
@@ -848,6 +895,13 @@ impl App {
         match message {
             Message::Sidebar(m) => {
                 let (task, ev) = self.sidebar.update(m);
+                if let Some(paths) = self.sidebar.pressed.take() {
+                    self.drag = Some(Drag {
+                        paths,
+                        origin: self.cursor,
+                        active: false,
+                    });
+                }
                 let follow = ev.map(|e| self.sidebar_event(e)).unwrap_or_else(Task::none);
                 Task::batch([task.map(Message::Sidebar), follow])
             }
@@ -934,7 +988,26 @@ impl App {
             }
             Message::Cursor(p) => {
                 self.cursor = p;
+                if let Some(d) = &mut self.drag {
+                    if !d.active
+                        && (p.x - d.origin.x).hypot(p.y - d.origin.y) > DRAG_START
+                        && !d.paths.is_empty()
+                    {
+                        d.active = true;
+                        self.sidebar.sel.dragging = true;
+                    }
+                }
                 Task::none()
+            }
+            Message::MouseUp => {
+                let drag = self.drag.take();
+                let dragged = drag.as_ref().is_some_and(|d| d.active);
+                let target = self.sidebar.drop_target();
+                self.sidebar.mouse_up(dragged);
+                match (drag, target) {
+                    (Some(d), Some(t)) if d.active => self.drop_on(d.paths, t),
+                    _ => Task::none(),
+                }
             }
             Message::Menu(a) => self.action(a),
             Message::Shortcut(a) => {
@@ -1054,6 +1127,9 @@ impl App {
                 iced::Event::Mouse(iced::mouse::Event::CursorMoved { position }) => {
                     Some(Message::Cursor(position))
                 }
+                iced::Event::Mouse(iced::mouse::Event::ButtonReleased(
+                    iced::mouse::Button::Left,
+                )) => Some(Message::MouseUp),
                 _ => None,
             }),
             Subscription::run(drive_events),
@@ -1094,6 +1170,9 @@ impl App {
             .height(Length::Fill)
             .into();
         let mut layers = vec![base];
+        if let Some(d) = self.drag.as_ref().filter(|d| d.active) {
+            layers.push(self.drag_view(d));
+        }
         if let Some((at, t)) = &self.menu {
             layers.push(self.menu_view(*at, t));
         }
@@ -1101,6 +1180,52 @@ impl App {
             layers.push(self.dialog_view(d));
         }
         stack(layers).into()
+    }
+
+    fn drag_view(&self, d: &Drag) -> Element<'_, Message> {
+        let what = match d.paths.as_slice() {
+            [p] => format!(
+                "\"{}\"",
+                p.file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default()
+            ),
+            ps => format!("{} items", ps.len()),
+        };
+        let verb = if self.sidebar.mods.command() {
+            "Copy"
+        } else {
+            "Move"
+        };
+        let label = match self.sidebar.drop_target() {
+            Some(t) if t.as_os_str() == crate::tree::TRASH => format!("Trash {what}"),
+            Some(t) => format!(
+                "{verb} {what} → {}",
+                t.file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| t.display().to_string())
+            ),
+            None => format!("{what}  (drop on a folder · Ctrl copies)"),
+        };
+        let chip = container(text(label).size(12))
+            .padding([4, 10])
+            .style(|t: &Theme| container::Style {
+                background: Some(t.extended_palette().primary.strong.color.into()),
+                text_color: Some(t.extended_palette().primary.strong.text),
+                border: iced::Border {
+                    radius: 12.0.into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            });
+        // purely visual: doesn't take the pointer, so hover targets below still work
+        container(chip)
+            .padding(iced::Padding {
+                top: self.cursor.y + 14.0,
+                left: self.cursor.x + 14.0,
+                ..Default::default()
+            })
+            .into()
     }
 
     fn jobs_view(&self) -> Element<'_, Message> {

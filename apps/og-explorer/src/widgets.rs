@@ -3,7 +3,7 @@
 //! selection state, and the selectable item button every view uses.
 
 use crate::filetype::Kind;
-use iced::widget::{button, column, container, mouse_area, row, scrollable, Space};
+use iced::widget::{column, container, mouse_area, row, scrollable, Space};
 use iced::{Element, Length, Theme};
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -136,6 +136,11 @@ pub struct Selection {
     pub anchor: Option<PathBuf>,
     /// keyboard focus
     pub cursor: Option<PathBuf>,
+    /// item under the pointer (hover style, drop target)
+    pub hover: Option<PathBuf>,
+    pub hover_kind: Option<Kind>,
+    /// a drag is in progress (folders under the pointer light up)
+    pub dragging: bool,
 }
 
 impl Selection {
@@ -187,11 +192,15 @@ impl Selection {
 /// What a row/tile reports to the sidebar.
 #[derive(Debug, Clone)]
 pub enum ItemAct {
+    /// mouse button down (selection happens on press so drags can start)
     Press(PathBuf, Kind),
     Menu(PathBuf),
+    /// pointer entered (`true`) or left (`false`) the item
+    Hover(PathBuf, Kind, bool),
 }
 
-/// A selectable row/tile: left click → `Press`, right click → `Menu`.
+/// A selectable row/tile: press → `Press`, right click → `Menu`, and
+/// enter/leave → `Hover` (drives hover styling and drag-and-drop targets).
 pub fn item<'a, M: Clone + 'a>(
     content: impl Into<Element<'a, M>>,
     path: &PathBuf,
@@ -201,32 +210,48 @@ pub fn item<'a, M: Clone + 'a>(
 ) -> Element<'a, M> {
     let selected = sel.contains(path);
     let focused = sel.cursor.as_ref() == Some(path);
-    let b = button(content)
-        .on_press(wrap(ItemAct::Press(path.clone(), kind)))
+    let hovered = sel.hover.as_ref() == Some(path);
+    let drop_target = hovered && sel.dragging && kind == Kind::Folder && !selected;
+    let body = container(content)
         .padding([2, 6])
         .width(Length::Fill)
-        .style(move |t: &Theme, s| item_style(t, s, selected, focused));
-    mouse_area(b)
+        .style(move |t: &Theme| item_style(t, selected, hovered, focused, drop_target));
+    mouse_area(body)
+        .on_press(wrap(ItemAct::Press(path.clone(), kind)))
         .on_right_press(wrap(ItemAct::Menu(path.clone())))
+        .on_enter(wrap(ItemAct::Hover(path.clone(), kind, true)))
+        .on_exit(wrap(ItemAct::Hover(path.clone(), kind, false)))
         .into()
 }
 
-fn item_style(t: &Theme, s: button::Status, selected: bool, focused: bool) -> button::Style {
+fn item_style(
+    t: &Theme,
+    selected: bool,
+    hovered: bool,
+    focused: bool,
+    drop_target: bool,
+) -> container::Style {
     let p = t.extended_palette();
-    let bg = match (selected, s) {
-        (true, _) => Some(p.primary.weak.color.scale_alpha(0.45).into()),
-        (false, button::Status::Hovered | button::Status::Pressed) => {
-            Some(p.background.strong.color.scale_alpha(0.5).into())
-        }
-        _ => None,
+    let bg = if drop_target {
+        Some(p.success.weak.color.scale_alpha(0.55).into())
+    } else if selected {
+        Some(p.primary.weak.color.scale_alpha(0.45).into())
+    } else if hovered {
+        Some(p.background.strong.color.scale_alpha(0.5).into())
+    } else {
+        None
     };
-    button::Style {
+    container::Style {
         background: bg,
-        text_color: p.background.base.text,
+        text_color: Some(p.background.base.text),
         border: iced::Border {
             radius: 4.0.into(),
-            width: if focused { 1.0 } else { 0.0 },
-            color: p.primary.base.color.scale_alpha(0.7),
+            width: if focused || drop_target { 1.0 } else { 0.0 },
+            color: if drop_target {
+                p.success.base.color
+            } else {
+                p.primary.base.color.scale_alpha(0.7)
+            },
         },
         ..Default::default()
     }
