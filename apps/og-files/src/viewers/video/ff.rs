@@ -1,4 +1,6 @@
-//! Video player: mp4, mkv, webm, mov, avi… via the FFmpeg *libraries*
+//! Fallback video player (used when libmpv can't be loaded) plus the
+//! FFmpeg helpers the mpv player shares: grid thumbnails, the stream-copy
+//! trim exporter and the probe. Decoding goes through the FFmpeg *libraries*
 //! (`ffmpeg-next`; no ffmpeg CLI) with audio through `cpal`.
 //!
 //! One decoder thread per open video (`Player`) owns the demuxer, both
@@ -14,7 +16,7 @@
 //! `<stem>-edit.<ext>`, "Snapshot frame" writes `<stem>-frame-MMmSSs.png`.
 //! Both run on worker threads and report through `Event::Status`.
 
-use super::Event;
+use crate::viewers::Event;
 use crate::theme;
 use crate::widgets::icon;
 use ff::format::sample::Type as SampleType;
@@ -33,9 +35,6 @@ use std::sync::{mpsc, Arc, Mutex, Once};
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc as tmpsc, oneshot};
 
-const EXTS: &[&str] = &[
-    "mp4", "m4v", "mkv", "webm", "mov", "avi", "wmv", "flv", "mpg", "mpeg", "ts", "ogv", "3gp",
-];
 /// Largest frame the player scales to (width and height).
 const MAX_DISPLAY: u32 = 1920;
 /// Decoded-frame queue length.
@@ -43,14 +42,7 @@ const QUEUE: usize = 8;
 /// Audio kept buffered ahead of the device (seconds).
 const AUDIO_AHEAD: f64 = 0.6;
 const SPEEDS: [f32; 4] = [0.5, 1.0, 1.5, 2.0];
-const AMBER: iced::Color = iced::Color::from_rgb(1.0, 0.784, 0.42);
-
-/// Does this viewer handle `path` (by extension / sniffing)?
-pub fn supported(path: &Path) -> bool {
-    path.extension()
-        .and_then(|e| e.to_str())
-        .is_some_and(|e| EXTS.contains(&e.to_ascii_lowercase().as_str()))
-}
+pub(super) const AMBER: iced::Color = iced::Color::from_rgb(1.0, 0.784, 0.42);
 
 fn init() {
     static ONCE: Once = Once::new();
@@ -76,7 +68,7 @@ pub struct Info {
 }
 
 impl Info {
-    fn summary(&self) -> String {
+    pub(super) fn summary(&self) -> String {
         let mut s = format!(
             "{} · {}×{} · {:.2} fps",
             self.video_codec, self.width, self.height, self.fps
@@ -92,21 +84,9 @@ impl Info {
     }
 }
 
-/// Everything `open` produced, handed to `State::new`. Must stay
-/// `Clone + Debug + Send` (it travels in a Message).
-#[derive(Debug, Clone)]
-pub struct Opened {
-    pub path: PathBuf,
-    pub info: Info,
-}
-
-/// Load off the UI thread (do blocking work in `spawn_blocking`).
-pub async fn open(path: PathBuf) -> Result<Opened, String> {
-    let p = path.clone();
-    let info = tokio::task::spawn_blocking(move || Core::open(&p, (1, 1), false).map(|c| c.info))
-        .await
-        .map_err(|e| e.to_string())??;
-    Ok(Opened { path, info })
+/// Stream facts of `path` (blocking).
+pub(super) fn probe(path: &Path) -> Result<Info, String> {
+    Core::open(path, (1, 1), false).map(|c| c.info)
 }
 
 // ════════════════════════════════════════════════════════════════ decoding
@@ -1117,7 +1097,7 @@ impl Playback {
 
 // ══════════════════════════════════════════════════════════════════════ UI
 
-fn fmt_time(t: f64) -> String {
+pub(super) fn fmt_time(t: f64) -> String {
     let s = t.max(0.0) as u64;
     if s >= 3600 {
         format!("{}:{:02}:{:02}", s / 3600, s / 60 % 60, s % 60)
@@ -1126,7 +1106,7 @@ fn fmt_time(t: f64) -> String {
     }
 }
 
-fn fmt_mark(t: f64) -> String {
+pub(super) fn fmt_mark(t: f64) -> String {
     format!("{}.{}", fmt_time(t), ((t.max(0.0) * 10.0) as u64) % 10)
 }
 
@@ -1181,15 +1161,11 @@ pub enum Msg {
 }
 
 impl State {
-    pub fn new(o: Opened) -> (Self, Task<Msg>) {
-        Self::with_audio(o, true)
-    }
-
-    fn with_audio(o: Opened, audio: bool) -> (Self, Task<Msg>) {
-        let player = Player::spawn(o.path.clone(), audio);
+    pub fn new(path: PathBuf, info: Info) -> (Self, Task<Msg>) {
+        let player = Player::spawn(path.clone(), true);
         let mut s = Self {
-            path: o.path,
-            info: o.info,
+            path,
+            info,
             player,
             frame: None,
             failed: false,
@@ -1361,7 +1337,10 @@ impl State {
                     );
                 }
                 self.export = Some(0.0);
-                (spawn_export(self.path.clone(), tin, tout), None)
+                (
+                    spawn_export(self.path.clone(), tin, tout).map(Msg::Exporting),
+                    None,
+                )
             }
             Msg::Exporting(ExportEv::Progress(p)) => {
                 self.export = Some(p);
@@ -1415,16 +1394,8 @@ impl State {
             .color(theme::MUTED)
             .into(),
         };
-        let screen = container(picture)
-            .center(Length::Fill)
-            .style(|_| container::Style {
-                background: Some(iced::Color::BLACK.into()),
-                border: iced::Border {
-                    radius: 6.0.into(),
-                    ..Default::default()
-                },
-                ..Default::default()
-            });
+        // no black box: the panel background shows around the picture
+        let screen = container(picture).center(Length::Fill);
 
         let dur = self.info.duration.max(0.01);
         let pos = self.drag.unwrap_or(self.pos).clamp(0.0, dur);
@@ -1543,11 +1514,6 @@ impl State {
         col.into()
     }
 
-    /// Unsaved edits exist (tab close asks first).
-    pub fn is_dirty(&self) -> bool {
-        false
-    }
-
     /// Some(editing) if this viewer has an edit mode, None otherwise.
     pub fn is_editing(&self) -> Option<bool> {
         Some(self.editing)
@@ -1558,15 +1524,10 @@ impl State {
         self.editing = !self.editing;
         Task::none()
     }
-
-    /// Ctrl+S: nothing to save — video is never written over.
-    pub fn save(&mut self) -> Task<Msg> {
-        Task::none()
-    }
 }
 
 /// `<stem>-edit.<ext>` beside `src`, made unique.
-fn edit_name(src: &Path) -> PathBuf {
+pub(super) fn edit_name(src: &Path) -> PathBuf {
     let dir = src.parent().unwrap_or(Path::new("."));
     let stem = src.file_stem().unwrap_or_default().to_string_lossy();
     let name = match src.extension() {
@@ -1576,7 +1537,9 @@ fn edit_name(src: &Path) -> PathBuf {
     crate::ops::unique_name(dir, &name)
 }
 
-fn spawn_export(src: PathBuf, tin: f64, tout: f64) -> Task<Msg> {
+/// Run `export_trim` on a worker thread into `<stem>-edit.<ext>`,
+/// streaming progress and the result.
+pub(super) fn spawn_export(src: PathBuf, tin: f64, tout: f64) -> Task<ExportEv> {
     let (tx, mut rx) = tmpsc::unbounded_channel::<ExportEv>();
     std::thread::spawn(move || {
         let dst = edit_name(&src);
@@ -1596,20 +1559,20 @@ fn spawn_export(src: PathBuf, tin: f64, tout: f64) -> Task<Msg> {
             }
         }
     });
-    Task::run(stream, Msg::Exporting)
+    Task::run(stream, |e| e)
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
 
     /// Scratch dir under ~/.cache (never /tmp), removed on drop.
-    struct Tmp(PathBuf);
+    pub(in crate::viewers::video) struct Tmp(pub PathBuf);
     impl Tmp {
-        fn new(name: &str) -> Tmp {
+        pub fn new(name: &str) -> Tmp {
             let home = std::env::var_os("HOME").expect("HOME");
             let d = PathBuf::from(home)
-                .join(".cache/ogx-p2-video-tests")
+                .join(".cache/ogx-mpv-tests")
                 .join(format!("{name}-{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&d);
             std::fs::create_dir_all(&d).unwrap();
@@ -1649,11 +1612,20 @@ mod tests {
     /// 2 s test clip written with the libavcodec *encoders*: MPEG-4 part 2
     /// video (160×120, 25 fps, GOP 10) + AAC 440 Hz sine, in MP4.
     fn make_video(path: &Path) {
+        make_video_with(path, false)
+    }
+
+    /// Same clip; `h264` uses libx264 when that encoder is available.
+    pub(in crate::viewers::video) fn make_video_with(path: &Path, h264: bool) {
         init();
         let mut octx = format::output(path).unwrap();
         let global = octx.format().flags().contains(format::Flags::GLOBAL_HEADER);
 
-        let vcodec = encoder::find(codec::Id::MPEG4).expect("mpeg4 encoder");
+        let vcodec = h264
+            .then(|| encoder::find_by_name("libx264"))
+            .flatten()
+            .or_else(|| encoder::find(codec::Id::MPEG4))
+            .expect("video encoder");
         let mut v = codec::Context::new_with_codec(vcodec)
             .encoder()
             .video()
@@ -1746,23 +1718,10 @@ mod tests {
     }
 
     #[test]
-    fn video_supported_extensions() {
-        for n in [
-            "a.mp4", "b.MKV", "c.webm", "d.mov", "e.mpeg", "f.ts", "g.3gp", "h.ogv",
-        ] {
-            assert!(supported(Path::new(n)), "{n}");
-        }
-        for n in ["a.mp3", "b.png", "c", "d.txt"] {
-            assert!(!supported(Path::new(n)), "{n}");
-        }
-    }
-
-    #[tokio::test]
-    async fn video_open_probes_metadata() {
+    fn video_open_probes_metadata() {
         let t = Tmp::new("probe");
         let p = clip(&t);
-        let o = open(p.clone()).await.unwrap();
-        let i = &o.info;
+        let i = &probe(&p).unwrap();
         assert_eq!((i.width, i.height), (W, H));
         assert!((i.fps - 25.0).abs() < 0.01, "fps {}", i.fps);
         assert!((i.duration - 2.0).abs() < 0.1, "duration {}", i.duration);
@@ -1771,7 +1730,7 @@ mod tests {
         assert!(a.starts_with("AAC 44.1 kHz 1ch"), "{a}");
         assert!(i.bit_rate > 0);
         assert!(i.summary().contains("160×120"));
-        assert!(open(t.0.join("missing.mp4")).await.is_err());
+        assert!(probe(&t.0.join("missing.mp4")).is_err());
     }
 
     #[test]
@@ -1917,9 +1876,7 @@ mod tests {
     async fn video_state_controls_and_edit_mode() {
         let t = Tmp::new("state");
         let p = clip(&t);
-        let o = open(p.clone()).await.unwrap();
-        let (mut s, _first) = State::new(o);
-        assert!(!s.is_dirty());
+        let (mut s, _first) = State::new(p.clone(), probe(&p).unwrap());
         assert_eq!(s.is_editing(), Some(false));
         let _ = s.view();
 
@@ -2000,8 +1957,7 @@ mod tests {
         let _ = s.update(Msg::SetOut);
         let (_, e) = s.update(Msg::Export); // empty range → refused
         assert!(status(e).contains("Out must be after In"));
-        assert!(!s.is_dirty());
-        let _ = s.save();
+
         let _ = s.update(Msg::ToggleEdit);
         assert_eq!(s.is_editing(), Some(false));
         let _ = s.update(Msg::SeekDrag(0.3));

@@ -37,6 +37,8 @@ bytemuck = { version = "1", features = ["derive"] }
 base64 = "0.22"
 ffmpeg-next = "9"
 cpal = "0.18"
+# video player: libmpv loaded at runtime (falls back to ffmpeg-next without it)
+libloading = "0.8"
 quick-xml = "0.39"
 # spreadsheet viewer
 calamine = "0.36"
