@@ -124,8 +124,8 @@ impl shader::Program<Msg> for Screen {
         cursor: mouse::Cursor,
         shell: &mut Shell<'_, Msg>,
     ) -> (iced::event::Status, Option<Msg>) {
-        use iced::keyboard;
         use iced::event::Status::{Captured, Ignored};
+        use iced::keyboard;
         match event {
             shader::Event::RedrawRequested(_) => {
                 if self.playing {
@@ -216,7 +216,9 @@ pub struct Primitive {
 
 impl std::fmt::Debug for Primitive {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("VideoPrimitive").field("id", &self.id).finish()
+        f.debug_struct("VideoPrimitive")
+            .field("id", &self.id)
+            .finish()
     }
 }
 
@@ -356,7 +358,12 @@ impl shader::Primitive for Primitive {
         p.frame += 1;
         let frame_no = p.frame;
         let s = viewport.scale_factor() as f32;
-        let phys = [bounds.x * s, bounds.y * s, bounds.width * s, bounds.height * s];
+        let phys = [
+            bounds.x * s,
+            bounds.y * s,
+            bounds.width * s,
+            bounds.height * s,
+        ];
         // mpv renders unrotated: on a quarter turn it gets the swapped box
         let quarter = self.rotate % 180 == 90;
         let (pw, ph) = (phys[2].round() as u32, phys[3].round() as u32);

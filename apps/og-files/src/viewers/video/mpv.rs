@@ -204,7 +204,11 @@ impl Api {
         // SAFETY: no arguments, returns a plain integer
         let v = unsafe { (api.client_api_version)() } as u64;
         if v >> 16 != 2 {
-            return Err(format!("unsupported libmpv client API {}.{}", v >> 16, v & 0xffff));
+            return Err(format!(
+                "unsupported libmpv client API {}.{}",
+                v >> 16,
+                v & 0xffff
+            ));
         }
         Ok(api)
     }
@@ -363,7 +367,10 @@ pub enum Event {
     Prop(u64, Node),
     StartFile,
     FileLoaded,
-    EndFile { reason: c_int, error: Option<String> },
+    EndFile {
+        reason: c_int,
+        error: Option<String>,
+    },
     Other,
 }
 
@@ -574,7 +581,9 @@ pub fn target_size(widget: (u32, u32), aspect: Option<f64>) -> (u32, u32) {
         Some(a) => (ww, ww / a),
         None => (ww, wh),
     };
-    let s = (MAX_RENDER.0 as f64 / w).min(MAX_RENDER.1 as f64 / h).min(1.0);
+    let s = (MAX_RENDER.0 as f64 / w)
+        .min(MAX_RENDER.1 as f64 / h)
+        .min(1.0);
     w *= s;
     h *= s;
     ((w.round() as u32).max(1), (h.round() as u32).max(1))
@@ -1100,7 +1109,11 @@ mod tests {
                 assert!(m.set_str("no-such-property", "1").is_err());
                 assert!(m.command(&["no-such-command"]).is_err());
                 let v = m.command_ret(&["expand-text", "${volume}"]).unwrap();
-                assert_eq!(v.str().and_then(|s| s.parse::<f64>().ok()), Some(42.0), "{v:?}");
+                assert_eq!(
+                    v.str().and_then(|s| s.parse::<f64>().ok()),
+                    Some(42.0),
+                    "{v:?}"
+                );
             }
             Err(e) => eprintln!("libmpv not available, skipping: {e}"),
         }

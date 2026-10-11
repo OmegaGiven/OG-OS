@@ -323,8 +323,8 @@ impl Viewer {
         key: &iced::keyboard::Key,
         mods: iced::keyboard::Modifiers,
     ) -> Option<Task<Msg>> {
-        let _ = (key, mods);
         match self {
+            Viewer::Video(s) => s.key(key, mods).map(|t| t.map(Msg::Video)),
             _ => None,
         }
     }
@@ -332,13 +332,16 @@ impl Viewer {
     /// The viewer wants the window fullscreen (video).
     pub fn fullscreen(&self) -> bool {
         match self {
+            Viewer::Video(s) => s.fullscreen(),
             _ => false,
         }
     }
 
     /// The app left/entered fullscreen on its own (e.g. Escape).
     pub fn set_fullscreen(&mut self, on: bool) {
-        let _ = on;
+        if let Viewer::Video(s) = self {
+            s.set_fullscreen(on);
+        }
     }
 
     /// Ctrl+S from the app. Viewers that can't save ignore it.

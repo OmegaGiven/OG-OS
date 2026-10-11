@@ -16,8 +16,8 @@
 //! `<stem>-edit.<ext>`, "Snapshot frame" writes `<stem>-frame-MMmSSs.png`.
 //! Both run on worker threads and report through `Event::Status`.
 
-use crate::viewers::Event;
 use crate::theme;
+use crate::viewers::Event;
 use crate::widgets::icon;
 use ff::format::sample::Type as SampleType;
 use ff::format::Sample;

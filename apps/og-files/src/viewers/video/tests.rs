@@ -148,7 +148,10 @@ fn video_track_list_parsing() {
     l.apply("track-list", &sample_tracks());
     l.apply(
         "video-params",
-        &Node::Map(vec![("w".into(), Node::Int(1920)), ("h".into(), Node::Int(1080))]),
+        &Node::Map(vec![
+            ("w".into(), Node::Int(1920)),
+            ("h".into(), Node::Int(1080)),
+        ]),
     );
     l.apply("container-fps", &Node::Double(29.97));
     l.apply("hwdec-current", &Node::Str("vaapi".into()));
@@ -278,7 +281,7 @@ fn video_resume_store_round_trip() {
     assert!(should_resume(11.0, 0.0));
     assert!(!should_resume(10.0, 600.0));
     assert!(!should_resume(580.0, 600.0)); // last 5 %
-    // corrupt store → empty, then rewritten
+                                           // corrupt store → empty, then rewritten
     std::fs::write(&store, b"{not json").unwrap();
     assert_eq!(lookup_position(&store, &v), None);
     record_position(&store, &v, 50.0, 600.0);
@@ -412,7 +415,9 @@ async fn video_state_controls_mpv() {
     // fullscreen contract
     assert!(!s.fullscreen());
     assert!(s.key(&Key::Named(N::Escape), Modifiers::empty()).is_none());
-    assert!(s.key(&Key::Character("f".into()), Modifiers::empty()).is_some());
+    assert!(s
+        .key(&Key::Character("f".into()), Modifiers::empty())
+        .is_some());
     assert!(s.fullscreen());
     let _ = s.view();
     assert!(s.key(&Key::Named(N::Escape), Modifiers::empty()).is_some());
@@ -422,7 +427,9 @@ async fn video_state_controls_mpv() {
     let _ = s.update(Msg::ToggleFullscreen);
     assert!(!s.fullscreen());
     // app chords aren't swallowed
-    assert!(s.key(&Key::Character("e".into()), Modifiers::CTRL).is_none());
+    assert!(s
+        .key(&Key::Character("e".into()), Modifiers::CTRL)
+        .is_none());
     assert!(s.key(&Key::Named(N::Space), Modifiers::empty()).is_some());
 
     let Inner::Mpv(m) = &mut s.inner else {
@@ -558,6 +565,9 @@ fn video_fit_has_no_padding_and_is_centred() {
         // centred: equal margins on both sides
         let (ml, mr) = (r[0] - x, x + widget.0 as f32 - (r[0] + r[2]));
         let (mt, mb) = (r[1] - y, y + widget.1 as f32 - (r[1] + r[3]));
-        assert!((ml - mr).abs() < 0.01 && (mt - mb).abs() < 0.01, "{widget:?}");
+        assert!(
+            (ml - mr).abs() < 0.01 && (mt - mb).abs() < 0.01,
+            "{widget:?}"
+        );
     }
 }

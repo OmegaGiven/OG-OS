@@ -374,7 +374,12 @@ fn folder_playlist(path: &Path) -> Vec<PathBuf> {
                 .collect()
         })
         .unwrap_or_default();
-    let name = |p: &PathBuf| p.file_name().unwrap_or_default().to_string_lossy().into_owned();
+    let name = |p: &PathBuf| {
+        p.file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned()
+    };
     v.sort_by(|a, b| crate::fsops::natural_cmp(&name(a), &name(b)));
     if !v.iter().any(|p| p == path) {
         v = vec![path.to_path_buf()];
@@ -478,7 +483,8 @@ pub fn key_action(key: &Key, mods: Modifiers) -> Option<Action> {
             // letters arrive lower-case with Shift on some setups
             let up = shift
                 && c.len() == 1
-                && c.chars().all(|ch| ch.is_ascii_lowercase() || "3,.".contains(ch));
+                && c.chars()
+                    .all(|ch| ch.is_ascii_lowercase() || "3,.".contains(ch));
             Some(match (c, up) {
                 ("p", false) | (" ", _) => A::TogglePause,
                 ("[", _) => A::SpeedMul(0.9),
@@ -729,10 +735,7 @@ impl Live {
                 &self.hwdec
             }
         );
-        s += &format!(
-            " · dropped {} (decoder {})",
-            self.dropped, self.dec_dropped
-        );
+        s += &format!(" · dropped {} (decoder {})", self.dropped, self.dec_dropped);
         if let Some(c) = self.cache_end {
             s += &format!(" · cache {:.1} s", (c - self.pos).max(0.0));
         }
@@ -929,8 +932,6 @@ impl State {
     /// back/step, v sub toggle, j sub track cycle, # audio track cycle,
     /// s screenshot, l A-B loop, L loop file, PgUp/PgDn chapter, < > previous
     /// / next file in folder, i stats.
-    // wired by the app's keyboard plumbing (maintainer) — unused until then
-    #[allow(dead_code)]
     pub fn key(&mut self, key: &Key, mods: Modifiers) -> Option<Task<Msg>> {
         let a = key_action(key, mods)?;
         if a == Action::LeaveFullscreen && !self.fullscreen {
@@ -952,15 +953,11 @@ impl State {
 
     /// Whether the viewer currently wants the window fullscreen (toggled by
     /// f / double-click on the video / a button).
-    // wired by the app (maintainer) — unused until then
-    #[allow(dead_code)]
     pub fn fullscreen(&self) -> bool {
         self.fullscreen
     }
 
     /// The app left fullscreen by itself (e.g. Escape handled globally).
-    // wired by the app (maintainer) — unused until then
-    #[allow(dead_code)]
     pub fn set_fullscreen(&mut self, on: bool) {
         self.fullscreen = on;
     }
@@ -1074,7 +1071,8 @@ impl MpvState {
         if let Some(p) = resume {
             let _ = m.set_str("start", &format!("{p:.3}"));
         }
-        self.player.cmd(&["loadfile", &path.to_string_lossy(), "replace"]);
+        self.player
+            .cmd(&["loadfile", &path.to_string_lossy(), "replace"]);
         self.path = path;
     }
 
@@ -1125,10 +1123,7 @@ impl MpvState {
         self.drag = None;
         self.load(next);
         let name = self.path.file_name().unwrap_or_default().to_string_lossy();
-        Some(Event::Status(format!(
-            "{name} ({} / {n})",
-            self.index + 1
-        )))
+        Some(Event::Status(format!("{name} ({} / {n})", self.index + 1)))
     }
 
     fn update(&mut self, msg: Msg) -> (Task<Msg>, Option<Event>) {
@@ -1136,7 +1131,8 @@ impl MpvState {
         match msg {
             Msg::Ev(ev) => return self.event(ev),
             Msg::TogglePlay => {
-                if self.live.eof || (self.duration() > 0.0 && self.live.pos >= self.duration() - 0.05)
+                if self.live.eof
+                    || (self.duration() > 0.0 && self.live.pos >= self.duration() - 0.05)
                 {
                     self.player.cmd(&["seek", "0", "absolute"]);
                     self.set("pause", "no");
@@ -1152,7 +1148,8 @@ impl MpvState {
             }
             Msg::SeekRelease => {
                 if let Some(t) = self.drag.take() {
-                    self.player.cmd(&["seek", &format!("{t:.3}"), "absolute+exact"]);
+                    self.player
+                        .cmd(&["seek", &format!("{t:.3}"), "absolute+exact"]);
                 }
             }
             Msg::SeekBy(d, exact) => {
@@ -1181,9 +1178,7 @@ impl MpvState {
             Msg::SubDelay(d) => self.player.cmd(&["add", "sub-delay", &format!("{d}")]),
             Msg::AudioDelay(d) => self.player.cmd(&["add", "audio-delay", &format!("{d}")]),
             Msg::AbLoop => self.player.cmd(&["ab-loop"]),
-            Msg::LoopFile => self
-                .player
-                .cmd(&["cycle-values", "loop-file", "inf", "no"]),
+            Msg::LoopFile => self.player.cmd(&["cycle-values", "loop-file", "inf", "no"]),
             Msg::CycleAspect => {
                 self.aspect_ix = (self.aspect_ix + 1) % ASPECTS.len();
                 self.set("video-aspect-override", ASPECTS[self.aspect_ix]);
@@ -1198,8 +1193,10 @@ impl MpvState {
                 }
             }
             Msg::PanBy(dx, dy) => {
-                self.player.cmd(&["add", "video-pan-x", &format!("{dx:.4}")]);
-                self.player.cmd(&["add", "video-pan-y", &format!("{dy:.4}")]);
+                self.player
+                    .cmd(&["add", "video-pan-x", &format!("{dx:.4}")]);
+                self.player
+                    .cmd(&["add", "video-pan-y", &format!("{dy:.4}")]);
             }
             Msg::ZoomReset => {
                 self.set("video-zoom", 0);
@@ -1389,8 +1386,7 @@ impl MpvState {
             .width(Length::Fill)
             .height(Length::Fill);
 
-        let show_controls =
-            !fullscreen || !playing || self.last_motion.elapsed() < HIDE_AFTER;
+        let show_controls = !fullscreen || !playing || self.last_motion.elapsed() < HIDE_AFTER;
         if !show_controls {
             return picture.into();
         }
@@ -1517,7 +1513,9 @@ impl MpvState {
         let (schoices, scur) = track_choices(&l.tracks, "sub");
         let delay = |label: &'static str, v: f64, f: fn(f64) -> Msg| {
             row![
-                text(format!("{label} {v:+.1}s")).size(12).color(theme::MUTED),
+                text(format!("{label} {v:+.1}s"))
+                    .size(12)
+                    .color(theme::MUTED),
                 button(text("−").size(12))
                     .padding([2, 6])
                     .on_press(f(-0.1))
@@ -1550,11 +1548,13 @@ impl MpvState {
                         .text_size(12)
                         .padding([3, 6]),
                 )
-                .push(ibtn(B::BadgeCcFill, Some(Msg::ToggleSubs)).style(if l.sub_visible {
-                    button::secondary
-                } else {
-                    button::text
-                }))
+                .push(
+                    ibtn(B::BadgeCcFill, Some(Msg::ToggleSubs)).style(if l.sub_visible {
+                        button::secondary
+                    } else {
+                        button::text
+                    }),
+                )
                 .push(delay("sub", l.sub_delay, Msg::SubDelay));
         }
         if l.track("audio").is_some() {
