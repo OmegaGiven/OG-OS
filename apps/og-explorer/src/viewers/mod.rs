@@ -14,11 +14,11 @@ pub mod hex;
 pub mod image;
 pub mod model3d;
 pub mod pdf;
-pub mod sheet;
-pub mod video;
 pub mod placeholder;
+pub mod sheet;
 pub mod table;
 pub mod text;
+pub mod video;
 
 use crate::filetype::Kind;
 use crate::fsops;

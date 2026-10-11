@@ -17,8 +17,10 @@
 use std::path::PathBuf;
 
 /// Something being dragged into our window from another client.
-#[allow(dead_code)] // wired into app.rs separately
 #[derive(Debug, Clone)]
+// standalone builds never construct these; x/y are kept for per-folder
+// drop targeting later
+#[allow(dead_code)]
 pub enum DropEvent {
     Enter { x: f32, y: f32 },
     Motion { x: f32, y: f32 },
@@ -26,7 +28,6 @@ pub enum DropEvent {
     Dropped { paths: Vec<PathBuf>, x: f32, y: f32 },
 }
 
-#[allow(unused_imports)] // wired into app.rs separately
 pub use imp::{connect, drops, start_drag, Dnd};
 
 #[cfg(feature = "og-suite")]
@@ -40,7 +41,6 @@ mod imp {
     use std::time::Duration;
 
     /// Handle to the external drag-and-drop connection. Cheap to clone.
-    #[allow(dead_code)] // wired into app.rs separately
     #[derive(Clone)]
     pub struct Dnd {
         inner: Arc<Inner>,
@@ -61,15 +61,21 @@ mod imp {
 
     /// Connect to the compositor for the app's main window. Returns Err with
     /// a short reason when not on Wayland.
-    #[allow(dead_code)] // wired into app.rs separately
     pub fn connect() -> Task<Result<Dnd, String>> {
         iced::window::get_oldest().then(|id| match id {
             None => Task::done(Err("no window".to_string())),
-            Some(id) => iced::window::run_with_handle(id, og_wayland::window_ptrs_from_handle).map(|ptrs| {
-                let ptrs = ptrs.ok_or_else(|| "not a Wayland window".to_string())?;
-                let (drag_tx, events) = og_wayland::spawn_for_window(ptrs);
-                Ok(Dnd { inner: Arc::new(Inner { drag_tx, events: Mutex::new(Some(events)) }) })
-            }),
+            Some(id) => {
+                iced::window::run_with_handle(id, og_wayland::window_ptrs_from_handle).map(|ptrs| {
+                    let ptrs = ptrs.ok_or_else(|| "not a Wayland window".to_string())?;
+                    let (drag_tx, events) = og_wayland::spawn_for_window(ptrs);
+                    Ok(Dnd {
+                        inner: Arc::new(Inner {
+                            drag_tx,
+                            events: Mutex::new(Some(events)),
+                        }),
+                    })
+                })
+            }
         })
     }
 
@@ -79,18 +85,24 @@ mod imp {
     /// channel, so events arrive immediately with no polling tick. Only one
     /// stream is live at a time; a second concurrent call gets an empty
     /// stream, and a dropped stream hands the receiver back within ~0.5 s.
-    #[allow(dead_code)] // wired into app.rs separately
     pub fn drops(dnd: Dnd) -> impl iced::futures::Stream<Item = DropEvent> + Send + 'static {
         let (tx, rx) = fmpsc::unbounded();
-        let taken = dnd.inner.events.lock().ok().and_then(|mut slot| slot.take());
+        let taken = dnd
+            .inner
+            .events
+            .lock()
+            .ok()
+            .and_then(|mut slot| slot.take());
         if let Some(events) = taken {
             let inner = dnd.inner.clone();
-            let spawned = std::thread::Builder::new().name("og-explorer-dnd".into()).spawn(move || {
-                forward(&events, &tx);
-                if let Ok(mut slot) = inner.events.lock() {
-                    *slot = Some(events);
-                }
-            });
+            let spawned = std::thread::Builder::new()
+                .name("og-explorer-dnd".into())
+                .spawn(move || {
+                    forward(&events, &tx);
+                    if let Ok(mut slot) = inner.events.lock() {
+                        *slot = Some(events);
+                    }
+                });
             if let Err(e) = spawned {
                 eprintln!("og-explorer: dnd forwarding thread failed: {e}");
             }
@@ -121,10 +133,20 @@ mod imp {
     pub(super) fn map_event(ev: og_wayland::DropEvent) -> Option<DropEvent> {
         use og_wayland::DropEvent as W;
         Some(match ev {
-            W::Enter { x, y } => DropEvent::Enter { x: x as f32, y: y as f32 },
-            W::Motion { x, y } => DropEvent::Motion { x: x as f32, y: y as f32 },
+            W::Enter { x, y } => DropEvent::Enter {
+                x: x as f32,
+                y: y as f32,
+            },
+            W::Motion { x, y } => DropEvent::Motion {
+                x: x as f32,
+                y: y as f32,
+            },
             W::Leave => DropEvent::Leave,
-            W::Dropped { paths, x, y } => DropEvent::Dropped { paths, x: x as f32, y: y as f32 },
+            W::Dropped { paths, x, y } => DropEvent::Dropped {
+                paths,
+                x: x as f32,
+                y: y as f32,
+            },
             // Feedback on our own drag-out (failures are logged by og-wayland).
             W::DragOut(_) => return None,
         })
@@ -133,7 +155,6 @@ mod imp {
     /// Start dragging `paths` out of the window (call when an in-app drag
     /// leaves the window or as a direct drag-out). Must be called while the
     /// mouse button is still held. Returns Err if not possible.
-    #[allow(dead_code)] // wired into app.rs separately
     pub fn start_drag(dnd: &Dnd, paths: Vec<PathBuf>) -> Result<(), String> {
         if paths.is_empty() {
             return Err("nothing to drag".into());
@@ -152,7 +173,6 @@ mod imp {
     use std::path::PathBuf;
 
     /// Handle to the external drag-and-drop connection. Cheap to clone.
-    #[allow(dead_code)] // wired into app.rs separately
     #[derive(Clone)]
     pub struct Dnd {
         _private: (),
@@ -172,19 +192,16 @@ mod imp {
     }
 
     /// Without the `og-suite` feature there is no connection.
-    #[allow(dead_code)] // wired into app.rs separately
     pub fn connect() -> Task<Result<Dnd, String>> {
         Task::done(Err("built without og-suite drag-and-drop".into()))
     }
 
     /// Stream of drops into our window; always empty without `og-suite`.
-    #[allow(dead_code)] // wired into app.rs separately
     pub fn drops(_dnd: Dnd) -> impl iced::futures::Stream<Item = DropEvent> + Send + 'static {
         iced::futures::stream::empty()
     }
 
     /// Dragging out is unavailable without `og-suite`.
-    #[allow(dead_code)] // wired into app.rs separately
     pub fn start_drag(_dnd: &Dnd, _paths: Vec<PathBuf>) -> Result<(), String> {
         Err("built without og-suite drag-and-drop".into())
     }
@@ -209,10 +226,16 @@ mod tests {
     #[test]
     fn maps_wayland_events() {
         use og_wayland::DropEvent as W;
-        assert!(matches!(imp::map_event(W::Enter { x: 1.5, y: 2.0 }), Some(DropEvent::Enter { x, y }) if x == 1.5 && y == 2.0));
+        assert!(
+            matches!(imp::map_event(W::Enter { x: 1.5, y: 2.0 }), Some(DropEvent::Enter { x, y }) if x == 1.5 && y == 2.0)
+        );
         assert!(matches!(imp::map_event(W::Leave), Some(DropEvent::Leave)));
         assert!(imp::map_event(W::DragOut(og_wayland::DragOutcome::Cancelled)).is_none());
-        match imp::map_event(W::Dropped { paths: vec![PathBuf::from("/a b")], x: 3.0, y: 4.0 }) {
+        match imp::map_event(W::Dropped {
+            paths: vec![PathBuf::from("/a b")],
+            x: 3.0,
+            y: 4.0,
+        }) {
             Some(DropEvent::Dropped { paths, x, y }) => {
                 assert_eq!(paths, vec![PathBuf::from("/a b")]);
                 assert_eq!((x, y), (3.0, 4.0));

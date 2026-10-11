@@ -142,6 +142,10 @@ pub struct App {
     watched: Vec<PathBuf>,
     watcher: Option<task::Handle>,
     drag: Option<Drag>,
+    /// drag-and-drop with other apps (og-suite builds on Wayland)
+    dnd: Option<crate::extdnd::Dnd>,
+    /// files from another app are hovering over the window
+    ext_hover: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -183,6 +187,9 @@ pub enum Message {
     MouseUp,
     /// the suite config changed (og-suite builds): re-read the palette
     ThemeChanged,
+    DndReady(Result<crate::extdnd::Dnd, String>),
+    ExtDrop(crate::extdnd::DropEvent),
+    CursorLeft,
 }
 
 impl App {
@@ -239,6 +246,8 @@ impl App {
             watched: Vec::new(),
             watcher: None,
             drag: None,
+            dnd: None,
+            ext_hover: false,
         };
         // og-explorer [--view tree|list|grid] [--search TEXT] [--focus] [PATH]
         // a folder PATH opens in the files pane, a file PATH in a tab
@@ -316,6 +325,7 @@ impl App {
             sidebar_task.map(Message::Sidebar),
             details::load().map(Message::Details),
             Task::perform(devices::list(), Message::Drives),
+            crate::extdnd::connect().map(Message::DndReady),
             Task::batch(tasks),
         ]);
         (app, boot)
@@ -1116,6 +1126,56 @@ impl App {
                 Task::perform(devices::list(), Message::Drives)
             }
             Message::DirsChanged(dirs) => self.sidebar.refresh(&dirs).map(Message::Sidebar),
+            Message::DndReady(r) => match r {
+                Ok(d) => {
+                    self.dnd = Some(d.clone());
+                    Task::run(crate::extdnd::drops(d), Message::ExtDrop)
+                }
+                // standalone build / not Wayland: in-app drag and drop only
+                Err(_) => Task::none(),
+            },
+            Message::ExtDrop(ev) => {
+                use crate::extdnd::DropEvent as E;
+                match ev {
+                    E::Enter { .. } | E::Motion { .. } => {
+                        self.ext_hover = true;
+                        Task::none()
+                    }
+                    E::Leave => {
+                        self.ext_hover = false;
+                        Task::none()
+                    }
+                    E::Dropped { paths, .. } => {
+                        self.ext_hover = false;
+                        // the compositor owns the pointer during an external drag,
+                        // so per-folder targeting isn't available: copy into the
+                        // folder being viewed
+                        let dir = self.sidebar.current_dir();
+                        let paths: Vec<PathBuf> = paths
+                            .into_iter()
+                            .filter(|p| p.parent() != Some(dir.as_path()))
+                            .collect();
+                        self.start_job(JobSpec {
+                            kind: JobKind::Copy,
+                            sources: paths,
+                            dest: Some(dir),
+                        })
+                    }
+                }
+            }
+            Message::CursorLeft => {
+                // an in-app drag leaving the window becomes a drag to other apps
+                if let (Some(d), Some(dnd)) = (self.drag.as_ref().filter(|d| d.active), &self.dnd) {
+                    let paths = d.paths.clone();
+                    if let Err(e) = crate::extdnd::start_drag(dnd, paths) {
+                        self.details.record(format!("Drag out: {e}"));
+                    }
+                    // the compositor takes the drag; iced won't see the release
+                    self.drag = None;
+                    self.sidebar.mouse_up(true);
+                }
+                Task::none()
+            }
             Message::ThemeChanged => {
                 theme::reload();
                 Task::none()
@@ -1140,6 +1200,7 @@ impl App {
                 iced::Event::Mouse(iced::mouse::Event::ButtonReleased(
                     iced::mouse::Button::Left,
                 )) => Some(Message::MouseUp),
+                iced::Event::Mouse(iced::mouse::Event::CursorLeft) => Some(Message::CursorLeft),
                 _ => None,
             }),
             Subscription::run(drive_events),
@@ -1183,6 +1244,29 @@ impl App {
         let mut layers = vec![base];
         if let Some(d) = self.drag.as_ref().filter(|d| d.active) {
             layers.push(self.drag_view(d));
+        }
+        if self.ext_hover {
+            let dir = self.sidebar.current_dir();
+            let hint = container(text(format!("Drop to copy into {}", dir.display())).size(14))
+                .padding([10, 16])
+                .style(|t: &Theme| container::Style {
+                    background: Some(t.extended_palette().primary.strong.color.into()),
+                    text_color: Some(t.extended_palette().primary.strong.text),
+                    border: iced::Border {
+                        radius: 10.0.into(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                });
+            layers.push(
+                container(hint)
+                    .center_x(Length::Fill)
+                    .padding(iced::Padding {
+                        top: 40.0,
+                        ..Default::default()
+                    })
+                    .into(),
+            );
         }
         if let Some((at, t)) = &self.menu {
             layers.push(self.menu_view(*at, t));
