@@ -36,7 +36,7 @@ pub const TEXT_LIMIT: u64 = 16 * 1024 * 1024;
 pub enum Loaded {
     Text(String),
     Table(table::Data),
-    Image(PathBuf),
+    Image(PathBuf, image::Info),
     Pdf(pdf::Source),
     Locked(PathBuf),
     Placeholder(Kind),
@@ -114,7 +114,10 @@ pub fn load(path: PathBuf, kind: Kind) -> Task<Msg> {
         claim!(archive, Archive);
         claim!(model3d, Model3d);
         match kind {
-            Kind::Image => Ok(Loaded::Image(path)),
+            Kind::Image => {
+                let info = image::probe(path.clone()).await;
+                Ok(Loaded::Image(path, info))
+            }
             Kind::Doc if is_pdf(&path) => match pdf::open(path.clone()).await {
                 // hayro can't decrypt without the password: offer the unlock screen
                 Err(e) if e.contains("Decryption") => Ok(Loaded::Locked(path)),
@@ -146,7 +149,7 @@ impl Viewer {
         let v = match l {
             Loaded::Text(s) => Viewer::Text(text::State::new(path.to_path_buf(), &s)),
             Loaded::Table(d) => Viewer::Table(table::State::new(d)),
-            Loaded::Image(p) => Viewer::Image(image::State::new(p)),
+            Loaded::Image(p, info) => Viewer::Image(image::State::new(p, info)),
             Loaded::Pdf(src) => {
                 let (st, t) = pdf::State::new(src);
                 return (Viewer::Pdf(st), t.map(Msg::Pdf));
