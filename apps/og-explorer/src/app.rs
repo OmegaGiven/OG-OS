@@ -181,6 +181,8 @@ pub enum Message {
     DirsChanged(Vec<PathBuf>),
     Copied,
     MouseUp,
+    /// the suite config changed (og-suite builds): re-read the palette
+    ThemeChanged,
 }
 
 impl App {
@@ -1110,6 +1112,10 @@ impl App {
                 Task::perform(devices::list(), Message::Drives)
             }
             Message::DirsChanged(dirs) => self.sidebar.refresh(&dirs).map(Message::Sidebar),
+            Message::ThemeChanged => {
+                theme::reload();
+                Task::none()
+            }
             Message::Copied => {
                 self.details.record("Path copied to clipboard");
                 Task::none()
@@ -1133,6 +1139,7 @@ impl App {
                 _ => None,
             }),
             Subscription::run(drive_events),
+            Subscription::run(theme_events),
         ])
     }
 
@@ -1489,6 +1496,17 @@ impl App {
                 ..Default::default()
             });
         stack![opaque(backdrop), center(opaque(card))].into()
+    }
+}
+
+/// Suite config changes → theme reload (never fires in standalone builds).
+fn theme_events() -> impl iced::futures::Stream<Item = Message> {
+    use iced::futures::StreamExt;
+    match theme::config_dir() {
+        Some(d) => devices::watch_dirs(vec![d])
+            .map(|_| Message::ThemeChanged)
+            .boxed(),
+        None => iced::futures::stream::empty().boxed(),
     }
 }
 

@@ -25,5 +25,13 @@ iced_fonts = { version = "0.1", features = ["bootstrap"] }
 zbus = { version = "5", default-features = false, features = ["tokio"] }
 notify = "8"
 
+og-config = { path = "../../crates/og-config", optional = true }
+og-theme = { path = "../../crates/og-theme", optional = true }
+
+[features]
+# OG-OS integration: suite palette (live reload) and, via og-wayland,
+# drag-and-drop with other apps. Off = fully standalone build.
+og-suite = ["dep:og-config", "dep:og-theme"]
+
 [dev-dependencies]
 tokio = { version = "1.52.3", features = ["macros", "rt", "time", "sync", "fs"] }
