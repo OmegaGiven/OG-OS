@@ -117,6 +117,7 @@ pub enum MenuAction {
     Eject,
     EmptyTrash,
     MakePdf,
+    Compress,
 }
 
 pub struct App {
@@ -692,6 +693,31 @@ impl App {
             MenuAction::EmptyTrash => {
                 self.dialog = Some(Dialog::ConfirmEmptyTrash);
                 Task::none()
+            }
+            MenuAction::Compress => {
+                if items.is_empty() {
+                    return Task::none();
+                }
+                let base = match items.as_slice() {
+                    [p] => p
+                        .file_stem()
+                        .map(|s| s.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| "Archive".into()),
+                    _ => "Archive".to_string(),
+                };
+                let out_dir = dir.clone();
+                Task::perform(
+                    async move {
+                        tokio::task::spawn_blocking(move || {
+                            let dest = ops::unique_name(&out_dir, &format!("{base}.zip"));
+                            crate::viewers::archive::compress(&items, &dest)
+                                .map(|_| format!("Created {}", dest.display()))
+                        })
+                        .await
+                        .map_err(|e| e.to_string())?
+                    },
+                    move |r| Message::OpDone(r, vec![dir.clone()]),
+                )
             }
             MenuAction::MakePdf => {
                 let imgs: Vec<PathBuf> = items
@@ -1382,6 +1408,7 @@ impl App {
             entries.push(("Duplicate", MenuAction::Duplicate, true));
             entries.push(("Rename…  F2", MenuAction::Rename, n == 1));
             entries.push(("Copy path", MenuAction::CopyPath, true));
+            entries.push(("Compress to .zip", MenuAction::Compress, true));
             if n == 1 {
                 entries.push((
                     if t.bookmarked {

@@ -37,8 +37,20 @@ bytemuck = { version = "1", features = ["derive"] }
 base64 = "0.22"
 ffmpeg-next = "9"
 cpal = "0.18"
-zip = { version = "8", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 quick-xml = "0.39"
+# spreadsheet viewer
+calamine = "0.36"
+csv = "1"
+rust_xlsxwriter = { version = "0.94", default-features = false }
+spreadsheet-ods = "0.25"
+# archive viewer
+zip = { version = "8", default-features = false, features = ["deflate-flate2-zlib-rs", "aes-crypto"] }
+tar = "0.4"
+flate2 = "1"
+xz2 = "0.1"
+zstd = "0.13"
+bzip2 = "0.4"
+sevenz-rust2 = { version = "0.20", default-features = false, features = ["aes256", "bzip2", "deflate", "ppmd"] }
 
 og-config = { path = "../../crates/og-config", optional = true }
 og-theme = { path = "../../crates/og-theme", optional = true }
