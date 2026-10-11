@@ -373,6 +373,31 @@ Test hooks:
   app_id become `og-files`, the crate directory is renamed, and the old crate
   moves to `archive/`.
 
+### Shipping to other devices
+
+og-files is meant to run on any OG-OS install, so its media stack is part
+of the package, not assumed:
+
+- **The `og-files` package** (`distro/pkgbuilds/og-files/PKGBUILD`) depends
+  on:
+  - `mpv`, which provides libmpv, the video engine, loaded at runtime
+  - `ffmpeg` libraries, for the fallback player, thumbnails and trim export
+  - `libva` + `mesa`, for hardware decoding on AMD out of the box
+  - `alsa-lib`, `udisks2`, `vulkan-icd-loader`, `wayland`, `libxkbcommon`
+- **GPU decode drivers for other vendors** are optional dependencies:
+  `intel-media-driver` / `libva-intel-driver` for Intel and
+  `libva-nvidia-driver` for NVIDIA proprietary. The ISO already ships both
+  Intel drivers and all Vulkan drivers (`distro/packages.x86_64`).
+- **Runtime behaviour:**
+  - libmpv is opened at runtime; if it's missing (e.g. a stripped-down
+    standalone build) the video tab falls back to the built-in FFmpeg
+    player instead of failing.
+  - Hardware decoding uses `hwdec=auto-safe`, so any machine without a
+    working VAAPI driver silently decodes in software.
+- **Outside OG-OS** (other distros): build with `--no-default-features` and
+  install `mpv` + `ffmpeg` from the distro. A self-contained bundle
+  (AppImage/Flatpak shipping libmpv) is possible later if needed.
+
 ## 8. History (bottom panel)
 
 **Decided:** saving writes over the file. There are no app-kept revision
