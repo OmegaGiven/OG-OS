@@ -934,19 +934,19 @@ fn open_output(src_rate: u32, sh: &Arc<Shared>) -> Result<Out, String> {
         .map_err(|e| e.to_string())?
         .filter(|r| fmt_score(r.sample_format()) > 0)
         .max_by_key(|r| {
-            let rate_ok = (r.min_sample_rate().0..=r.max_sample_rate().0).contains(&src_rate);
+            let rate_ok = (r.min_sample_rate()..=r.max_sample_rate()).contains(&src_rate);
             (rate_ok as u8) * 8 + (r.channels() == 2) as u8 * 4 + fmt_score(r.sample_format())
         });
     let (cfg, format) = match best {
         Some(r) => {
-            let (lo, hi) = (r.min_sample_rate().0, r.max_sample_rate().0);
+            let (lo, hi) = (r.min_sample_rate(), r.max_sample_rate());
             let rate = if (lo..=hi).contains(&src_rate) {
                 src_rate
             } else {
                 48_000u32.clamp(lo, hi)
             };
             let f = r.sample_format();
-            (r.with_sample_rate(cpal::SampleRate(rate)).config(), f)
+            (r.with_sample_rate(rate).config(), f)
         }
         None => {
             let d = dev.default_output_config().map_err(|e| e.to_string())?;
@@ -964,9 +964,9 @@ fn open_output(src_rate: u32, sh: &Arc<Shared>) -> Result<Out, String> {
     let ch = cfg.channels.max(1) as usize;
     Ok(Out {
         stream,
-        rate: cfg.sample_rate.0,
+        rate: cfg.sample_rate,
         ch,
-        target: cfg.sample_rate.0 as usize * ch / 4,
+        target: cfg.sample_rate as usize * ch / 4,
     })
 }
 
@@ -982,7 +982,7 @@ where
     let sh = sh.clone();
     let err_sh = sh.clone();
     dev.build_output_stream(
-        cfg,
+        cfg.clone(),
         move |data: &mut [T], _| fill(data, &sh),
         move |e| err_sh.fail(format!("audio device: {e}")),
         None,

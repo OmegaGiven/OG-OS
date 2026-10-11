@@ -26,7 +26,6 @@ zbus = { version = "5", default-features = false, features = ["tokio"] }
 notify = "8"
 og-wayland = { path = "../../crates/og-wayland", optional = true }
 symphonia = { version = "0.5", features = ["mp3", "aac", "alac", "isomp4"] }
-cpal = "0.16"
 lofty = "0.22"
 hound = "3.5"
 # 3D viewer (viewers/model3d): loaders + math/GPU plumbing
@@ -36,6 +35,8 @@ stl_io = "0.8"
 glam = "0.25"
 bytemuck = { version = "1", features = ["derive"] }
 base64 = "0.22"
+ffmpeg-next = "9"
+cpal = "0.18"
 
 og-config = { path = "../../crates/og-config", optional = true }
 og-theme = { path = "../../crates/og-theme", optional = true }
