@@ -14,15 +14,14 @@
 //! `<stem>-edit.<ext>`, "Snapshot frame" writes `<stem>-frame-MMmSSs.png`.
 //! Both run on worker threads and report through `Event::Status`.
 
-
 use super::Event;
 use crate::theme;
 use crate::widgets::icon;
-use ffmpeg_next as ff;
 use ff::format::sample::Type as SampleType;
 use ff::format::Sample;
 use ff::software::{resampling, scaling};
 use ff::{codec, decoder, encoder, format, frame, media, ChannelLayout, Packet};
+use ffmpeg_next as ff;
 use iced::futures::SinkExt;
 use iced::widget::{button, column, container, image as img, row, slider, text, Space};
 use iced::{Alignment, Element, Length, Task};
@@ -329,7 +328,8 @@ impl AudioTrack {
             return;
         }
         // SAFETY: packed f32 frame holding `samples × channels` values
-        let mut data = unsafe { std::slice::from_raw_parts((*out.as_ptr()).data[0] as *const f32, n) };
+        let mut data =
+            unsafe { std::slice::from_raw_parts((*out.as_ptr()).data[0] as *const f32, n) };
         let mut pts = secs(f.timestamp().or(f.pts()), self.tb, start);
         if let Some(p) = pts {
             if p < self.skip_before {
@@ -383,14 +383,19 @@ impl Core {
         let ictx = format::input(path).map_err(|e| format!("can't open video ({e})"))?;
         // SAFETY: plain field read on a live context
         let st = unsafe { (*ictx.as_ptr()).start_time };
-        let start = if st == ff::ffi::AV_NOPTS_VALUE { 0.0 } else { st as f64 / 1e6 };
+        let start = if st == ff::ffi::AV_NOPTS_VALUE {
+            0.0
+        } else {
+            st as f64 / 1e6
+        };
         let vs = ictx
             .streams()
             .best(media::Type::Video)
             .ok_or("no video stream")?;
         let vidx = vs.index();
         let vtb = f64::from(vs.time_base());
-        let mut ctx = codec::Context::from_parameters(vs.parameters()).map_err(|e| e.to_string())?;
+        let mut ctx =
+            codec::Context::from_parameters(vs.parameters()).map_err(|e| e.to_string())?;
         ctx.set_threading(codec::threading::Config {
             kind: codec::threading::Type::Frame,
             count: 0,
@@ -401,7 +406,8 @@ impl Core {
             .decoder()
             .video()
             .map_err(|e| format!("no decoder for {video_codec} ({e})"))?;
-        let rate = |r: ff::Rational| (r.numerator() > 0 && r.denominator() > 0).then(|| f64::from(r));
+        let rate =
+            |r: ff::Rational| (r.numerator() > 0 && r.denominator() > 0).then(|| f64::from(r));
         // r_frame_rate (the stream's base rate) first: avg_frame_rate is
         // derived from the duration and is off for short or trimmed clips
         let fps = rate(vs.rate())
@@ -702,7 +708,11 @@ fn export_trim(
     let mut ictx = format::input(src).map_err(e)?;
     // SAFETY: plain field read on a live context
     let st = unsafe { (*ictx.as_ptr()).start_time };
-    let start = if st == ff::ffi::AV_NOPTS_VALUE { 0.0 } else { st as f64 / 1e6 };
+    let start = if st == ff::ffi::AV_NOPTS_VALUE {
+        0.0
+    } else {
+        st as f64 / 1e6
+    };
     let vidx = ictx
         .streams()
         .best(media::Type::Video)
@@ -731,7 +741,11 @@ fn export_trim(
     octx.set_metadata(ictx.metadata().to_owned());
     octx.write_header().map_err(e)?;
     let otb: Vec<ff::Rational> = (0..next)
-        .map(|i| octx.stream(i).map(|s| s.time_base()).unwrap_or(ff::Rational(1, 1000)))
+        .map(|i| {
+            octx.stream(i)
+                .map(|s| s.time_base())
+                .unwrap_or(ff::Rational(1, 1000))
+        })
         .collect();
 
     let ts = ((tin + start) * 1e6) as i64;
@@ -756,7 +770,9 @@ fn export_trim(
         let tb = itb[si];
         let t_pts = p.pts().or(p.dts()).map(|x| x as f64 * tb);
         let t_dts = p.dts().or(p.pts()).map(|x| x as f64 * tb);
-        let (Some(tp), Some(td)) = (t_pts, t_dts) else { continue };
+        let (Some(tp), Some(td)) = (t_pts, t_dts) else {
+            continue;
+        };
         let off = match offset {
             Some(o) => o,
             None => {
@@ -970,10 +986,13 @@ impl Playback {
             return self.cur;
         }
         if self.speed == 1.0 {
-            let a = self
-                .core
-                .sink()
-                .and_then(|s| s.buf.lock().ok().filter(|b| !b.q.is_empty()).map(|b| b.front_pts));
+            let a = self.core.sink().and_then(|s| {
+                s.buf
+                    .lock()
+                    .ok()
+                    .filter(|b| !b.q.is_empty())
+                    .map(|b| b.front_pts)
+            });
             if let Some(t) = a {
                 self.anchor(t);
                 return t;
@@ -1036,7 +1055,11 @@ impl Playback {
                 let _ = reply.send(d.map(|d| self.frame(d)));
             }
             Cmd::Step(reply) => {
-                let d = if self.playing { None } else { self.core.next_frame() };
+                let d = if self.playing {
+                    None
+                } else {
+                    self.core.next_frame()
+                };
                 if let Some(d) = &d {
                     self.cur = d.pts;
                     if let Some(Ok(mut b)) = self.core.sink().map(|s| s.buf.lock()) {
@@ -1198,7 +1221,8 @@ impl State {
         self.serial += 1;
         let serial = self.serial;
         Task::perform(
-            self.player.request(move |reply| Cmd::Seek { t, serial, reply }),
+            self.player
+                .request(move |reply| Cmd::Seek { t, serial, reply }),
             Msg::Seeked,
         )
     }
@@ -1416,11 +1440,20 @@ impl State {
         };
         let controls = row![
             ibtn(
-                if self.playing { B::PauseFill } else { B::PlayFill },
+                if self.playing {
+                    B::PauseFill
+                } else {
+                    B::PlayFill
+                },
                 Some(Msg::TogglePlay)
             ),
             ibtn(B::SkipEndFill, (!self.playing).then_some(Msg::Step)),
-            text(format!("{} / {}", fmt_time(pos), fmt_time(self.info.duration))).size(12),
+            text(format!(
+                "{} / {}",
+                fmt_time(pos),
+                fmt_time(self.info.duration)
+            ))
+            .size(12),
             Space::with_width(Length::Fill),
             button(text(format!("{}×", SPEEDS[self.speed_ix])).size(12))
                 .padding([4, 8])
@@ -1621,7 +1654,10 @@ mod tests {
         let global = octx.format().flags().contains(format::Flags::GLOBAL_HEADER);
 
         let vcodec = encoder::find(codec::Id::MPEG4).expect("mpeg4 encoder");
-        let mut v = codec::Context::new_with_codec(vcodec).encoder().video().unwrap();
+        let mut v = codec::Context::new_with_codec(vcodec)
+            .encoder()
+            .video()
+            .unwrap();
         v.set_width(W);
         v.set_height(H);
         v.set_format(format::Pixel::YUV420P);
@@ -1636,7 +1672,10 @@ mod tests {
         let mut venc = v.open_as(vcodec).unwrap();
 
         let acodec = encoder::find(codec::Id::AAC).expect("aac encoder");
-        let mut a = codec::Context::new_with_codec(acodec).encoder().audio().unwrap();
+        let mut a = codec::Context::new_with_codec(acodec)
+            .encoder()
+            .audio()
+            .unwrap();
         a.set_rate(44_100);
         a.set_format(Sample::F32(SampleType::Planar));
         a.set_channel_layout(ChannelLayout::MONO);
@@ -1708,7 +1747,9 @@ mod tests {
 
     #[test]
     fn video_supported_extensions() {
-        for n in ["a.mp4", "b.MKV", "c.webm", "d.mov", "e.mpeg", "f.ts", "g.3gp", "h.ogv"] {
+        for n in [
+            "a.mp4", "b.MKV", "c.webm", "d.mov", "e.mpeg", "f.ts", "g.3gp", "h.ogv",
+        ] {
             assert!(supported(Path::new(n)), "{n}");
         }
         for n in ["a.mp3", "b.png", "c", "d.txt"] {
@@ -1764,7 +1805,10 @@ mod tests {
             let px = d.rgba[(10 * W as usize + 10) * 4] as i64; // grey: R ≈ Y
             let want = ((20 + i * 4) % 256) as f64;
             let want_rgb = ((want - 16.0) * 255.0 / 219.0).clamp(0.0, 255.0) as i64;
-            assert!((px - want_rgb).abs() < 20, "frame {i}: R={px} want≈{want_rgb}");
+            assert!(
+                (px - want_rgb).abs() < 20,
+                "frame {i}: R={px} want≈{want_rgb}"
+            );
         }
         let mut n = 1;
         c.seek(0.0).unwrap();
@@ -1784,7 +1828,11 @@ mod tests {
         let pl = Player::spawn(p, false); // no audio device in tests
         let seek = |t: f64| {
             let (reply, rx) = oneshot::channel();
-            pl.send(Cmd::Seek { t, serial: 7, reply });
+            pl.send(Cmd::Seek {
+                t,
+                serial: 7,
+                reply,
+            });
             rx.blocking_recv().unwrap().unwrap()
         };
         let f = seek(1.0);
@@ -1793,7 +1841,12 @@ mod tests {
         let (reply, rx) = oneshot::channel();
         pl.send(Cmd::Step(reply));
         let s = rx.blocking_recv().unwrap().unwrap();
-        assert!((s.pts - f.pts - fd).abs() < 1e-6, "step {} -> {}", f.pts, s.pts);
+        assert!(
+            (s.pts - f.pts - fd).abs() < 1e-6,
+            "step {} -> {}",
+            f.pts,
+            s.pts
+        );
 
         // play the last 0.3 s at 2×: frames arrive in order, then Ended
         seek(1.7);
@@ -1815,7 +1868,11 @@ mod tests {
             }
         };
         assert!(ended && frames > 0, "ended={ended} frames={frames}");
-        assert!(start.elapsed() < Duration::from_secs(2), "{:?}", start.elapsed());
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "{:?}",
+            start.elapsed()
+        );
         drop(pl); // Drop stops the worker
     }
 
@@ -1873,7 +1930,11 @@ mod tests {
             .player
             .request({
                 let serial = s.serial;
-                move |reply| Cmd::Seek { t: 1.0, serial, reply }
+                move |reply| Cmd::Seek {
+                    t: 1.0,
+                    serial,
+                    reply,
+                }
             })
             .await;
         let (_, e) = s.update(Msg::Seeked(f));
@@ -1890,7 +1951,10 @@ mod tests {
         assert!((s.pos - 1.0).abs() < 0.03);
 
         let _ = s.update(Msg::Volume(0.5));
-        assert_eq!(f32::from_bits(s.player.ctl.volume.load(Ordering::Relaxed)), 0.5);
+        assert_eq!(
+            f32::from_bits(s.player.ctl.volume.load(Ordering::Relaxed)),
+            0.5
+        );
         let _ = s.update(Msg::ToggleMute);
         assert_eq!(s.player.ctl.gain(), 0.0);
         let _ = s.update(Msg::CycleSpeed);
@@ -1915,7 +1979,11 @@ mod tests {
         assert!(s.export.is_some());
         let dst = t.0.join("clip-edit.mp4");
         let deadline = Instant::now() + Duration::from_secs(10);
-        while Core::open(&dst, (8, 8), false).map(|c| c.info.duration).unwrap_or(0.0) <= 0.0 {
+        while Core::open(&dst, (8, 8), false)
+            .map(|c| c.info.duration)
+            .unwrap_or(0.0)
+            <= 0.0
+        {
             assert!(Instant::now() < deadline, "export never finished");
             tokio::time::sleep(Duration::from_millis(20)).await;
         }

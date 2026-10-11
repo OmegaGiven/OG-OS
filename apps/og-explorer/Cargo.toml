@@ -12,7 +12,7 @@ path = "src/main.rs"
 # outside the OG-OS distro. Suite integration (og-config theme, og-wayland
 # drag-out) comes in behind the optional `og-suite` feature — see SPEC.md §7.
 [dependencies]
-iced = { version = "0.13", features = ["image", "tokio", "advanced", "canvas", "wgpu"] }
+iced = { version = "0.13", features = ["image", "tokio", "advanced", "canvas", "wgpu", "highlighter", "markdown", "lazy"] }
 tokio = { version = "1.52.3", features = ["fs", "rt", "sync", "time", "io-util"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -37,6 +37,8 @@ bytemuck = { version = "1", features = ["derive"] }
 base64 = "0.22"
 ffmpeg-next = "9"
 cpal = "0.18"
+zip = { version = "8", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+quick-xml = "0.39"
 
 og-config = { path = "../../crates/og-config", optional = true }
 og-theme = { path = "../../crates/og-theme", optional = true }
@@ -50,3 +52,5 @@ og-suite = ["dep:og-config", "dep:og-theme", "dep:og-wayland"]
 tokio = { version = "1.52.3", features = ["macros", "rt", "time", "sync", "fs"] }
 # validates the 3D viewer's WGSL without a GPU (same naga as iced's wgpu)
 naga = { version = "0.19", features = ["wgsl-in"] }
+# test-only: checks the highlighter language tokens resolve (already an iced dep)
+syntect = "5"
