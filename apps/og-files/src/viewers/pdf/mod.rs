@@ -1027,7 +1027,7 @@ impl State {
             button(small("100%"))
                 .on_press(Msg::ZoomReset)
                 .style(button::text),
-            Space::with_width(Length::Fill),
+            Space::with_width(12),
             button(
                 text(if self.selected.is_empty() {
                     "Extract page".to_string()
@@ -1065,7 +1065,9 @@ impl State {
             },
         ]
         .spacing(6)
-        .align_y(iced::Alignment::Center);
+        .align_y(iced::Alignment::Center)
+        // wraps onto a second line in a narrow viewer instead of crushing labels
+        .wrap();
 
         let mut bars = column![nav].spacing(6);
         if self.editing {
@@ -1118,7 +1120,8 @@ impl State {
                         .on_press_maybe((self.dirty && !self.busy).then_some(Msg::Save)),
                 ]
                 .spacing(6)
-                .align_y(iced::Alignment::Center),
+                .align_y(iced::Alignment::Center)
+                .wrap(),
             );
         }
         bars = bars.push(

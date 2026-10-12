@@ -161,7 +161,6 @@ pub enum Message {
     Inspector(inspector::Msg),
     Details(details::Msg),
     PaneResized(pane_grid::ResizeEvent),
-    PaneDragged(pane_grid::DragEvent),
     ToggleLeft,
     ToggleFocus,
     Search,
@@ -1109,13 +1108,6 @@ impl App {
                 }
                 Task::none()
             }
-            // panes can be dragged by their title bars to rearrange the
-            // layout — the sketch's "swap direction if better"
-            Message::PaneDragged(pane_grid::DragEvent::Dropped { pane, target }) => {
-                self.panes.drop(pane, target);
-                Task::none()
-            }
-            Message::PaneDragged(_) => Task::none(),
             Message::ToggleLeft => {
                 let to = if self.left_size == LeftSize::Collapsed {
                     LeftSize::Normal
@@ -1362,46 +1354,39 @@ impl App {
 
     pub fn view(&self) -> Element<'_, Message> {
         let grid = PaneGrid::new(&self.panes, |_pane, kind, _maximized| {
-            let (title, body): (&str, Element<'_, Message>) = match kind {
-                PaneKind::Files => (
-                    "Files  ·  Ctrl+B hide  ·  Ctrl+F search  ·  Ctrl+L path",
-                    mouse_area(self.sidebar.view().map(Message::Sidebar))
-                        .on_right_press(Message::BackgroundMenu)
-                        .into(),
-                ),
-                PaneKind::Viewer => (
-                    if self.focus_pane == PaneKind::Viewer {
-                        "Viewer  ·  keys go here"
-                    } else {
-                        "Viewer"
-                    },
-                    self.tabs.view().map(Message::Tabs),
-                ),
-                PaneKind::Inspector => ("Inspector", self.inspector.view().map(Message::Inspector)),
-                PaneKind::Details => (
-                    "Details",
-                    self.details.view(self.jobs_view(), Message::Details),
-                ),
+            // no title bars: each pane's box carries its own heading
+            let body: Element<'_, Message> = match kind {
+                PaneKind::Files => mouse_area(self.sidebar.view().map(Message::Sidebar))
+                    .on_right_press(Message::BackgroundMenu)
+                    .into(),
+                PaneKind::Viewer => self.tabs.view().map(Message::Tabs),
+                PaneKind::Inspector => self.inspector.view().map(Message::Inspector),
+                PaneKind::Details => self.details.view(self.jobs_view(), Message::Details),
             };
+            let k = *kind;
+            // the pane that receives plain keys gets an accent border
+            let focused = k == self.focus_pane && matches!(k, PaneKind::Files | PaneKind::Viewer);
             let body = container(body)
-                .style(theme::panel)
+                .style(move |t: &Theme| {
+                    let mut st = theme::panel(t);
+                    if focused {
+                        st.border.color = t.extended_palette().primary.base.color.scale_alpha(0.6);
+                    }
+                    st
+                })
                 .width(Length::Fill)
                 .height(Length::Fill);
             // which pane the pointer is over decides where plain keys go after a click
-            let k = *kind;
             let body = mouse_area(body)
                 .on_enter(Message::PaneHover(k, true))
                 .on_exit(Message::PaneHover(k, false));
-            pane_grid::Content::new(body).title_bar(
-                pane_grid::TitleBar::new(text(title).size(11).color(theme::MUTED)).padding([2, 10]),
-            )
+            pane_grid::Content::new(body)
         })
-        .spacing(8)
-        .on_resize(8, Message::PaneResized)
-        .on_drag(Message::PaneDragged);
+        .spacing(6)
+        .on_resize(8, Message::PaneResized);
 
         let base: Element<'_, Message> = container(grid)
-            .padding(8)
+            .padding(6)
             .width(Length::Fill)
             .height(Length::Fill)
             .into();
