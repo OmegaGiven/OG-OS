@@ -83,11 +83,7 @@ impl Scene {
         Self { rain, billboards, signs }
     }
 
-    pub fn draw(&self, frame: &mut Frame, t: f32, colors: &og_theme::AppColors) {
-        let w = frame.width();
-        let h = frame.height();
-        let ground_y = h * 0.80;
-
+    fn strokes(colors: &og_theme::AppColors) -> (Stroke<'static>, Stroke<'static>) {
         let structure = Stroke {
             style: colors.dim_text.into(),
             width: 1.6,
@@ -97,11 +93,30 @@ impl Scene {
         };
         let structure_soft =
             Stroke { style: Color { a: colors.dim_text.a * 0.5, ..colors.dim_text }.into(), width: 1.0, ..structure };
+        (structure, structure_soft)
+    }
+
+    /// Everything that never moves — drawn once into a cache.
+    pub fn draw_static(&self, frame: &mut Frame, colors: &og_theme::AppColors) {
+        let w = frame.width();
+        let ground_y = frame.height() * 0.80;
+        let (structure, structure_soft) = Self::strokes(colors);
         // Ground line spanning the whole width.
         frame.stroke(&Path::line(Point::new(0.0, ground_y), Point::new(w, ground_y)), structure);
 
         draw_traditional_side(frame, w, ground_y, &structure, &structure_soft);
-        draw_futuristic_side(frame, w, ground_y, t, &structure, &structure_soft, colors);
+        draw_futuristic_side(frame, w, ground_y, &structure, &structure_soft);
+    }
+
+    /// The moving parts, redrawn every tick on top of `draw_static`.
+    pub fn draw_animated(&self, frame: &mut Frame, t: f32, colors: &og_theme::AppColors) {
+        let w = frame.width();
+        let h = frame.height();
+        let ground_y = h * 0.80;
+        let (structure, _) = Self::strokes(colors);
+
+        // Tallest tower's blinking antenna light.
+        draw_antenna(frame, w * 0.795, ground_y - ground_y * 0.68, t, colors);
 
         for sign in &self.signs {
             draw_waving_sign(frame, sign, w, h, t, &structure);
@@ -203,10 +218,8 @@ fn draw_futuristic_side(
     frame: &mut Frame,
     w: f32,
     ground_y: f32,
-    t: f32,
     structure: &Stroke,
     soft: &Stroke,
-    colors: &og_theme::AppColors,
 ) {
     let buildings: &[(f32, f32, f32)] = &[
         // (x fraction, width fraction, height fraction of ground_y)
@@ -219,11 +232,6 @@ fn draw_futuristic_side(
     for &(bx, bw, bh) in buildings {
         draw_skyscraper(frame, w * bx, w * bw, ground_y * bh, ground_y, structure, soft);
     }
-
-    // Tallest tower, with a blinking antenna light.
-    let tower_x = w * 0.795;
-    let tower_h = ground_y * 0.68;
-    draw_antenna(frame, tower_x, ground_y - tower_h, t, colors);
 }
 
 fn draw_skyscraper(

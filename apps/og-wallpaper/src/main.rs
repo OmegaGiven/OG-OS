@@ -14,6 +14,11 @@ use og_config::Config;
 use og_theme::AppColors;
 use og_wallpaper_core::manifest::{Manifest, RegionShape};
 
+/// Largest size a theme image is kept at (covers 5120-wide ultrawides and
+/// 5K panels).
+const MAX_W: u32 = 5120;
+const MAX_H: u32 = 2880;
+
 /// A loaded theme: the base artwork (already filtered to line-art/2-color
 /// by og-wallpaper-studio, not touched here) plus which regions of it
 /// are animated and how.
@@ -32,6 +37,14 @@ impl LoadedTheme {
                 eprintln!("og-wallpaper: theme \"{name}\" failed to load ({}): {e}", dir.display());
                 return None;
             }
+        };
+        // Themes are often huge (6000px+ source art); nothing needs more
+        // than the widest output, so shrink once here instead of having
+        // the renderer resample the full-size image on every frame.
+        let img = if img.width() > MAX_W || img.height() > MAX_H {
+            img.resize(MAX_W, MAX_H, og_wallpaper_core::image::imageops::FilterType::Triangle)
+        } else {
+            img
         };
         let mut rgba = img.to_rgba8();
         let (w, h) = rgba.dimensions();
@@ -158,35 +171,44 @@ fn subscription(_app: &App) -> Subscription<Message> {
     iced::time::every(std::time::Duration::from_millis(33)).map(|_| Message::Tick)
 }
 
+/// Where the theme image lands: cover-fit (scale to fill the output,
+/// center-cropping overflow) — same intent as sway's own "fill" wallpaper
+/// mode, so an animated theme behaves like any other wallpaper choice.
+fn cover_rect(theme: &LoadedTheme, bounds: Rectangle) -> Rectangle {
+    let scale = (bounds.width / theme.size.0).max(bounds.height / theme.size.1);
+    let width = theme.size.0 * scale;
+    let height = theme.size.1 * scale;
+    Rectangle { x: (bounds.width - width) * 0.5, y: (bounds.height - height) * 0.5, width, height }
+}
+
 impl canvas::Program<Message> for App {
-    type State = ();
+    /// Per-output cache of everything that doesn't move (fill, artwork,
+    /// static line-art). Only the animated layer is rebuilt each tick —
+    /// redrawing the full-screen artwork 30x/s per output is what used to
+    /// pin the CPU. The cache redraws itself when the output size changes.
+    type State = canvas::Cache;
 
     fn draw(
         &self,
-        _state: &(),
+        cache: &canvas::Cache,
         renderer: &Renderer,
         _theme: &Theme,
         bounds: Rectangle,
         _cursor: mouse::Cursor,
     ) -> Vec<canvas::Geometry> {
-        let mut frame = canvas::Frame::new(renderer, bounds.size());
-        frame.fill_rectangle(iced::Point::ORIGIN, bounds.size(), self.colors.bar_bg);
+        let still = cache.draw(renderer, bounds.size(), |frame| {
+            frame.fill_rectangle(iced::Point::ORIGIN, bounds.size(), self.colors.bar_bg);
+            match &self.background {
+                Background::Theme(theme) => frame.draw_image(cover_rect(theme, bounds), &theme.image),
+                Background::Demo => self.demo.draw_static(frame, &self.colors),
+                Background::Failed => {}
+            }
+        });
 
+        let mut frame = canvas::Frame::new(renderer, bounds.size());
         match &self.background {
             Background::Theme(theme) => {
-                // Cover-fit: scale to fill the output, center-cropping
-                // overflow — same intent as sway's own "fill" wallpaper
-                // mode, so an animated theme behaves like any other
-                // wallpaper choice size-wise.
-                let scale = (bounds.width / theme.size.0).max(bounds.height / theme.size.1);
-                let draw_w = theme.size.0 * scale;
-                let draw_h = theme.size.1 * scale;
-                let offset_x = (bounds.width - draw_w) * 0.5;
-                let offset_y = (bounds.height - draw_h) * 0.5;
-                frame.draw_image(
-                    Rectangle { x: offset_x, y: offset_y, width: draw_w, height: draw_h },
-                    &theme.image,
-                );
+                let rect = cover_rect(theme, bounds);
                 for region in &theme.regions {
                     // Regions are authored in the base image's own
                     // fraction space — map into the same scaled/offset
@@ -196,19 +218,19 @@ impl canvas::Program<Message> for App {
                     effects::draw_region_in(
                         &mut frame,
                         region,
-                        Rectangle { x: offset_x, y: offset_y, width: draw_w, height: draw_h },
+                        rect,
                         self.t,
                         self.colors.accent,
                     );
                 }
             }
-            Background::Demo => self.demo.draw(&mut frame, self.t, &self.colors),
+            Background::Demo => self.demo.draw_animated(&mut frame, self.t, &self.colors),
             // Plain fill (already drawn above) — a configured-but-broken
             // theme should look "off", not silently swap in the demo.
             Background::Failed => {}
         }
 
-        vec![frame.into_geometry()]
+        vec![still, frame.into_geometry()]
     }
 }
 
@@ -219,6 +241,14 @@ fn main() -> iced_layershell::Result {
     // og-settings is the only place that decides whether this runs.
     if Config::load().wallpaper_mode != "animated" {
         return Ok(());
+    }
+
+    // Vsync (FIFO) blocks each present on a Wayland frame callback, and
+    // sway sends none to a background surface that windows cover — the
+    // render loop froze after one frame. The 33 ms tick already paces
+    // frames, so present without vsync (Immediate → Mailbox → Fifo).
+    if std::env::var_os("ICED_PRESENT_MODE").is_none() {
+        std::env::set_var("ICED_PRESENT_MODE", "no_vsync");
     }
 
     daemon("og-wallpaper", update, view, remove_id)

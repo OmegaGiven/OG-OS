@@ -11,7 +11,7 @@ path = "src/main.rs"
 og-config = { path = "../../crates/og-config" }
 og-theme = { path = "../../crates/og-theme" }
 og-wallpaper-core = { path = "../../crates/og-wallpaper-core" }
-iced = { version = "0.13", default-features = false, features = ["tiny-skia", "canvas", "tokio", "image"] }
+iced = { version = "0.13", default-features = false, features = ["wgpu", "tiny-skia", "canvas", "tokio", "image"] }
 iced_layershell = "0.13.7"
 rand = "0.8"
 
