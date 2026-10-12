@@ -4275,6 +4275,7 @@ dependencies = [
  "iced",
  "iced_fonts",
  "image 0.25.10",
+ "libc",
  "libloading 0.8.9",
  "lofty",
  "lopdf",
