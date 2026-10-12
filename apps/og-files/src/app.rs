@@ -263,7 +263,7 @@ impl App {
             focus_pane: PaneKind::Files,
             fullscreen: false,
         };
-        // og-files [--view tree|list|grid] [--search TEXT] [--focus] [PATH]
+        // og-files [--view tree|list|grid] [--search TEXT] [--focus] [--usage DIR] [PATH]
         // a folder PATH opens in the files pane, a file PATH in a tab
         let mut tasks = Vec::new();
         let mut args = std::env::args_os().skip(1).filter(|_| !cfg!(test));
@@ -286,6 +286,15 @@ impl App {
                     tasks.push(app.update(Message::Sidebar(sidebar::Msg::SearchInput(q))));
                 }
                 Some("--focus") => tasks.push(app.set_left(LeftSize::Focus)),
+                // og-files --usage DIR: open the disk usage analyzer
+                Some("--usage") => {
+                    let d = args
+                        .next()
+                        .map(PathBuf::from)
+                        .unwrap_or_else(crate::config::home);
+                    let d = std::fs::canonicalize(&d).unwrap_or(d);
+                    tasks.push(app.open_disk_usage(d));
+                }
                 _ => {
                     let p = PathBuf::from(a);
                     let p = std::fs::canonicalize(&p).unwrap_or(p);

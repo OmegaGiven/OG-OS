@@ -810,16 +810,35 @@ impl State {
     // ---------------------------------------------------------------- view
 
     pub fn view(&self) -> Element<'_, Msg> {
-        let body = row![
-            container(self.panel())
-                .width(Length::FillPortion(2))
-                .height(Length::Fill),
-            container(self.map_view())
-                .width(Length::FillPortion(3))
-                .height(Length::Fill),
-        ]
-        .spacing(8)
-        .height(Length::Fill);
+        // side by side only when the list gets enough width for names and
+        // columns; otherwise treemap on top, list underneath at full width
+        let body = iced::widget::responsive(move |size| -> Element<'_, Msg> {
+            if size.width >= 1100.0 {
+                row![
+                    container(self.panel())
+                        .width(Length::FillPortion(2))
+                        .height(Length::Fill),
+                    container(self.map_view())
+                        .width(Length::FillPortion(3))
+                        .height(Length::Fill),
+                ]
+                .spacing(8)
+                .height(Length::Fill)
+                .into()
+            } else {
+                column![
+                    container(self.map_view())
+                        .width(Length::Fill)
+                        .height(Length::FillPortion(3)),
+                    container(self.panel())
+                        .width(Length::Fill)
+                        .height(Length::FillPortion(2)),
+                ]
+                .spacing(8)
+                .height(Length::Fill)
+                .into()
+            }
+        });
         column![self.header(), self.crumbs(), body]
             .spacing(6)
             .padding(8)
@@ -1393,7 +1412,9 @@ impl State {
                 btn(B::Trash, "Trash", Msg::Act(Act::Trash), any, false),
                 btn(B::XOctagon, "Delete…", Msg::Act(Act::Delete), any, true),
             ]
-            .spacing(4),
+            .spacing(4)
+            // wraps instead of cutting buttons off in a narrow panel
+            .wrap(),
         ]
         .spacing(4)
         .into()
