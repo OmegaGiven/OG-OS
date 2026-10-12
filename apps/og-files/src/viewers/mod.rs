@@ -13,6 +13,7 @@
 pub mod archive;
 pub mod audio;
 pub mod convert;
+pub mod diskusage;
 pub mod doc;
 pub mod hex;
 pub mod image;
@@ -58,6 +59,7 @@ pub enum Viewer {
     Table(table::State),
     Placeholder(placeholder::State),
     Error(String),
+    DiskUsage(diskusage::State),
     Audio(audio::State),
     Video(video::State),
     Sheet(sheet::State),
@@ -77,6 +79,7 @@ pub enum Msg {
     /// "Convert to PDF" from the image/placeholder views
     Convert,
     Converted(Result<PathBuf, String>),
+    DiskUsage(diskusage::Msg),
     Audio(audio::Msg),
     Video(video::Msg),
     Sheet(sheet::Msg),
@@ -94,6 +97,12 @@ pub enum Event {
     /// open another file in its own tab (e.g. an archive entry extracted to
     /// the cache)
     OpenFile(PathBuf),
+    /// select/show this path in the files pane
+    Reveal(PathBuf),
+    /// move these to the trash (app runs the job; undo works)
+    Trash(Vec<PathBuf>),
+    /// delete permanently (app asks for confirmation first)
+    Delete(Vec<PathBuf>),
 }
 
 pub fn load(path: PathBuf, kind: Kind) -> Task<Msg> {
@@ -271,6 +280,10 @@ impl Viewer {
                 Some(Event::Status("Splitting scanned photos…".into())),
             ),
             (_, Msg::Converted(r)) => (Task::none(), Some(convert::status(r))),
+            (Viewer::DiskUsage(s), Msg::DiskUsage(m)) => {
+                let (t, ev) = s.update(m);
+                (t.map(Msg::DiskUsage), ev)
+            }
             (Viewer::Pdf(s), Msg::Pdf(m)) => {
                 let (t, ev) = s.update(m);
                 (t.map(Msg::Pdf), ev)
@@ -325,7 +338,22 @@ impl Viewer {
     ) -> Option<Task<Msg>> {
         match self {
             Viewer::Video(s) => s.key(key, mods).map(|t| t.map(Msg::Video)),
+            Viewer::DiskUsage(s) => s.key(key, mods).map(|t| t.map(Msg::DiskUsage)),
             _ => None,
+        }
+    }
+
+    /// A disk-usage tab for `root` (not a file viewer: built directly).
+    pub fn disk_usage(root: PathBuf) -> (Viewer, Task<Msg>) {
+        let (s, t) = diskusage::State::new(diskusage::open(root));
+        (Viewer::DiskUsage(s), t.map(Msg::DiskUsage))
+    }
+
+    /// Paths changed on disk because of a finished job.
+    pub fn fs_changed(&mut self, paths: &[PathBuf]) -> Task<Msg> {
+        match self {
+            Viewer::DiskUsage(s) => s.fs_changed(paths).map(Msg::DiskUsage),
+            _ => Task::none(),
         }
     }
 
@@ -370,6 +398,7 @@ impl Viewer {
             Viewer::Table(s) => s.view(),
             Viewer::Placeholder(s) => s.view(Msg::Convert),
             Viewer::Locked(s) => s.view().map(Msg::Locked),
+            Viewer::DiskUsage(s) => s.view().map(Msg::DiskUsage),
             Viewer::Audio(s) => s.view().map(Msg::Audio),
             Viewer::Video(s) => s.view().map(Msg::Video),
             Viewer::Sheet(s) => s.view().map(Msg::Sheet),

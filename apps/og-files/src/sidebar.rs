@@ -89,6 +89,7 @@ pub enum Msg {
     SearchFire(u64),
     SearchContent(bool),
     Focus,
+    DiskUsage,
     Tree(tree::Msg),
     Browse(browse::Msg),
     Search(search::Msg),
@@ -104,6 +105,8 @@ pub enum Event {
     EmptyTrash,
     Status(String),
     ToggleFocus,
+    /// open the disk-usage analyzer for this folder
+    DiskUsage(PathBuf),
 }
 
 impl Sidebar {
@@ -138,6 +141,23 @@ impl Sidebar {
         }
         self.sel.clear();
         self.browse.navigate(path).map(Msg::Browse)
+    }
+
+    /// Show `p` selected in list view (from "Show in files pane").
+    pub fn reveal_path(&mut self, p: PathBuf) -> Task<Msg> {
+        let dir = if p.is_dir() {
+            p.clone()
+        } else {
+            p.parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_else(crate::config::home)
+        };
+        if self.mode == Mode::Tree {
+            self.mode = Mode::List;
+        }
+        let t = self.browse.navigate(dir).map(Msg::Browse);
+        self.sel.only(p);
+        t
     }
 
     pub fn open_search(&mut self) -> Task<Msg> {
@@ -600,6 +620,7 @@ impl Sidebar {
                 self.focused = !self.focused;
                 (Task::none(), Some(Event::ToggleFocus))
             }
+            Msg::DiskUsage => (Task::none(), Some(Event::DiskUsage(self.current_dir()))),
             Msg::Tree(m) => {
                 let (t, ev) = self.tree.update(m);
                 let t = t.map(Msg::Tree);
@@ -675,7 +696,12 @@ impl Sidebar {
             row![
                 mode_btn("Tree", Mode::Tree),
                 mode_btn("List", Mode::List),
-                mode_btn("Grid", Mode::Grid)
+                mode_btn("Grid", Mode::Grid),
+                Space::with_width(Length::Fill),
+                button(text("Disk usage").size(12))
+                    .on_press(Msg::DiskUsage)
+                    .style(button::secondary)
+                    .padding([3, 8]),
             ]
             .spacing(4),
         ]

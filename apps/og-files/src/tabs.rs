@@ -36,6 +36,9 @@ pub enum Event {
     Status(String),
     /// a viewer asked to open another file
     OpenFile(PathBuf),
+    Reveal(PathBuf),
+    Trash(Vec<PathBuf>),
+    Delete(Vec<PathBuf>),
     /// closing this tab would lose unsaved changes — ask first
     ConfirmClose(u64, String),
     /// active tab changed (or closed to nothing) — inspector/details follow
@@ -146,6 +149,40 @@ impl Tabs {
             .map(|t| t.map(move |m| Msg::Viewer(id, m)))
     }
 
+    /// Open (or focus) a disk-usage tab for `root`.
+    pub fn open_disk_usage(&mut self, root: PathBuf) -> (Task<Msg>, Event) {
+        if let Some(t) = self
+            .tabs
+            .iter()
+            .find(|t| t.path == root && matches!(t.viewer, Viewer::DiskUsage(_)))
+        {
+            self.active = Some(t.id);
+            return (Task::none(), self.focus_event());
+        }
+        let id = self.next_id;
+        self.next_id += 1;
+        let (viewer, task) = Viewer::disk_usage(root.clone());
+        let title = format!("Usage: {}", title_for(&root));
+        self.tabs.push(Tab {
+            id,
+            path: root,
+            kind: Kind::Folder,
+            title,
+            viewer,
+            preview: false,
+        });
+        self.active = Some(id);
+        (task.map(move |m| Msg::Viewer(id, m)), self.focus_event())
+    }
+
+    /// A job changed these paths: let viewers that track the filesystem update.
+    pub fn fs_changed(&mut self, paths: &[PathBuf]) -> Task<Msg> {
+        Task::batch(self.tabs.iter_mut().map(|t| {
+            let id = t.id;
+            t.viewer.fs_changed(paths).map(move |m| Msg::Viewer(id, m))
+        }))
+    }
+
     pub fn active_fullscreen(&self) -> bool {
         self.active().is_some_and(|t| t.viewer.fullscreen())
     }
@@ -179,6 +216,9 @@ impl Tabs {
                         Event::Status(format!("Renamed to {}", p.display()))
                     }
                     viewers::Event::OpenFile(p) => Event::OpenFile(p),
+                    viewers::Event::Reveal(p) => Event::Reveal(p),
+                    viewers::Event::Trash(p) => Event::Trash(p),
+                    viewers::Event::Delete(p) => Event::Delete(p),
                 });
                 (task.map(move |m| Msg::Viewer(id, m)), ev)
             }

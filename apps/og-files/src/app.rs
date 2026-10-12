@@ -118,6 +118,7 @@ pub enum MenuAction {
     EmptyTrash,
     MakePdf,
     Compress,
+    DiskUsage,
 }
 
 pub struct App {
@@ -366,6 +367,20 @@ impl App {
         Task::batch([unfocus, task.map(Message::Tabs), self.on_tabs_event(ev)])
     }
 
+    fn open_disk_usage(&mut self, root: PathBuf) -> Task<Message> {
+        self.details.record_for(
+            format!("Analyzing disk usage of {}", root.display()),
+            Some(&root),
+        );
+        let unfocus = if self.left_size == LeftSize::Focus {
+            self.set_left(LeftSize::Normal)
+        } else {
+            Task::none()
+        };
+        let (t, ev) = self.tabs.open_disk_usage(root);
+        Task::batch([unfocus, t.map(Message::Tabs), self.on_tabs_event(ev)])
+    }
+
     fn set_left(&mut self, size: LeftSize) -> Task<Message> {
         self.left_size = size;
         self.sidebar.focused = size == LeftSize::Focus;
@@ -397,6 +412,18 @@ impl App {
             tabs::Event::OpenFile(p) => {
                 let k = Kind::of(&p, false);
                 self.open(p, k, true)
+            }
+            tabs::Event::Reveal(p) => self.sidebar.reveal_path(p).map(Message::Sidebar),
+            tabs::Event::Trash(paths) => self.start_job(JobSpec {
+                kind: JobKind::Trash,
+                sources: paths,
+                dest: None,
+            }),
+            tabs::Event::Delete(paths) => {
+                if !paths.is_empty() {
+                    self.dialog = Some(Dialog::ConfirmDelete { paths });
+                }
+                Task::none()
             }
             tabs::Event::ConfirmClose(id, title) => {
                 self.dialog = Some(Dialog::CloseTab { id, title });
@@ -509,7 +536,13 @@ impl App {
                     Err(e) => self.details.record(format!("{} failed: {e}", job.label)),
                 }
                 let dirs = Self::affected(&job.spec);
-                self.sidebar.refresh(&dirs).map(Message::Sidebar)
+                // disk-usage tabs drop/rescan what the job removed or moved
+                let mut changed = job.spec.sources.clone();
+                changed.extend(dirs.iter().cloned());
+                Task::batch([
+                    self.sidebar.refresh(&dirs).map(Message::Sidebar),
+                    self.tabs.fs_changed(&changed).map(Message::Tabs),
+                ])
             }
         }
     }
@@ -705,6 +738,13 @@ impl App {
             MenuAction::EmptyTrash => {
                 self.dialog = Some(Dialog::ConfirmEmptyTrash);
                 Task::none()
+            }
+            MenuAction::DiskUsage => {
+                let root = match items.as_slice() {
+                    [p] if p.is_dir() => p.clone(),
+                    _ => dir,
+                };
+                self.open_disk_usage(root)
             }
             MenuAction::Compress => {
                 if items.is_empty() {
@@ -961,6 +1001,7 @@ impl App {
                     Message::DriveDone,
                 )
             }
+            sidebar::Event::DiskUsage(root) => self.open_disk_usage(root),
             sidebar::Event::EmptyTrash => {
                 self.dialog = Some(Dialog::ConfirmEmptyTrash);
                 Task::none()
@@ -1488,6 +1529,7 @@ impl App {
             entries.push(("New folder…", MenuAction::NewFolder, true));
             entries.push(("New file…", MenuAction::NewFile, true));
             entries.push(("Paste", MenuAction::Paste, has_clip));
+            entries.push(("Analyze disk usage here", MenuAction::DiskUsage, true));
         } else {
             entries.push(("Open", MenuAction::Open, true));
             entries.push(("Copy  Ctrl+C", MenuAction::Copy, true));
@@ -1497,6 +1539,9 @@ impl App {
             entries.push(("Rename…  F2", MenuAction::Rename, n == 1));
             entries.push(("Copy path", MenuAction::CopyPath, true));
             entries.push(("Compress to .zip", MenuAction::Compress, true));
+            if n == 1 && t.items[0].1 == Kind::Folder {
+                entries.push(("Analyze disk usage", MenuAction::DiskUsage, true));
+            }
             if n == 1 {
                 entries.push((
                     if t.bookmarked {
