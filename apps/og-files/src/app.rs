@@ -1263,10 +1263,7 @@ impl App {
                 self.inspector.update(m);
                 Task::none()
             }
-            Message::Details(m) => {
-                self.details.update(m);
-                Task::none()
-            }
+            Message::Details(m) => self.details.update(m).map(Message::Details),
             Message::PaneResized(pane_grid::ResizeEvent { split, ratio }) => {
                 self.panes.resize(split, ratio);
                 if Some(split) == self.inspector_split && ratio < 0.97 {

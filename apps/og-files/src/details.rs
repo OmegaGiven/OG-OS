@@ -1,7 +1,8 @@
 //! Bottom strip: file details & history — an activity log (opened, saved,
 //! copied, trashed, errors…) persisted to
 //! `$XDG_STATE_HOME/og-files/activity.jsonl`, filterable to the focused
-//! file. Also hosts the running file jobs.
+//! file. Also hosts the running file jobs. The log can be hidden (kept
+//! hidden across restarts — handy for demos/screen sharing) or cleared.
 
 use crate::theme;
 use iced::widget::{button, column, row, scrollable, text, Space};
@@ -29,12 +30,18 @@ pub struct Details {
     /// show only entries about this file
     pub focus: Option<PathBuf>,
     only_focus: bool,
+    /// entries and the status line are not shown (still recorded)
+    hidden: bool,
+    /// "Clear" was pressed once; the next press really clears
+    clear_armed: bool,
 }
 
 #[derive(Debug, Clone)]
 pub enum Msg {
-    Loaded(Vec<Entry>),
+    Loaded(Vec<Entry>, bool),
     OnlyFocus(bool),
+    Hide(bool),
+    Clear,
     Saved,
 }
 
@@ -44,6 +51,11 @@ fn log_path() -> PathBuf {
         .filter(|p| p.is_absolute())
         .unwrap_or_else(|| crate::config::home().join(".local/state"));
     base.join("og-files").join("activity.jsonl")
+}
+
+/// Exists while the history is hidden.
+fn hidden_flag() -> PathBuf {
+    log_path().with_file_name("history-hidden")
 }
 
 pub fn load() -> Task<Msg> {
@@ -58,9 +70,10 @@ pub fn load() -> Task<Msg> {
                 .collect();
             let skip = v.len().saturating_sub(KEEP);
             v.drain(..skip);
-            v
+            let hidden = tokio::fs::try_exists(hidden_flag()).await.unwrap_or(false);
+            (v, hidden)
         },
-        Msg::Loaded,
+        |(v, hidden)| Msg::Loaded(v, hidden),
     )
 }
 
@@ -120,14 +133,58 @@ impl Details {
         )
     }
 
-    pub fn update(&mut self, m: Msg) {
+    pub fn update(&mut self, m: Msg) -> Task<Msg> {
+        if !matches!(m, Msg::Clear | Msg::Saved) {
+            self.clear_armed = false;
+        }
         match m {
-            Msg::Loaded(mut older) => {
+            Msg::Loaded(mut older, hidden) => {
                 older.append(&mut self.log);
                 self.log = older;
+                self.hidden = hidden;
+                Task::none()
             }
-            Msg::OnlyFocus(b) => self.only_focus = b,
-            Msg::Saved => {}
+            Msg::OnlyFocus(b) => {
+                self.only_focus = b;
+                Task::none()
+            }
+            Msg::Hide(b) => {
+                self.hidden = b;
+                Task::perform(
+                    async move {
+                        let f = hidden_flag();
+                        if b {
+                            if let Some(d) = f.parent() {
+                                let _ = tokio::fs::create_dir_all(d).await;
+                            }
+                            let _ = tokio::fs::write(&f, b"").await;
+                        } else {
+                            let _ = tokio::fs::remove_file(&f).await;
+                        }
+                    },
+                    |_| Msg::Saved,
+                )
+            }
+            Msg::Clear if !self.clear_armed => {
+                self.clear_armed = true;
+                Task::none()
+            }
+            Msg::Clear => {
+                self.clear_armed = false;
+                self.log.clear();
+                self.unsaved.clear();
+                self.status.clear();
+                Task::perform(
+                    async {
+                        let p = log_path();
+                        if tokio::fs::try_exists(&p).await.unwrap_or(false) {
+                            let _ = tokio::fs::write(&p, b"").await;
+                        }
+                    },
+                    |_| Msg::Saved,
+                )
+            }
+            Msg::Saved => Task::none(),
         }
     }
 
@@ -137,8 +194,8 @@ impl Details {
         wrap: impl Fn(Msg) -> M + 'a,
     ) -> Element<'a, M> {
         let filter = self.focus.as_ref().filter(|_| self.only_focus);
-        let rows = self
-            .log
+        let shown = if self.hidden { &[][..] } else { &self.log[..] };
+        let rows = shown
             .iter()
             .rev()
             .filter(|e| {
@@ -173,12 +230,58 @@ impl Details {
             .into(),
             None => Space::with_width(0).into(),
         };
+        let focus_btn = if self.hidden {
+            Space::with_width(0).into()
+        } else {
+            focus_btn
+        };
+        let hide_btn = button(
+            row![
+                crate::widgets::icon(if self.hidden {
+                    iced_fonts::Bootstrap::Eye
+                } else {
+                    iced_fonts::Bootstrap::EyeSlash
+                })
+                .size(12),
+                text(if self.hidden { "Show history" } else { "Hide" }).size(11),
+            ]
+            .spacing(4)
+            .align_y(iced::Alignment::Center),
+        )
+        .on_press(wrap(Msg::Hide(!self.hidden)))
+        .style(button::text);
+        let clear_btn = button(
+            row![
+                crate::widgets::icon(iced_fonts::Bootstrap::Trash).size(12),
+                text(if self.clear_armed {
+                    "Click again to clear all history"
+                } else {
+                    "Clear"
+                })
+                .size(11),
+            ]
+            .spacing(4)
+            .align_y(iced::Alignment::Center),
+        )
+        .on_press_maybe((!self.log.is_empty()).then(|| wrap(Msg::Clear)))
+        .style(if self.clear_armed {
+            button::danger
+        } else {
+            button::text
+        });
+        let status = if self.hidden {
+            "History hidden".to_string()
+        } else {
+            self.status.clone()
+        };
         column![
             row![
                 text("File details & history").size(15),
-                text(self.status.clone()).size(12).color(theme::MUTED),
+                text(status).size(12).color(theme::MUTED),
                 Space::with_width(Length::Fill),
                 focus_btn,
+                hide_btn,
+                clear_btn,
             ]
             .spacing(16)
             .align_y(iced::Alignment::Center),
@@ -193,4 +296,31 @@ impl Details {
 
 fn ago(t: u64) -> String {
     crate::fsops::ago(Some(UNIX_EPOCH + Duration::from_secs(t)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clear_needs_two_presses_and_other_input_disarms() {
+        let mut d = Details::default();
+        d.record("opened a.txt");
+        d.record("saved a.txt");
+        let _ = d.update(Msg::Clear);
+        assert_eq!(d.log.len(), 2);
+        let _ = d.update(Msg::OnlyFocus(true)); // disarms
+        let _ = d.update(Msg::Clear);
+        assert_eq!(d.log.len(), 2);
+        let _ = d.update(Msg::Clear);
+        assert!(d.log.is_empty() && d.unsaved.is_empty() && d.status.is_empty());
+    }
+
+    #[test]
+    fn hidden_still_records() {
+        let mut d = Details::default();
+        d.hidden = true;
+        d.record("opened b.txt");
+        assert_eq!(d.log.len(), 1);
+    }
 }

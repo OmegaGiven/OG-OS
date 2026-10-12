@@ -352,7 +352,7 @@ Test hooks:
 | Drag and drop with other apps | `extdnd.rs` + fixed `og-wayland` (og-suite builds) | see §7 |
 | Open with | port og-files `desktop.rs` registry | 2 |
 | Bookmarks | add/remove from the context menu, `bookmarks.json` | ✅ |
-| Activity log | persisted to `$XDG_STATE_HOME/og-files/activity.jsonl`, "only this file" filter | ✅ |
+| Activity log | persisted to `$XDG_STATE_HOME/og-files/activity.jsonl`, "only this file" filter, Hide (remembered, for demos) and Clear (press twice) | ✅ |
 | Icons | bundled Bootstrap Icons font, tinted per file type | ✅ |
 
 ## 6a. Network storage
