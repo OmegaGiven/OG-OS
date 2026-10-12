@@ -822,14 +822,14 @@ mod tests {
     #[test]
     fn hover_leave_after_enter_keeps_new_target() {
         let (mut s, _) = Sidebar::new();
-        s.item(ItemAct::Hover(PathBuf::from("/new"), Kind::Folder, true));
+        let _ = s.item(ItemAct::Hover(PathBuf::from("/new"), Kind::Folder, true));
         // the old item's leave arrives late
-        s.item(ItemAct::Hover(PathBuf::from("/old"), Kind::Folder, false));
+        let _ = s.item(ItemAct::Hover(PathBuf::from("/old"), Kind::Folder, false));
         assert_eq!(s.drop_target(), Some(PathBuf::from("/new")));
-        s.item(ItemAct::Hover(PathBuf::from("/new"), Kind::Folder, false));
+        let _ = s.item(ItemAct::Hover(PathBuf::from("/new"), Kind::Folder, false));
         assert_eq!(s.drop_target(), None);
         // files aren't drop targets
-        s.item(ItemAct::Hover(PathBuf::from("/f.txt"), Kind::Text, true));
+        let _ = s.item(ItemAct::Hover(PathBuf::from("/f.txt"), Kind::Text, true));
         assert_eq!(s.drop_target(), None);
     }
 

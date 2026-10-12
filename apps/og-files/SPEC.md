@@ -346,7 +346,7 @@ Test hooks:
 | Live refresh | `devices::watch_dirs` (notify, debounced) on the folders on screen, restarted when they change | ✅ |
 | Thumbnails | images in-process (grid view); video / PDF thumbnails later | ✅ / 2 |
 | Drives | UDisks2 over D-Bus: listed in Devices, mount on expand, unmount, safe eject (unmounts, locks LUKS, powers off), live updates | ✅ (unlocking LUKS: later) |
-| Network | lists cifs/nfs/sshfs/rclone mounts; "Connect to server…" | ✅ / 2 |
+| Network | see §6a | ✅ (NFS: later) |
 | Search | instant pass + background walk, append-only, 180 ms pause while typing, optional search inside text files | ✅ (fuzzy: 2) |
 | Large folders | tree, list, grid and search results are virtualized | ✅ |
 | Drag and drop with other apps | `extdnd.rs` + fixed `og-wayland` (og-suite builds) | see §7 |
@@ -354,6 +354,39 @@ Test hooks:
 | Bookmarks | add/remove from the context menu, `bookmarks.json` | ✅ |
 | Activity log | persisted to `$XDG_STATE_HOME/og-files/activity.jsonl`, "only this file" filter | ✅ |
 | Icons | bundled Bootstrap Icons font, tinted per file type | ✅ |
+
+## 6a. Network storage
+
+Sidebar **Network** group, top to bottom:
+- **Connect to server…** opens a form. Pasting a URL (`sftp://`, `ssh://`,
+  `smb://`, `dav://`, `davs://`, `ftp://`) fills the fields. Then Test, then
+  Connect / Save.
+- **Saved connections**, stored in `$XDG_CONFIG_HOME/og-files/connections.json`
+  with no secrets in the file.
+- **Tailnet:** peers from the Tailscale LocalAPI (unix socket). Phones and
+  tablets are hidden, and offline peers are dimmed.
+- **On this network:** Avahi browse for `_sftp-ssh`, `_ssh`, `_smb` and
+  `_webdav(s)`, updated live.
+- **From ~/.ssh/config:** concrete `Host` entries.
+- **Other mounts:** cifs/nfs/sshfs/fuse.rclone mounts made outside the app.
+
+Pressing a discovered host prefills the form. Pressing a saved connection
+mounts it and opens it.
+
+**Backend:** rclone mounts at `~/Network/<name>`.
+- Remotes are passed as `RCLONE_CONFIG_OGF_*` env vars, so the user's
+  rclone.conf is never touched.
+- Passwords live in the Secret Service keyring and are obscured via stdin,
+  never argv.
+- A missing password raises a prompt ("Password required"), with an option
+  to remember it.
+- SFTP uses ssh-agent / keys by default.
+- Context menu: Connect, Disconnect, Edit, Copy address, Forget saved
+  password, Remove.
+- Auto-mount at start is a per-connection option. Every 60 s the app
+  refreshes the mount state and the tailnet.
+- Runtime deps: `rclone`, `fuse3`. Without them the form shows an install
+  hint.
 
 ## 7. Standalone vs OG-OS suite
 
@@ -447,7 +480,7 @@ entered, saved over, discarded, exported, errors.
 - [ ] PDF: tool recipes/pipelines, keep outlines through rebuilds, encrypted-save option; markdown preview, docx text
 - [ ] xlsx/ods read, table cell editing, csv write
 - [ ] archives as folders, hex viewer, syntax highlighting
-- [ ] network "connect to server"
+- [x] network "connect to server" (§6a)
 
 **Phase 3: basic editing and history**
 - [ ] image edits (crop, rotate, resize, adjust)

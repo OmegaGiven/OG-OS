@@ -132,6 +132,7 @@ pub enum MenuAction {
     NetEdit,
     NetRemove,
     NetCopyUrl,
+    NetForgetPassword,
 }
 
 pub struct App {
@@ -169,6 +170,7 @@ pub struct App {
     net_mounted: Vec<(String, PathBuf)>,
     net_tailnet: Vec<Discovered>,
     net_lan: Vec<Discovered>,
+    net_ssh: Vec<Discovered>,
     /// Err = rclone/fuse missing (shown in the connect dialog)
     net_backend: Result<(), String>,
 }
@@ -211,7 +213,7 @@ pub enum Message {
     MouseUp,
     /// the suite config changed (og-suite builds): re-read the palette
     ThemeChanged,
-    NetLoaded(Vec<Conn>, Result<(), String>),
+    NetLoaded(Vec<Conn>, Result<(), String>, Vec<Discovered>),
     NetMountedNow(Vec<(String, PathBuf)>),
     NetTailnet(Result<Vec<Discovered>, String>),
     NetLan(LanEvent),
@@ -297,6 +299,7 @@ impl App {
             net_mounted: Vec::new(),
             net_tailnet: Vec::new(),
             net_lan: Vec::new(),
+            net_ssh: Vec::new(),
             net_backend: Ok(()),
         };
         // og-files [--view tree|list|grid] [--search TEXT] [--focus] [--usage DIR] [PATH]
@@ -389,11 +392,17 @@ impl App {
             crate::extdnd::connect().map(Message::DndReady),
             Task::perform(
                 async {
-                    tokio::task::spawn_blocking(|| (netb::load_saved(), netb::backend_available()))
-                        .await
-                        .unwrap_or_else(|_| (Vec::new(), Err("failed".into())))
+                    tokio::task::spawn_blocking(|| {
+                        (
+                            netb::load_saved(),
+                            netb::backend_available(),
+                            netb::ssh_config_hosts(),
+                        )
+                    })
+                    .await
+                    .unwrap_or_else(|_| (Vec::new(), Err("failed".into()), Vec::new()))
                 },
-                |(c, b)| Message::NetLoaded(c, b),
+                |(c, b, ssh)| Message::NetLoaded(c, b, ssh),
             ),
             Task::perform(netb::discover_tailnet(), Message::NetTailnet),
             Task::batch(tasks),
@@ -426,6 +435,7 @@ impl App {
     fn push_network(&mut self) {
         let mut found = self.net_tailnet.clone();
         found.extend(self.net_lan.iter().cloned());
+        found.extend(self.net_ssh.iter().cloned());
         self.sidebar
             .set_network(self.net_saved.clone(), self.net_mounted.clone(), found);
     }
@@ -841,7 +851,8 @@ impl App {
             | MenuAction::NetDisconnect
             | MenuAction::NetEdit
             | MenuAction::NetRemove
-            | MenuAction::NetCopyUrl => {
+            | MenuAction::NetCopyUrl
+            | MenuAction::NetForgetPassword => {
                 let Some(c) = target.and_then(|t| t.net) else {
                     return Task::none();
                 };
@@ -870,6 +881,15 @@ impl App {
                         } else {
                             self.update_inner(Message::NetUnmountDone(c, Ok(()), true))
                         }
+                    }
+                    MenuAction::NetForgetPassword => {
+                        let name = c.name.clone();
+                        Task::perform(netb::forget_password(c), move |r| {
+                            Message::OpDone(
+                                r.map(|_| format!("Forgot the saved password for {name}")),
+                                vec![],
+                            )
+                        })
                     }
                     _ => iced::clipboard::write(netb::to_url(&c)).map(|_: ()| Message::Copied),
                 }
@@ -1474,9 +1494,10 @@ impl App {
                 }
                 Task::none()
             }
-            Message::NetLoaded(conns, backend) => {
+            Message::NetLoaded(conns, backend, ssh_hosts) => {
                 self.net_saved = conns;
                 self.net_backend = backend;
+                self.net_ssh = ssh_hosts;
                 self.push_network();
                 // connect the ones marked "connect when og-files starts"
                 let auto: Vec<Conn> = self
@@ -1930,6 +1951,9 @@ impl App {
                 }
                 entries.push(("Edit connection…", MenuAction::NetEdit, true));
                 entries.push(("Copy address", MenuAction::NetCopyUrl, true));
+                if c.auth == netb::Auth::Password {
+                    entries.push(("Forget saved password", MenuAction::NetForgetPassword, true));
+                }
                 entries.push(("Remove connection", MenuAction::NetRemove, true));
             }
             if let Some(d) = &t.drive {

@@ -483,10 +483,18 @@ impl Tree {
             n.dim = false;
             conns.push(n);
         }
-        let found = |want_tailnet: bool| -> Vec<Node> {
+        // 0 = tailnet, 1 = LAN, 2 = ~/.ssh/config
+        let group_of = |src: &Source| match src {
+            Source::Tailnet { .. } => 0,
+            Source::Lan => 1,
+            Source::SshConfig => 2,
+        };
+        let found = |group: u8| -> Vec<Node> {
             self.net_found
                 .iter()
-                .filter(|d| matches!(d.source, Source::Tailnet { .. }) == want_tailnet)
+                .filter(|d| group_of(&d.source) == group)
+                // phones/tablets don't serve files over SSH
+                .filter(|d| !matches!(&d.source, Source::Tailnet { os, .. } if matches!(os.to_ascii_lowercase().as_str(), "ios" | "android" | "ipados" | "tvos")))
                 .filter(|d| {
                     !self
                         .net_saved
@@ -511,8 +519,9 @@ impl Tree {
                 })
                 .collect()
         };
-        let tailnet = found(true);
-        let lan = found(false);
+        let tailnet = found(0);
+        let lan = found(1);
+        let ssh = found(2);
         let other = self
             .network
             .clone()
@@ -527,6 +536,7 @@ impl Tree {
             (Section::Network, None, conns),
             (Section::Network, Some("Tailnet"), tailnet),
             (Section::Network, Some("On this network"), lan),
+            (Section::Network, Some("From ~/.ssh/config"), ssh),
             (Section::Network, Some("Other mounts"), other),
         ];
         self.rebuild_lines();

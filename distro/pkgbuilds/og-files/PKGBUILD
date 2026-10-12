@@ -22,7 +22,8 @@ license=('MIT')
 # mpv provides libmpv (the video engine, loaded at runtime); libva + mesa
 # give hardware decoding on AMD (radeonsi) out of the box
 depends=('gcc-libs' 'wayland' 'libxkbcommon' 'vulkan-icd-loader' 'ffmpeg' 'alsa-lib' 'udisks2'
-         'mpv' 'libva' 'mesa')
+         'mpv' 'libva' 'mesa'
+         'rclone' 'fuse3')  # network storage: user-level mounts under ~/Network
 optdepends=('pipewire-alsa: route audio through PipeWire'
             'intel-media-driver: hardware video decoding on Intel (Broadwell and newer)'
             'libva-intel-driver: hardware video decoding on older Intel GPUs'

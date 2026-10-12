@@ -9,10 +9,6 @@
 //! a `Paths` value (and, for processes, a `Runner`) so tests can point it at
 //! a scratch directory and capture commands instead of running them.
 
-// The UI is wired against this interface separately; until then most items
-// are only reached from tests (remove once the UI calls them).
-#![allow(dead_code)]
-
 mod keyring;
 mod lan;
 mod rclone;
