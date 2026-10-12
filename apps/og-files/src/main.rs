@@ -12,6 +12,7 @@ mod filetype;
 mod fsops;
 mod inspector;
 mod net;
+mod netui;
 mod ops;
 mod search;
 mod sidebar;

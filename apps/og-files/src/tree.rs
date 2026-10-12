@@ -7,6 +7,7 @@ use crate::config::{self, Bookmarks};
 use crate::devices::Drive;
 use crate::filetype::Kind;
 use crate::fsops::{self, Entry};
+use crate::net::{Conn, Discovered, Source};
 use crate::search::Hit;
 use crate::theme;
 use crate::widgets::{self, ItemAct, Selection, Vp};
@@ -19,6 +20,21 @@ pub const ROW_H: f32 = 24.0;
 pub const SCROLL_ID: &str = "tree-scroll";
 /// Stand-in path for the Trash entry.
 pub const TRASH: &str = "trash:";
+/// Stand-in paths for network rows that aren't folders (yet).
+const NET_CONNECT: &str = "netconnect:";
+const NET_SAVED: &str = "net:";
+const NET_FOUND: &str = "netfound:";
+
+/// What a click on a network row means.
+#[derive(Debug, Clone)]
+pub enum NetAct {
+    /// "Connect to server…"
+    ConnectNew,
+    /// a saved connection that isn't mounted: mount it
+    Mount(Conn),
+    /// a discovered machine/share: open the connect dialog prefilled
+    Discovered(Discovered),
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Section {
@@ -50,6 +66,10 @@ struct Node {
     error: Option<String>,
     /// set for drive rows; unmounted drives have path = device file
     drive: Option<Drive>,
+    /// special icon (network rows)
+    glyph: Option<iced_fonts::Bootstrap>,
+    /// greyed out (offline tailnet peer)
+    dim: bool,
 }
 
 impl Node {
@@ -67,6 +87,8 @@ impl Node {
             children: None,
             error: None,
             drive: None,
+            glyph: None,
+            dim: false,
         }
     }
 
@@ -119,6 +141,8 @@ struct Row {
     expandable: bool,
     drive: bool,
     removable: bool,
+    glyph: Option<iced_fonts::Bootstrap>,
+    dim: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -131,6 +155,9 @@ pub struct Tree {
     bookmarks: Bookmarks,
     drives: Vec<Drive>,
     network: Vec<PathBuf>,
+    net_saved: Vec<Conn>,
+    net_mounted: Vec<(String, PathBuf)>,
+    net_found: Vec<Discovered>,
     // (section, subheading, nodes) — subheading is "Folders"/"Files"
     groups: Vec<(Section, Option<&'static str>, Vec<Node>)>,
     lines: Vec<Line>,
@@ -161,6 +188,9 @@ impl Tree {
             bookmarks: Bookmarks::load(),
             drives: Vec::new(),
             network: Vec::new(),
+            net_saved: Vec::new(),
+            net_mounted: Vec::new(),
+            net_found: Vec::new(),
             groups: Vec::new(),
             lines: Vec::new(),
             filter: None,
@@ -184,6 +214,56 @@ impl Tree {
         self.drives
             .iter()
             .find(|d| d.mount_point.as_deref() == Some(path) || d.device == path)
+    }
+
+    pub fn set_network(
+        &mut self,
+        saved: Vec<Conn>,
+        mounted: Vec<(String, PathBuf)>,
+        found: Vec<Discovered>,
+    ) {
+        self.net_saved = saved;
+        self.net_mounted = mounted;
+        self.net_found = found;
+        self.rebuild_groups();
+    }
+
+    /// What a click on this row means, if it's a network row.
+    pub fn net_action(&self, p: &Path) -> Option<NetAct> {
+        let s = p.to_str()?;
+        if s == NET_CONNECT {
+            return Some(NetAct::ConnectNew);
+        }
+        if let Some(id) = s.strip_prefix(NET_SAVED) {
+            return self
+                .net_saved
+                .iter()
+                .find(|c| c.id == id)
+                .cloned()
+                .map(NetAct::Mount);
+        }
+        if s.starts_with(NET_FOUND) {
+            return self
+                .net_found
+                .iter()
+                .find(|d| found_key(d) == s)
+                .cloned()
+                .map(NetAct::Discovered);
+        }
+        None
+    }
+
+    /// The saved connection behind a row (mounted folder or not), for menus.
+    pub fn conn_for(&self, p: &Path) -> Option<Conn> {
+        if let Some(NetAct::Mount(c)) = self.net_action(p) {
+            return Some(c);
+        }
+        let id = self
+            .net_mounted
+            .iter()
+            .find(|(_, m)| m == p)
+            .map(|(id, _)| id.clone())?;
+        self.net_saved.iter().find(|c| c.id == id).cloned()
     }
 
     pub fn is_bookmarked(&self, p: &Path) -> bool {
@@ -367,17 +447,87 @@ impl Tree {
             devices.push(n);
         }
         devices.push(take(PathBuf::from(TRASH), Some("Trash"), Kind::Folder));
-        let network = self
+        use iced_fonts::Bootstrap as B;
+        // saved connections: mounted ones are real folders, the rest mount on click
+        let mut conns = Vec::new();
+        let mut connect = Node::new(
+            PathBuf::from(NET_CONNECT),
+            Some("Connect to server…"),
+            Kind::Folder,
+        );
+        connect.glyph = Some(B::PlusCircle);
+        conns.push(connect);
+        let rclone_root = crate::net::mount_root();
+        for c in self.net_saved.clone() {
+            let mounted = self
+                .net_mounted
+                .iter()
+                .find(|(id, _)| *id == c.id)
+                .map(|(_, p)| p.clone());
+            let mut n = match mounted {
+                Some(p) => {
+                    let mut n = take(p, Some(&c.name), Kind::Folder);
+                    n.glyph = Some(B::CloudCheck);
+                    n
+                }
+                None => {
+                    let mut n = Node::new(
+                        PathBuf::from(format!("{NET_SAVED}{}", c.id)),
+                        Some(&c.name),
+                        Kind::Folder,
+                    );
+                    n.glyph = Some(B::Cloud);
+                    n
+                }
+            };
+            n.dim = false;
+            conns.push(n);
+        }
+        let found = |want_tailnet: bool| -> Vec<Node> {
+            self.net_found
+                .iter()
+                .filter(|d| matches!(d.source, Source::Tailnet { .. }) == want_tailnet)
+                .filter(|d| {
+                    !self
+                        .net_saved
+                        .iter()
+                        .any(|c| c.host == d.host && c.proto == d.proto)
+                })
+                .map(|d| {
+                    let (online, glyph) = match &d.source {
+                        Source::Tailnet { online, .. } => (*online, B::PcDisplay),
+                        _ if d.proto == crate::net::Proto::Smb => (true, B::HddNetwork),
+                        _ => (true, B::Server),
+                    };
+                    let label = match &d.source {
+                        Source::Tailnet { online: false, .. } => format!("{}  · offline", d.name),
+                        Source::Tailnet { .. } => d.name.clone(),
+                        _ => format!("{}  · {}", d.name, short_proto(d.proto)),
+                    };
+                    let mut n = Node::new(PathBuf::from(found_key(d)), Some(&label), Kind::Folder);
+                    n.glyph = Some(glyph);
+                    n.dim = !online;
+                    n
+                })
+                .collect()
+        };
+        let tailnet = found(true);
+        let lan = found(false);
+        let other = self
             .network
             .clone()
             .into_iter()
+            .filter(|p| !p.starts_with(&rclone_root))
             .map(|p| take(p, None, Kind::Folder))
             .collect();
         self.groups = vec![
             (Section::Bookmarks, Some("Folders"), bm_folders),
             (Section::Bookmarks, Some("Files"), bm_files),
             (Section::Devices, None, devices),
-            (Section::Network, None, network),
+            (Section::Network, None, conns),
+            (Section::Network, Some("Tailnet"), tailnet),
+            (Section::Network, Some("On this network"), lan),
+            (Section::Network, Some("Other mounts"), other),
         ];
         self.rebuild_lines();
     }
@@ -400,7 +550,7 @@ impl Tree {
             if n.kind != Kind::Folder && filter.is_some_and(|k| k != n.kind) {
                 return;
             }
-            let trash = n.path.as_os_str() == TRASH;
+            let trash = n.path.as_os_str() == TRASH || is_net_pseudo(&n.path);
             out.push(Line::Row(Row {
                 section: s,
                 depth,
@@ -418,6 +568,8 @@ impl Tree {
                     && !n.drive.as_ref().is_some_and(|d| d.encrypted),
                 drive: n.drive.is_some(),
                 removable: n.drive.as_ref().is_some_and(|d| d.removable),
+                glyph: n.glyph,
+                dim: n.dim,
             }));
             if n.expanded {
                 for c in n.children.iter().flatten() {
@@ -432,11 +584,12 @@ impl Tree {
                 if *gs != s {
                     continue;
                 }
+                // empty network sub-groups are just left out
+                if nodes.is_empty() && s == Section::Network && sub.is_some() {
+                    continue;
+                }
                 if let Some(sub) = sub {
                     lines.push(Line::Heading(sub, 1));
-                }
-                if nodes.is_empty() && s == Section::Network {
-                    lines.push(Line::Heading("no network mounts", 2));
                 }
                 for n in nodes {
                     walk(
@@ -588,7 +741,13 @@ impl Tree {
                         .padding([3, 4])
                         .width(22);
                     // special rows get their own icon
-                    let glyph = if r.path.as_os_str() == TRASH {
+                    let glyph = if let Some(g) = r.glyph {
+                        widgets::icon(g).color(if r.dim {
+                            theme::MUTED.scale_alpha(0.6)
+                        } else {
+                            theme::MUTED
+                        })
+                    } else if r.path.as_os_str() == TRASH {
                         widgets::icon(B::Trash).color(theme::MUTED)
                     } else if r.path == config::home() {
                         widgets::icon(B::HouseFill).color(iced::color!(0xe0b85c))
@@ -615,5 +774,28 @@ impl Tree {
             .on_scroll(|v| Msg::Scrolled(Vp::from(v)))
             .height(Length::Fill)
             .into()
+    }
+}
+
+fn is_net_pseudo(p: &Path) -> bool {
+    p.to_str()
+        .is_some_and(|s| s == NET_CONNECT || s.starts_with(NET_SAVED) || s.starts_with(NET_FOUND))
+}
+
+fn found_key(d: &Discovered) -> String {
+    format!(
+        "{NET_FOUND}{:?}:{}:{}",
+        d.proto,
+        d.host,
+        d.port.unwrap_or(0)
+    )
+}
+
+fn short_proto(p: crate::net::Proto) -> &'static str {
+    match p {
+        crate::net::Proto::Sftp => "SSH",
+        crate::net::Proto::Smb => "SMB",
+        crate::net::Proto::WebDav => "WebDAV",
+        crate::net::Proto::Ftp => "FTP",
     }
 }

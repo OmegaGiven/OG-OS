@@ -9,6 +9,8 @@ use crate::details::{self, Details};
 use crate::devices::{self, Drive};
 use crate::filetype::Kind;
 use crate::inspector::{self, Inspector};
+use crate::net::{self as netb, Conn, Discovered, LanEvent};
+use crate::netui;
 use crate::ops::{self, JobControl, JobEvent, JobId, JobKind, JobSpec, Resolution, UndoOp};
 use crate::sidebar::{self, Sidebar, Target};
 use crate::tabs::{self, Tabs};
@@ -95,6 +97,12 @@ enum Dialog {
         dst: PathBuf,
         all: bool,
     },
+    Connect(Box<netui::Form>),
+    NetPassword {
+        conn: Conn,
+        pw: String,
+        remember: bool,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -119,6 +127,11 @@ pub enum MenuAction {
     MakePdf,
     Compress,
     DiskUsage,
+    NetConnect,
+    NetDisconnect,
+    NetEdit,
+    NetRemove,
+    NetCopyUrl,
 }
 
 pub struct App {
@@ -152,6 +165,12 @@ pub struct App {
     hover_pane: Option<PaneKind>,
     focus_pane: PaneKind,
     fullscreen: bool,
+    net_saved: Vec<Conn>,
+    net_mounted: Vec<(String, PathBuf)>,
+    net_tailnet: Vec<Discovered>,
+    net_lan: Vec<Discovered>,
+    /// Err = rclone/fuse missing (shown in the connect dialog)
+    net_backend: Result<(), String>,
 }
 
 #[derive(Debug, Clone)]
@@ -192,6 +211,19 @@ pub enum Message {
     MouseUp,
     /// the suite config changed (og-suite builds): re-read the palette
     ThemeChanged,
+    NetLoaded(Vec<Conn>, Result<(), String>),
+    NetMountedNow(Vec<(String, PathBuf)>),
+    NetTailnet(Result<Vec<Discovered>, String>),
+    NetLan(LanEvent),
+    NetRefresh,
+    NetNeedPassword(Conn, bool, bool),
+    NetMountDone(Conn, Result<PathBuf, String>, bool),
+    NetUnmountDone(Conn, Result<(), String>, bool),
+    ConnForm(netui::FormMsg),
+    ConnTest,
+    ConnTested(Result<String, String>),
+    ConnSave,
+    ConnSaved(Result<Vec<Conn>, String>, Vec<String>, Option<String>, bool),
     /// a key without Ctrl: goes to the focused pane (viewer first, then files)
     RawKey(Key, Modifiers),
     /// pointer entered (true) / left (false) a pane
@@ -261,6 +293,11 @@ impl App {
             hover_pane: None,
             focus_pane: PaneKind::Files,
             fullscreen: false,
+            net_saved: Vec::new(),
+            net_mounted: Vec::new(),
+            net_tailnet: Vec::new(),
+            net_lan: Vec::new(),
+            net_backend: Ok(()),
         };
         // og-files [--view tree|list|grid] [--search TEXT] [--focus] [--usage DIR] [PATH]
         // a folder PATH opens in the files pane, a file PATH in a tab
@@ -307,6 +344,7 @@ impl App {
         if let Ok(show) = std::env::var("OGX_SHOW") {
             let p = crate::config::home().join("Documents");
             let t = Target {
+                net: None,
                 items: vec![(p.clone(), Kind::Folder)],
                 dir: crate::config::home(),
                 drive: None,
@@ -334,6 +372,7 @@ impl App {
                         all: false,
                     })
                 }
+                "connect" => app.dialog = Some(Dialog::Connect(Box::new(netui::Form::new()))),
                 "close" => {
                     app.dialog = Some(Dialog::CloseTab {
                         id: 0,
@@ -348,6 +387,15 @@ impl App {
             details::load().map(Message::Details),
             Task::perform(devices::list(), Message::Drives),
             crate::extdnd::connect().map(Message::DndReady),
+            Task::perform(
+                async {
+                    tokio::task::spawn_blocking(|| (netb::load_saved(), netb::backend_available()))
+                        .await
+                        .unwrap_or_else(|_| (Vec::new(), Err("failed".into())))
+                },
+                |(c, b)| Message::NetLoaded(c, b),
+            ),
+            Task::perform(netb::discover_tailnet(), Message::NetTailnet),
             Task::batch(tasks),
         ]);
         (app, boot)
@@ -373,6 +421,48 @@ impl App {
         };
         let (task, ev) = self.tabs.open(path, kind, pin);
         Task::batch([unfocus, task.map(Message::Tabs), self.on_tabs_event(ev)])
+    }
+
+    fn push_network(&mut self) {
+        let mut found = self.net_tailnet.clone();
+        found.extend(self.net_lan.iter().cloned());
+        self.sidebar
+            .set_network(self.net_saved.clone(), self.net_mounted.clone(), found);
+    }
+
+    fn refresh_mounted() -> Task<Message> {
+        Task::perform(
+            async {
+                tokio::task::spawn_blocking(netb::mounted)
+                    .await
+                    .unwrap_or_default()
+            },
+            Message::NetMountedNow,
+        )
+    }
+
+    fn is_mounted(&self, c: &Conn) -> bool {
+        self.net_mounted.iter().any(|(id, _)| *id == c.id)
+    }
+
+    /// Mount `c`; asks for a password first if one is needed and none is
+    /// remembered. `interactive` = show the folder afterwards.
+    fn start_mount(&mut self, c: Conn, interactive: bool) -> Task<Message> {
+        if let Err(e) = &self.net_backend {
+            self.details.record(e.clone());
+            return Task::none();
+        }
+        if c.auth == netb::Auth::Password {
+            let c2 = c.clone();
+            return Task::perform(netb::has_saved_password(c), move |has| {
+                Message::NetNeedPassword(c2.clone(), !has, interactive)
+            });
+        }
+        self.details.record(format!("Connecting to {}…", c.name));
+        let c2 = c.clone();
+        Task::perform(netb::mount(c, None, false), move |r| {
+            Message::NetMountDone(c2.clone(), r, interactive)
+        })
     }
 
     fn open_disk_usage(&mut self, root: PathBuf) -> Task<Message> {
@@ -747,6 +837,43 @@ impl App {
                 self.dialog = Some(Dialog::ConfirmEmptyTrash);
                 Task::none()
             }
+            MenuAction::NetConnect
+            | MenuAction::NetDisconnect
+            | MenuAction::NetEdit
+            | MenuAction::NetRemove
+            | MenuAction::NetCopyUrl => {
+                let Some(c) = target.and_then(|t| t.net) else {
+                    return Task::none();
+                };
+                match a {
+                    MenuAction::NetConnect => self.start_mount(c, true),
+                    MenuAction::NetDisconnect => {
+                        let c2 = c.clone();
+                        Task::perform(netb::unmount(c), move |r| {
+                            Message::NetUnmountDone(c2.clone(), r, false)
+                        })
+                    }
+                    MenuAction::NetEdit => {
+                        let id = c.id.clone();
+                        self.dialog = Some(Dialog::Connect(Box::new(netui::Form::from_conn(
+                            &c,
+                            Some(id),
+                        ))));
+                        Task::none()
+                    }
+                    MenuAction::NetRemove => {
+                        if self.is_mounted(&c) {
+                            let c2 = c.clone();
+                            Task::perform(netb::unmount(c), move |r| {
+                                Message::NetUnmountDone(c2.clone(), r, true)
+                            })
+                        } else {
+                            self.update_inner(Message::NetUnmountDone(c, Ok(()), true))
+                        }
+                    }
+                    _ => iced::clipboard::write(netb::to_url(&c)).map(|_: ()| Message::Copied),
+                }
+            }
             MenuAction::DiskUsage => {
                 let root = match items.as_slice() {
                     [p] if p.is_dir() => p.clone(),
@@ -955,6 +1082,18 @@ impl App {
                 None => Task::none(),
             },
             Dialog::Conflict { .. } => Task::none(),
+            Dialog::Connect(f) => {
+                // Enter in the form = Connect / Save
+                self.dialog = Some(Dialog::Connect(f));
+                self.update_inner(Message::ConnSave)
+            }
+            Dialog::NetPassword { conn, pw, remember } => {
+                self.details.record(format!("Connecting to {}…", conn.name));
+                let c2 = conn.clone();
+                Task::perform(netb::mount(conn, Some(pw), remember), move |r| {
+                    Message::NetMountDone(c2.clone(), r, true)
+                })
+            }
         }
     }
 
@@ -1010,6 +1149,20 @@ impl App {
                 )
             }
             sidebar::Event::DiskUsage(root) => self.open_disk_usage(root),
+            sidebar::Event::Net(act) => match act {
+                crate::tree::NetAct::ConnectNew => {
+                    self.dialog = Some(Dialog::Connect(Box::new(netui::Form::new())));
+                    text_input::focus(text_input::Id::new(netui::URL_ID))
+                }
+                crate::tree::NetAct::Discovered(d) => {
+                    self.dialog = Some(Dialog::Connect(Box::new(netui::Form::from_conn(
+                        &d.to_conn(),
+                        None,
+                    ))));
+                    Task::none()
+                }
+                crate::tree::NetAct::Mount(c) => self.start_mount(c, true),
+            },
             sidebar::Event::EmptyTrash => {
                 self.dialog = Some(Dialog::ConfirmEmptyTrash);
                 Task::none()
@@ -1184,6 +1337,7 @@ impl App {
                 self.menu = Some((
                     self.cursor,
                     Target {
+                        net: None,
                         items: vec![],
                         dir,
                         drive: None,
@@ -1200,13 +1354,16 @@ impl App {
                         | Dialog::NewFolder { name, .. }
                         | Dialog::NewFile { name, .. },
                     ) => *name = s,
+                    Some(Dialog::NetPassword { pw, .. }) => *pw = s,
                     _ => {}
                 }
                 Task::none()
             }
             Message::DialogFlag(b) => {
-                if let Some(Dialog::Conflict { all, .. }) = &mut self.dialog {
-                    *all = b;
+                match &mut self.dialog {
+                    Some(Dialog::Conflict { all, .. }) => *all = b,
+                    Some(Dialog::NetPassword { remember, .. }) => *remember = b,
+                    _ => {}
                 }
                 Task::none()
             }
@@ -1317,6 +1474,218 @@ impl App {
                 }
                 Task::none()
             }
+            Message::NetLoaded(conns, backend) => {
+                self.net_saved = conns;
+                self.net_backend = backend;
+                self.push_network();
+                // connect the ones marked "connect when og-files starts"
+                let auto: Vec<Conn> = self
+                    .net_saved
+                    .iter()
+                    .filter(|c| c.auto_mount)
+                    .cloned()
+                    .collect();
+                let mut tasks = vec![Self::refresh_mounted()];
+                if self.net_backend.is_ok() {
+                    for c in auto {
+                        tasks.push(self.start_mount(c, false));
+                    }
+                }
+                Task::batch(tasks)
+            }
+            Message::NetMountedNow(m) => {
+                self.net_mounted = m;
+                self.push_network();
+                Task::none()
+            }
+            Message::NetTailnet(r) => {
+                if let Ok(peers) = r {
+                    self.net_tailnet = peers;
+                    self.push_network();
+                }
+                Task::none()
+            }
+            Message::NetLan(ev) => {
+                match ev {
+                    LanEvent::Found(d) => {
+                        if !self
+                            .net_lan
+                            .iter()
+                            .any(|x| x.name == d.name && x.proto == d.proto)
+                        {
+                            self.net_lan.push(d);
+                        }
+                    }
+                    LanEvent::Lost { name, proto } => self
+                        .net_lan
+                        .retain(|x| !(x.name == name && x.proto == proto)),
+                }
+                self.push_network();
+                Task::none()
+            }
+            Message::NetRefresh => Task::batch([
+                Task::perform(netb::discover_tailnet(), Message::NetTailnet),
+                Self::refresh_mounted(),
+            ]),
+            Message::NetNeedPassword(c, need, interactive) => {
+                if need {
+                    self.dialog = Some(Dialog::NetPassword {
+                        conn: c,
+                        pw: String::new(),
+                        remember: true,
+                    });
+                    text_input::focus(text_input::Id::new(DIALOG_INPUT))
+                } else {
+                    self.details.record(format!("Connecting to {}…", c.name));
+                    let c2 = c.clone();
+                    Task::perform(netb::mount(c, None, false), move |r| {
+                        Message::NetMountDone(c2.clone(), r, interactive)
+                    })
+                }
+            }
+            Message::NetMountDone(c, r, interactive) => {
+                let follow = match r {
+                    Ok(p) => {
+                        self.details.record_for(
+                            format!("Connected {} at {}", c.name, netui::short(&p)),
+                            Some(&p),
+                        );
+                        self.net_mounted.retain(|(id, _)| *id != c.id);
+                        self.net_mounted.push((c.id.clone(), p.clone()));
+                        self.push_network();
+                        if interactive {
+                            self.sidebar.reveal(p).map(Message::Sidebar)
+                        } else {
+                            Task::none()
+                        }
+                    }
+                    Err(e) => {
+                        self.details
+                            .record(format!("Couldn't connect {}: {e}", c.name));
+                        Task::none()
+                    }
+                };
+                Task::batch([follow, Self::refresh_mounted()])
+            }
+            Message::NetUnmountDone(c, r, then_remove) => {
+                match r {
+                    Ok(()) => {
+                        self.details.record(format!("Disconnected {}", c.name));
+                        self.net_mounted.retain(|(id, _)| *id != c.id);
+                    }
+                    Err(e) => self
+                        .details
+                        .record(format!("Couldn't disconnect {}: {e}", c.name)),
+                }
+                let mut tasks = vec![Self::refresh_mounted()];
+                if then_remove {
+                    let rest: Vec<Conn> = self
+                        .net_saved
+                        .iter()
+                        .filter(|x| x.id != c.id)
+                        .cloned()
+                        .collect();
+                    let prev: Vec<String> = self.net_saved.iter().map(|x| x.id.clone()).collect();
+                    tasks.push(Task::perform(
+                        async move {
+                            tokio::task::spawn_blocking(move || netb::save_all(&rest))
+                                .await
+                                .map_err(|e| e.to_string())?
+                        },
+                        move |r| Message::ConnSaved(r, prev.clone(), None, false),
+                    ));
+                }
+                self.push_network();
+                Task::batch(tasks)
+            }
+            Message::ConnForm(m) => {
+                if let Some(Dialog::Connect(f)) = &mut self.dialog {
+                    f.update(m);
+                }
+                Task::none()
+            }
+            Message::ConnTest => {
+                let Some(Dialog::Connect(f)) = &mut self.dialog else {
+                    return Task::none();
+                };
+                match f.conn() {
+                    Ok(c) => {
+                        f.busy = true;
+                        Task::perform(netb::test(c, f.password()), Message::ConnTested)
+                    }
+                    Err(e) => {
+                        f.status = Some(Err(e));
+                        Task::none()
+                    }
+                }
+            }
+            Message::ConnTested(r) => {
+                if let Some(Dialog::Connect(f)) = &mut self.dialog {
+                    f.busy = false;
+                    f.status = Some(r);
+                }
+                Task::none()
+            }
+            Message::ConnSave => {
+                let Some(Dialog::Connect(f)) = &mut self.dialog else {
+                    return Task::none();
+                };
+                let c = match f.conn() {
+                    Ok(c) => c,
+                    Err(e) => {
+                        f.status = Some(Err(e));
+                        return Task::none();
+                    }
+                };
+                let (pw, remember) = (f.password(), f.remember);
+                let mut all = self.net_saved.clone();
+                match all.iter_mut().find(|x| !c.id.is_empty() && x.id == c.id) {
+                    Some(slot) => *slot = c,
+                    None => all.push(c),
+                }
+                let prev: Vec<String> = self.net_saved.iter().map(|x| x.id.clone()).collect();
+                self.dialog = None;
+                Task::perform(
+                    async move {
+                        tokio::task::spawn_blocking(move || netb::save_all(&all))
+                            .await
+                            .map_err(|e| e.to_string())?
+                    },
+                    move |r| Message::ConnSaved(r, prev.clone(), pw.clone(), remember),
+                )
+            }
+            Message::ConnSaved(r, prev, pw, remember) => match r {
+                Ok(conns) => {
+                    self.net_saved = conns;
+                    self.push_network();
+                    // a brand-new connection connects right away
+                    match self
+                        .net_saved
+                        .iter()
+                        .find(|c| !prev.contains(&c.id))
+                        .cloned()
+                    {
+                        Some(new) if pw.is_some() || new.auth != netb::Auth::Password => {
+                            if let Err(e) = &self.net_backend {
+                                self.details.record(e.clone());
+                                return Task::none();
+                            }
+                            self.details.record(format!("Connecting to {}…", new.name));
+                            let c2 = new.clone();
+                            Task::perform(netb::mount(new, pw, remember), move |r| {
+                                Message::NetMountDone(c2.clone(), r, true)
+                            })
+                        }
+                        Some(new) => self.start_mount(new, true),
+                        None => Task::none(),
+                    }
+                }
+                Err(e) => {
+                    self.details
+                        .record(format!("Couldn't save connections: {e}"));
+                    Task::none()
+                }
+            },
             Message::ThemeChanged => {
                 theme::reload();
                 Task::none()
@@ -1349,6 +1718,9 @@ impl App {
             }),
             Subscription::run(drive_events),
             Subscription::run(theme_events),
+            Subscription::run(lan_events),
+            // tailnet peers come and go; mounts can drop (network loss)
+            iced::time::every(std::time::Duration::from_secs(60)).map(|_| Message::NetRefresh),
         ])
     }
 
@@ -1550,6 +1922,16 @@ impl App {
             if t.items.iter().all(|(_, k)| *k == Kind::Image) {
                 entries.push(("Combine into PDF", MenuAction::MakePdf, true));
             }
+            if let Some(c) = &t.net {
+                if self.is_mounted(c) {
+                    entries.push(("Disconnect", MenuAction::NetDisconnect, true));
+                } else {
+                    entries.push(("Connect", MenuAction::NetConnect, true));
+                }
+                entries.push(("Edit connection…", MenuAction::NetEdit, true));
+                entries.push(("Copy address", MenuAction::NetCopyUrl, true));
+                entries.push(("Remove connection", MenuAction::NetRemove, true));
+            }
             if let Some(d) = &t.drive {
                 if d.mount_point.is_none() {
                     entries.push(("Mount", MenuAction::Mount, !d.encrypted));
@@ -1666,6 +2048,39 @@ impl App {
                 "Delete",
                 true,
             ),
+            Dialog::Connect(f) => f.view(
+                self.net_backend.as_ref().err().map(String::as_str),
+                Message::ConnForm,
+                |a| match a {
+                    netui::Action::Test => Message::ConnTest,
+                    netui::Action::Save => Message::ConnSave,
+                    netui::Action::Cancel => Message::DialogCancel,
+                },
+            ),
+            Dialog::NetPassword { conn, pw, remember } => column![
+                text(format!("Password for {}", conn.name)).size(16),
+                text(netb::to_url(conn)).size(12).color(theme::MUTED),
+                text_input("password", pw)
+                    .id(text_input::Id::new(DIALOG_INPUT))
+                    .secure(true)
+                    .on_input(Message::DialogInput)
+                    .on_submit(Message::DialogOk)
+                    .size(14),
+                checkbox("Remember in the keyring", *remember)
+                    .on_toggle(Message::DialogFlag)
+                    .size(15)
+                    .text_size(13),
+                row![
+                    Space::with_width(Length::Fill),
+                    button(text("Cancel"))
+                        .on_press(Message::DialogCancel)
+                        .style(button::secondary),
+                    button(text("Connect")).on_press(Message::DialogOk),
+                ]
+                .spacing(8),
+            ]
+            .spacing(12)
+            .into(),
             Dialog::ConfirmEmptyTrash => confirm(
                 "Empty the trash?".into(),
                 "Everything in every trash is deleted for good.".into(),
@@ -1715,8 +2130,15 @@ impl App {
             .spacing(10)
             .into(),
         };
+        let tall = matches!(d, Dialog::Connect(_));
+        let body: Element<'a, Message> = if tall {
+            iced::widget::scrollable(body).height(Length::Shrink).into()
+        } else {
+            body
+        };
         let card = container(body)
-            .width(440)
+            .width(if tall { 520 } else { 440 })
+            .max_height(760)
             .padding(18)
             .style(|t: &Theme| container::Style {
                 background: Some(t.extended_palette().background.base.color.into()),
@@ -1739,6 +2161,12 @@ impl App {
             });
         stack![opaque(backdrop), center(opaque(card))].into()
     }
+}
+
+/// Servers and shares advertised on the LAN (Avahi).
+fn lan_events() -> impl iced::futures::Stream<Item = Message> {
+    use iced::futures::StreamExt;
+    netb::discover_lan().map(Message::NetLan)
 }
 
 /// Suite config changes → theme reload (never fires in standalone builds).

@@ -39,6 +39,8 @@ pub struct Target {
     pub drive: Option<Drive>,
     pub in_trash: bool,
     pub bookmarked: bool,
+    /// a saved network connection (row of it, or its mounted folder)
+    pub net: Option<crate::net::Conn>,
 }
 
 /// Keyboard actions the app forwards when no text field has focus.
@@ -107,6 +109,8 @@ pub enum Event {
     ToggleFocus,
     /// open the disk-usage analyzer for this folder
     DiskUsage(PathBuf),
+    /// a network row was clicked
+    Net(tree::NetAct),
 }
 
 impl Sidebar {
@@ -170,6 +174,15 @@ impl Sidebar {
             self.mode = Mode::List;
         }
         self.browse.start_path_edit().map(Msg::Browse)
+    }
+
+    pub fn set_network(
+        &mut self,
+        saved: Vec<crate::net::Conn>,
+        mounted: Vec<(String, PathBuf)>,
+        found: Vec<crate::net::Discovered>,
+    ) {
+        self.tree.set_network(saved, mounted, found);
     }
 
     pub fn set_drives(&mut self, d: Vec<Drive>) {
@@ -283,6 +296,9 @@ impl Sidebar {
 
     /// Activate an item: folders enter/expand, files open.
     fn activate(&mut self, p: PathBuf, kind: Kind, pin: bool) -> (Task<Msg>, Option<Event>) {
+        if let Some(act) = self.tree.net_action(&p) {
+            return (Task::none(), Some(Event::Net(act)));
+        }
         if p.as_os_str() == TRASH {
             if self.mode == Mode::Tree {
                 self.mode = Mode::List;
@@ -334,6 +350,11 @@ impl Sidebar {
 
     fn item(&mut self, a: ItemAct) -> (Task<Msg>, Option<Event>) {
         match a {
+            ItemAct::Press(p, _) if self.tree.net_action(&p).is_some() => {
+                // network rows act on a single click
+                self.sel.only(p.clone());
+                (Task::none(), self.tree.net_action(&p).map(Event::Net))
+            }
             ItemAct::Press(p, kind) => {
                 let now = Instant::now();
                 let double = self
@@ -433,7 +454,17 @@ impl Sidebar {
             _ => None,
         };
         let trash_clicked = self.sel.items.iter().any(|p| p.as_os_str() == TRASH);
+        let net = match items.as_slice() {
+            [(p, _)] => self.tree.conn_for(p),
+            _ => None,
+        };
+        // pseudo rows (unmounted connections, discoveries) have no file actions
+        let items: Vec<(PathBuf, Kind)> = items
+            .into_iter()
+            .filter(|(p, _)| self.tree.net_action(p).is_none())
+            .collect();
         Event::Menu(Target {
+            net,
             bookmarked: items.len() == 1 && self.tree.is_bookmarked(&items[0].0),
             dir: self.current_dir(),
             in_trash: (self.browse.is_trash() && self.mode != Mode::Tree) || trash_clicked,
