@@ -137,6 +137,8 @@ smartmontools
 zram-generator
 flatpak
 mpv
+rclone
+fuse3
 
 # --- Printing ---
 cups
