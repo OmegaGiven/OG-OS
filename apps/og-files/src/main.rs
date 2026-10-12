@@ -11,6 +11,7 @@ mod extdnd;
 mod filetype;
 mod fsops;
 mod inspector;
+mod net;
 mod ops;
 mod search;
 mod sidebar;
