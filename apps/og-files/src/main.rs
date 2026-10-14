@@ -3,7 +3,9 @@
 //! See SPEC.md for the full design and roadmap.
 
 mod app;
+mod archops;
 mod browse;
+mod cli;
 mod config;
 mod details;
 mod devices;
@@ -13,10 +15,12 @@ mod fsops;
 mod inspector;
 mod net;
 mod netui;
+mod openwith;
 mod ops;
 mod search;
 mod sidebar;
 mod tabs;
+mod terminal;
 mod theme;
 mod thumbs;
 mod tree;
@@ -24,6 +28,17 @@ mod viewers;
 mod widgets;
 
 fn main() -> iced::Result {
+    // subcommands (extract, compress, list, open, open-with, apps, --help)
+    // run without a window
+    let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    match cli::parse(&args) {
+        Ok(Some(cmd)) => std::process::exit(cli::run(cmd)),
+        Ok(None) => {}
+        Err(e) => {
+            eprintln!("og-files: {e}");
+            std::process::exit(2);
+        }
+    }
     config::migrate_old_dirs();
     iced::application("OG Files", app::App::update, app::App::view)
         .theme(app::App::theme)

@@ -19,6 +19,7 @@ cargo run -p og-files -- ~/Documents               # folder: shown in the files 
 cargo run -p og-files -- notes.md                  # file: opened in a tab
 cargo run -p og-files -- --view grid --focus ~/Pictures
 cargo run -p og-files -- --search invoice          # start with a search running
+og-files extract backup.tar.zst ~/restore          # no window: see §6c
 ```
 
 ---
@@ -153,7 +154,11 @@ src/
     placeholder.rs  stand-in that names each planned backend
   fsops.rs          all filesystem access, async, never called from view()
   filetype.rs       path → Kind (viewer family)
-  config.rs         XDG config/cache, bookmarks.json
+  openwith.rs       desktop entries, MIME (globs2 + magic), mimeapps.list, Exec codes, launch
+  terminal.rs       terminal lookup + per-terminal working-dir / exec flags
+  archops.rs        archive extract / compress as jobs (Details list, cancel, undo)
+  cli.rs            subcommands that run without a window (§6c)
+  config.rs         XDG config/cache, bookmarks.json, settings.json
   theme.rs          standalone palette
 ```
 
@@ -214,7 +219,7 @@ can't reasonably be pure Rust:
 | Audio | mp3, flac, ogg, opus, wav, m4a/aac | waveform, play/seek, tags | trim, normalize, edit tags, export wav/flac | `symphonia` (decode), `cpal` (output), `lofty` (tags), `hound` (wav write) | 2 |
 | Video | mp4, mkv, webm, mov, avi, … | ✅ embedded **libmpv** (loaded at runtime): GPU decoding (`hwdec=auto-safe`, Vulkan/VAAPI), subtitles, track menus, A/V sync, speed with pitch correction, chapters, A-B loop, folder playlist, resume, stats, mpv keyboard shortcuts, fullscreen. No letterbox: the picture is drawn at its fitted size on the app background with an optional edge line | ✅ trim (stream copy) + frame snapshot, always **new files** | libmpv SW render → one wgpu texture per player; FFmpeg (ffmpeg-next) fallback, thumbnails and trim | ✅ (zero-copy GPU display: later) |
 | 3D model | glTF/glb, obj, stl, ply | orbit/zoom, wireframe, normals, bounding-box size | none (view only; maybe re-export stl→glb) | `gltf`, `tobj`, `stl_io`, iced `shader` widget on wgpu | 3 |
-| Archive | zip, tar(.gz/.xz/.zst), 7z | browse as a folder | extract / compress via jobs | `zip`, `tar`, `flate2`, `xz2`, `zstd`, `sevenz-rust` | 2 |
+| Archive | zip, tar(.gz/.xz/.zst/.bz2), 7z, single .gz/.xz/.zst/.bz2 | ✅ browse as a folder | ✅ extract here / to folder, compress to zip · tar.gz · tar.zst · tar.xz · 7z, as jobs (§6b) | `zip`, `tar`, `flate2`, `xz2`, `zstd`, `bzip2`, `sevenz-rust2` | ✅ |
 | Binary | anything else | hex view (virtualized) | none | own | 2 |
 
 **Renderer:** og-files uses iced's default features (wgpu first, with
@@ -336,6 +341,7 @@ Test hooks:
   - F2 rename, Del trash, Shift+Del delete permanently
   - Ctrl+C / X / V clipboard, Ctrl+Z undo, Ctrl+A select all
   - Ctrl+Shift+N new folder, Ctrl+L editable path, Ctrl+F search
+  - Ctrl+Alt+T open a terminal in the current (or selected) folder
 - **Drag and drop inside the app:** drop on a folder, drive or the Trash.
   Drop moves; Ctrl copies.
 
@@ -350,7 +356,9 @@ Test hooks:
 | Search | instant pass + background walk, append-only, 180 ms pause while typing, optional search inside text files | ✅ (fuzzy: 2) |
 | Large folders | tree, list, grid and search results are virtualized | ✅ |
 | Drag and drop with other apps | `extdnd.rs` + fixed `og-wayland` (og-suite builds) | see §7 |
-| Open with | port og-files `desktop.rs` registry | 2 |
+| Open with | `openwith.rs`: desktop files from $XDG_DATA_HOME, $XDG_DATA_DIRS and flatpak exports (Hidden / NoDisplay / OnlyShowIn / NotShowIn / TryExec honoured); MIME from shared-mime-info `globs2` (+ `subclasses`, `aliases`; `mime_guess` when absent) then magic bytes; defaults from the mimeapps.list chain ($XDG_CONFIG_HOME, desktop-specific `$desktop-mimeapps.list`, $XDG_CONFIG_DIRS, data dirs) then Added Associations, mimeinfo.cache and parent types (text/* → text/plain). Exec field codes (%f %F %u %U %i %c %k %%, deprecated ones dropped), spec quoting, Terminal=true runs in the terminal. Apps start detached (own session, no stdio, reaped). Context menu: **Open in ‹default app›**, **Open with…** dialog (default marked, recommended, *Other app…* searchable list of every app, "Always open .ext files with this app" writes `[Default Applications]` in $XDG_CONFIG_HOME/mimeapps.list keeping every other line). Several files: %F/%U apps get them all at once, %f/%u apps one launch per file | ✅ |
+| Open terminal here | context menu on a folder / empty space, **Ctrl+Alt+T** (current folder, or the selected folder). Terminal: `terminal` in `$XDG_CONFIG_HOME/og-files/settings.json`, else $TERMINAL, x-terminal-emulator, then alacritty, foot, kitty, wezterm, gnome-terminal, konsole, xfce4-terminal, xterm; each gets its own working-dir flag plus the process cwd | ✅ |
+| Archives | §6b | ✅ |
 | Bookmarks | add/remove from the context menu, `bookmarks.json` | ✅ |
 | Activity log | persisted to `$XDG_STATE_HOME/og-files/activity.jsonl`, "only this file" filter, Hide (remembered, for demos) and Clear (press twice) | ✅ |
 | Icons | bundled Bootstrap Icons font, tinted per file type | ✅ |
@@ -387,6 +395,43 @@ mounts it and opens it.
   refreshes the mount state and the tailnet.
 - Runtime deps: `rclone`, `fuse3`. Without them the form shows an install
   hint.
+
+## 6b. Archives in the files pane
+
+Context menu on archive files (anything the archive viewer reads):
+- **Extract here** (several archives at once): an archive with one
+  top-level item (the usual `project-1.2/`, or a lone file) puts it
+  straight into the folder; anything else goes into a new folder named
+  after the archive. Taken names become `name (2)`. Extraction runs in a
+  hidden staging folder that is removed on failure or cancel.
+- **Extract to folder…**: asks for the folder name (default: the archive
+  name without its extension).
+- **Compress…** (any selection): name (default: the item's name, or
+  "Archive") and format: **.zip, .tar.gz, .tar.zst, .tar.xz, .7z**.
+
+All of them are jobs in the Details list (progress, Cancel). Undo
+(Ctrl+Z) moves the output to the Trash. An encrypted zip or 7z asks for the
+password and retries. Same in-process engines as the viewer (no external
+tools); zip-slip names and escaping symlinks are refused. 7z output stores
+files and folders only (symlinks are left out).
+
+## 6c. Command line
+
+Subcommands run without opening a window (detected in `main` before iced
+starts; the GUI flags `--view/--search/--focus/--usage` are unchanged):
+
+```bash
+og-files extract ARCHIVE [DEST] [--password PW]   # smart "extract here" into DEST (default .); prints the result path
+og-files compress OUT.{zip,tar.gz,tar.zst,tar.xz,7z} FILE...
+og-files list ARCHIVE [--password PW]             # entries with sizes
+og-files open FILE...                             # default apps
+og-files open-with APP_ID FILE...                 # e.g. org.gnome.Loupe, libreoffice-writer
+og-files apps FILE                                # MIME type + apps that open it, default marked *
+og-files --help
+```
+
+Big jobs print a percentage on stderr (when it is a terminal). Errors exit
+with 1, bad arguments with 2. `compress` never overwrites an existing file.
 
 ## 7. Standalone vs OG-OS suite
 
@@ -455,7 +500,7 @@ entered, saved over, discarded, exported, errors.
 - [x] focus mode (files pane ~85%, inspector hidden) and Ctrl+B hide
 - [x] two-pass live search with append-only background results
 - [x] tabs with stable ids, dedupe, dirty guard
-- [x] CLI: `og-files [--view tree|list|grid] [--search TEXT] [--focus] [PATH]`
+- [x] CLI: `og-files [--view tree|list|grid] [--search TEXT] [--focus] [PATH]`; subcommands extract / compress / list / open / open-with / apps (§6c)
 - [x] viewers: text (read-only → edit mode, save over, discard), image, CSV/TSV
 - [x] PDF: hayro viewer + thumbnails; edit pages (rotate, delete, reorder, insert, duplicate, blank); export (extract, split, save copy)
 - [x] PDF toolkit: all Stirling core tools, 54 in a Tools panel (native + optional Stirling server), unlock screen, convert-to-PDF from other viewers; 62 tests
@@ -479,7 +524,9 @@ entered, saved over, discarded, exported, errors.
 - [ ] video playback (GStreamer to wgpu)
 - [ ] PDF: tool recipes/pipelines, keep outlines through rebuilds, encrypted-save option; markdown preview, docx text
 - [ ] xlsx/ods read, table cell editing, csv write
-- [ ] archives as folders, hex viewer, syntax highlighting
+- [x] archives as folders; extract / compress from the context menu (§6b)
+- [x] open with / default apps / open terminal here (§6)
+- [ ] hex viewer, syntax highlighting
 - [x] network "connect to server" (§6a)
 
 **Phase 3: basic editing and history**

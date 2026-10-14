@@ -206,28 +206,7 @@ fn list(path: &Path, kind: Kind) -> Result<Vec<Entry>, String> {
                 });
             }
         }
-        Kind::SevenZ => {
-            let a = sevenz_rust2::Archive::open(path).map_err(|e| {
-                let s = e.to_string();
-                if s.to_ascii_lowercase().contains("password") {
-                    "encrypted 7z archives are not supported".to_string()
-                } else {
-                    s
-                }
-            })?;
-            for f in &a.files {
-                out.push(Entry {
-                    path: norm(&f.name),
-                    is_dir: f.is_directory,
-                    size: (!f.is_directory).then_some(f.size),
-                    mtime: f
-                        .has_last_modified_date
-                        .then(|| SystemTime::from(f.last_modified_date)),
-                    encrypted: false,
-                    symlink: false,
-                });
-            }
-        }
+        Kind::SevenZ => return list_7z(path, sevenz_rust2::Password::empty()),
         Kind::Single(_) => out.push(Entry {
             path: stem(path),
             is_dir: false,
@@ -239,6 +218,24 @@ fn list(path: &Path, kind: Kind) -> Result<Vec<Entry>, String> {
     }
     out.retain(|e| !e.path.is_empty());
     Ok(out)
+}
+
+fn list_7z(path: &Path, pw: sevenz_rust2::Password) -> Result<Vec<Entry>, String> {
+    let a = sevenz_rust2::Archive::open_with_password(path, &pw).map_err(sz_err)?;
+    Ok(a.files
+        .iter()
+        .map(|f| Entry {
+            path: norm(&f.name),
+            is_dir: f.is_directory,
+            size: (!f.is_directory).then_some(f.size),
+            mtime: f
+                .has_last_modified_date
+                .then(|| SystemTime::from(f.last_modified_date)),
+            encrypted: false,
+            symlink: false,
+        })
+        .filter(|e| !e.path.is_empty())
+        .collect())
 }
 
 // --------------------------------------------------------------- extraction
@@ -435,44 +432,14 @@ fn extract(
                 }
             }
         }
-        Kind::Tar(comp) => {
-            let mut a = tar::Archive::new(decoder(comp, file)?);
-            for e in a.entries().map_err(|e| e.to_string())? {
-                cx.check()?;
-                let mut e = e.map_err(|e| e.to_string())?;
-                let raw = String::from_utf8_lossy(&e.path_bytes()).into_owned();
-                if !want(&norm(&raw)) {
-                    continue;
-                }
-                let t = e.header().entry_type();
-                let link = || -> String {
-                    e.link_name_bytes()
-                        .map(|b| String::from_utf8_lossy(&b).into_owned())
-                        .unwrap_or_default()
-                };
-                if t.is_dir() {
-                    cx.dir(&raw)?;
-                } else if t.is_symlink() {
-                    let l = link();
-                    cx.symlink(&raw, &l)?;
-                } else if t.is_hard_link() {
-                    let l = link();
-                    cx.hardlink(&raw, &l)?;
-                } else if t.is_file() || t.is_contiguous() || t.is_gnu_sparse() {
-                    let mode = e.header().mode().ok();
-                    cx.file(&raw, &mut e, mode)?;
-                } else {
-                    cx.report.skipped.push(format!("{raw} (special file)"));
-                }
-            }
-        }
+        Kind::Tar(comp) => extract_tar(decoder(comp, file)?, want, &mut cx)?,
         Kind::SevenZ => {
             drop(file);
             let pw = match password.filter(|p| !p.is_empty()) {
                 Some(p) => sevenz_rust2::Password::from(p),
                 None => sevenz_rust2::Password::empty(),
             };
-            let mut ar = sevenz_rust2::ArchiveReader::open(path, pw).map_err(|e| e.to_string())?;
+            let mut ar = sevenz_rust2::ArchiveReader::open(path, pw).map_err(sz_err)?;
             let mut err: Option<String> = None;
             ar.for_each_entries(|entry, r| {
                 let step = (|| -> Result<(), String> {
@@ -495,7 +462,7 @@ fn extract(
                     }
                 }
             })
-            .map_err(|e| e.to_string())?;
+            .map_err(sz_err)?;
             if let Some(e) = err {
                 return Err(e);
             }
@@ -503,6 +470,49 @@ fn extract(
         Kind::Single(_) => return Err("single-file archive: use extract_single".into()),
     }
     Ok(cx.report)
+}
+
+/// Unpack a (decompressed) tar stream through `cx`.
+fn extract_tar(r: impl Read, want: &dyn Fn(&str) -> bool, cx: &mut Ctx) -> Result<(), String> {
+    let mut a = tar::Archive::new(r);
+    for e in a.entries().map_err(|e| e.to_string())? {
+        cx.check()?;
+        let mut e = e.map_err(|e| e.to_string())?;
+        let raw = String::from_utf8_lossy(&e.path_bytes()).into_owned();
+        if !want(&norm(&raw)) {
+            continue;
+        }
+        let t = e.header().entry_type();
+        let link = || -> String {
+            e.link_name_bytes()
+                .map(|b| String::from_utf8_lossy(&b).into_owned())
+                .unwrap_or_default()
+        };
+        if t.is_dir() {
+            cx.dir(&raw)?;
+        } else if t.is_symlink() {
+            let l = link();
+            cx.symlink(&raw, &l)?;
+        } else if t.is_hard_link() {
+            let l = link();
+            cx.hardlink(&raw, &l)?;
+        } else if t.is_file() || t.is_contiguous() || t.is_gnu_sparse() {
+            let mode = e.header().mode().ok();
+            cx.file(&raw, &mut e, mode)?;
+        } else {
+            cx.report.skipped.push(format!("{raw} (special file)"));
+        }
+    }
+    Ok(())
+}
+
+/// 7z errors in words (password problems mention "password").
+fn sz_err(e: sevenz_rust2::Error) -> String {
+    match e {
+        sevenz_rust2::Error::PasswordRequired => "encrypted archive: enter the password".into(),
+        sevenz_rust2::Error::MaybeBadPassword(_) => "wrong password (or damaged archive)".into(),
+        e => e.to_string(),
+    }
 }
 
 /// Decompress a single-file .gz/.xz/.zst/.bz2 to `out`.
@@ -550,19 +560,190 @@ fn cache_dir_for(archive: &Path) -> PathBuf {
 
 // ------------------------------------------------------------------ compress
 
-/// Create a zip (or .tar.gz if `dest` ends with .tar.gz/.tgz) from files
-/// and folders (recursive), for the context menu "Compress". Blocking.
-/// Paths inside the archive are relative to each source's parent folder.
+/// Formats "Compress" (context menu and `og-files compress`) can write.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Format {
+    Zip,
+    TarGz,
+    TarZst,
+    TarXz,
+    SevenZ,
+}
+
+impl Format {
+    pub const ALL: [Format; 5] = [
+        Format::Zip,
+        Format::TarGz,
+        Format::TarZst,
+        Format::TarXz,
+        Format::SevenZ,
+    ];
+
+    /// File-name suffix, with the dot.
+    pub fn ext(self) -> &'static str {
+        match self {
+            Format::Zip => ".zip",
+            Format::TarGz => ".tar.gz",
+            Format::TarZst => ".tar.zst",
+            Format::TarXz => ".tar.xz",
+            Format::SevenZ => ".7z",
+        }
+    }
+
+    /// From an output file name (`.tgz` / `.tzst` / `.txz` count too).
+    pub fn from_name(path: &Path) -> Option<Format> {
+        match kind_of(path)?.0 {
+            Kind::Zip => Some(Format::Zip),
+            Kind::Tar(Comp::Gz) => Some(Format::TarGz),
+            Kind::Tar(Comp::Zst) => Some(Format::TarZst),
+            Kind::Tar(Comp::Xz) => Some(Format::TarXz),
+            Kind::SevenZ => Some(Format::SevenZ),
+            _ => None,
+        }
+    }
+
+    /// `name` without this format's suffix (case-insensitive), if it has it.
+    pub fn strip(self, name: &str) -> Option<String> {
+        let ext = self.ext();
+        (name.len() > ext.len() && name.to_ascii_lowercase().ends_with(ext))
+            .then(|| name[..name.len() - ext.len()].to_string())
+    }
+}
+
+/// Create a zip (or .tar.gz…, by `dest`'s name) without progress.
+#[cfg(test)]
 pub fn compress(sources: &[PathBuf], dest: &Path) -> Result<(), String> {
-    let name = dest
-        .file_name()
-        .map(|n| n.to_string_lossy().to_ascii_lowercase())
-        .unwrap_or_default();
-    let r = if name.ends_with(".tar.gz") || name.ends_with(".tgz") {
-        compress_tgz(sources, dest)
-    } else {
-        compress_zip(sources, dest)
-    };
+    let f = Format::from_name(dest).unwrap_or(Format::Zip);
+    compress_with(sources, dest, f, &AtomicBool::new(false), &mut |_| {})
+}
+
+/// Bytes of the regular files under `sources` (symlinks not followed):
+/// the progress total of [`compress_with`].
+pub fn source_bytes(sources: &[PathBuf], cancel: &AtomicBool) -> u64 {
+    fn walk(p: &Path, cancel: &AtomicBool) -> u64 {
+        if cancel.load(Ordering::Relaxed) {
+            return 0;
+        }
+        match fs::symlink_metadata(p) {
+            Ok(m) if m.is_dir() => fs::read_dir(p)
+                .map(|rd| rd.flatten().map(|e| walk(&e.path(), cancel)).sum())
+                .unwrap_or(0),
+            Ok(m) if m.is_file() => m.len(),
+            _ => 0,
+        }
+    }
+    sources.iter().map(|s| walk(s, cancel)).sum()
+}
+
+/// Counts bytes read through it and stops with `Cancelled` when asked.
+struct Counting<'a, R> {
+    inner: R,
+    cancel: &'a AtomicBool,
+    progress: &'a mut dyn FnMut(u64),
+}
+
+impl<R: Read> Read for Counting<'_, R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if self.cancel.load(Ordering::Relaxed) {
+            return Err(io::Error::other(CANCELLED));
+        }
+        let n = self.inner.read(buf)?;
+        (self.progress)(n as u64);
+        Ok(n)
+    }
+}
+
+/// Progress + cancel shared by the compressors.
+struct Pack<'a> {
+    cancel: &'a AtomicBool,
+    progress: &'a mut dyn FnMut(u64),
+    /// the archive being written (never packed into itself)
+    skip: PathBuf,
+}
+
+impl Pack<'_> {
+    fn check(&self) -> Result<(), String> {
+        if self.cancel.load(Ordering::Relaxed) {
+            Err(CANCELLED.into())
+        } else {
+            Ok(())
+        }
+    }
+
+    fn reader<R: Read>(&mut self, inner: R) -> Counting<'_, R> {
+        Counting {
+            inner,
+            cancel: self.cancel,
+            progress: &mut *self.progress,
+        }
+    }
+
+    fn children(&self, dir: &Path) -> Result<Vec<(String, PathBuf)>, String> {
+        let mut v = sorted_children(dir)?;
+        v.retain(|(_, c)| !fs::canonicalize(c).is_ok_and(|c| c == self.skip));
+        Ok(v)
+    }
+}
+
+/// Pack files and folders (recursive) into `dest` as `format`, reporting
+/// bytes read through `progress`. Paths inside the archive are relative to
+/// each source's parent folder. A failed or cancelled run removes `dest`.
+/// Blocking. 7z stores regular files and folders only (symlinks and
+/// special files are left out).
+pub fn compress_with(
+    sources: &[PathBuf],
+    dest: &Path,
+    format: Format,
+    cancel: &AtomicBool,
+    progress: &mut dyn FnMut(u64),
+) -> Result<(), String> {
+    if sources.is_empty() {
+        return Err("nothing to compress".into());
+    }
+    let r = (|| {
+        let f = File::create(dest).map_err(|e| format!("{}: {e}", dest.display()))?;
+        let mut pk = Pack {
+            cancel,
+            progress,
+            skip: fs::canonicalize(dest).unwrap_or_else(|_| dest.to_path_buf()),
+        };
+        match format {
+            Format::Zip => compress_zip(f, sources, &mut pk),
+            Format::TarGz => {
+                let gz = flate2::write::GzEncoder::new(
+                    io::BufWriter::new(f),
+                    flate2::Compression::default(),
+                );
+                let gz = write_tar(gz, sources, &mut pk)?;
+                gz.finish()
+                    .and_then(|mut w| w.flush())
+                    .map_err(|e| e.to_string())
+            }
+            Format::TarZst => {
+                let z = zstd::stream::write::Encoder::new(io::BufWriter::new(f), 0)
+                    .map_err(|e| e.to_string())?;
+                let z = write_tar(z, sources, &mut pk)?;
+                z.finish()
+                    .and_then(|mut w| w.flush())
+                    .map_err(|e| e.to_string())
+            }
+            Format::TarXz => {
+                let x = xz2::write::XzEncoder::new(io::BufWriter::new(f), 6);
+                let x = write_tar(x, sources, &mut pk)?;
+                x.finish()
+                    .and_then(|mut w| w.flush())
+                    .map_err(|e| e.to_string())
+            }
+            Format::SevenZ => compress_7z(f, sources, &mut pk),
+        }
+    })();
+    let r = r.map_err(|e| {
+        if cancel.load(Ordering::Relaxed) {
+            CANCELLED.to_string()
+        } else {
+            e
+        }
+    });
     if r.is_err() {
         let _ = fs::remove_file(dest);
     }
@@ -575,39 +756,36 @@ fn src_name(src: &Path) -> Result<String, String> {
         .ok_or_else(|| format!("{}: no file name", src.display()))
 }
 
-fn compress_tgz(sources: &[PathBuf], dest: &Path) -> Result<(), String> {
-    let f = File::create(dest).map_err(|e| e.to_string())?;
-    let gz = flate2::write::GzEncoder::new(f, flate2::Compression::default());
-    let mut b = tar::Builder::new(gz);
+fn write_tar<W: Write>(w: W, sources: &[PathBuf], pk: &mut Pack) -> Result<W, String> {
+    let mut b = tar::Builder::new(w);
     b.follow_symlinks(false);
-    let dest_abs = fs::canonicalize(dest).unwrap_or_else(|_| dest.to_path_buf());
     for src in sources {
         let name = src_name(src)?;
-        add_tar(&mut b, src, Path::new(&name), &dest_abs)?;
+        add_tar(&mut b, src, Path::new(&name), pk)?;
     }
-    b.into_inner()
-        .and_then(|gz| gz.finish())
-        .map(|_| ())
-        .map_err(|e| e.to_string())
+    b.into_inner().map_err(|e| e.to_string())
 }
 
 fn add_tar<W: Write>(
     b: &mut tar::Builder<W>,
     abs: &Path,
     rel: &Path,
-    skip: &Path,
+    pk: &mut Pack,
 ) -> Result<(), String> {
+    pk.check()?;
     let err = |e: io::Error| format!("{}: {e}", abs.display());
     let m = fs::symlink_metadata(abs).map_err(err)?;
     if m.is_dir() {
         b.append_dir(rel, abs).map_err(err)?;
-        for (name, child) in sorted_children(abs)? {
-            if fs::canonicalize(&child).is_ok_and(|c| c == skip) {
-                continue;
-            }
-            add_tar(b, &child, &rel.join(name), skip)?;
+        for (name, child) in pk.children(abs)? {
+            add_tar(b, &child, &rel.join(name), pk)?;
         }
         Ok(())
+    } else if m.is_file() {
+        let mut h = tar::Header::new_gnu();
+        h.set_metadata(&m);
+        let f = File::open(abs).map_err(err)?;
+        b.append_data(&mut h, rel, pk.reader(f)).map_err(err)
     } else {
         b.append_path_with_name(abs, rel).map_err(err)
     }
@@ -623,13 +801,11 @@ fn sorted_children(dir: &Path) -> Result<Vec<(String, PathBuf)>, String> {
     Ok(v)
 }
 
-fn compress_zip(sources: &[PathBuf], dest: &Path) -> Result<(), String> {
-    let f = File::create(dest).map_err(|e| e.to_string())?;
+fn compress_zip(f: File, sources: &[PathBuf], pk: &mut Pack) -> Result<(), String> {
     let mut z = zip::ZipWriter::new(io::BufWriter::new(f));
-    let dest_abs = fs::canonicalize(dest).unwrap_or_else(|_| dest.to_path_buf());
     for src in sources {
         let name = src_name(src)?;
-        add_zip(&mut z, src, &name, &dest_abs)?;
+        add_zip(&mut z, src, &name, pk)?;
     }
     z.finish()
         .map_err(|e| e.to_string())?
@@ -641,14 +817,16 @@ fn add_zip<W: Write + io::Seek>(
     z: &mut zip::ZipWriter<W>,
     abs: &Path,
     rel: &str,
-    skip: &Path,
+    pk: &mut Pack,
 ) -> Result<(), String> {
     use std::os::unix::fs::PermissionsExt;
+    pk.check()?;
     let err = |e: &dyn std::fmt::Display| format!("{}: {e}", abs.display());
     let m = fs::symlink_metadata(abs).map_err(|e| err(&e))?;
     let opts = zip::write::SimpleFileOptions::default()
         .compression_method(zip::CompressionMethod::Deflated)
-        .unix_permissions(m.permissions().mode() & 0o7777);
+        .unix_permissions(m.permissions().mode() & 0o7777)
+        .large_file(m.len() >= u32::MAX as u64);
     if m.file_type().is_symlink() {
         let t = fs::read_link(abs).map_err(|e| err(&e))?;
         z.add_symlink(rel, t.to_string_lossy(), opts)
@@ -656,19 +834,265 @@ fn add_zip<W: Write + io::Seek>(
     } else if m.is_dir() {
         z.add_directory(format!("{rel}/"), opts)
             .map_err(|e| err(&e))?;
-        for (name, child) in sorted_children(abs)? {
-            if fs::canonicalize(&child).is_ok_and(|c| c == skip) {
-                continue;
-            }
-            add_zip(z, &child, &format!("{rel}/{name}"), skip)?;
+        for (name, child) in pk.children(abs)? {
+            add_zip(z, &child, &format!("{rel}/{name}"), pk)?;
         }
         Ok(())
     } else {
         z.start_file(rel, opts).map_err(|e| err(&e))?;
-        let mut f = File::open(abs).map_err(|e| err(&e))?;
-        io::copy(&mut f, z).map_err(|e| err(&e))?;
+        let f = File::open(abs).map_err(|e| err(&e))?;
+        io::copy(&mut pk.reader(f), z).map_err(|e| err(&e))?;
         Ok(())
     }
+}
+
+fn compress_7z(f: File, sources: &[PathBuf], pk: &mut Pack) -> Result<(), String> {
+    let mut w = sevenz_rust2::ArchiveWriter::new(f).map_err(|e| e.to_string())?;
+    for src in sources {
+        let name = src_name(src)?;
+        add_7z(&mut w, src, &name, pk)?;
+    }
+    w.finish().map(|_| ()).map_err(|e| e.to_string())
+}
+
+fn add_7z(
+    w: &mut sevenz_rust2::ArchiveWriter<File>,
+    abs: &Path,
+    rel: &str,
+    pk: &mut Pack,
+) -> Result<(), String> {
+    use sevenz_rust2::ArchiveEntry;
+    pk.check()?;
+    let err = |e: &dyn std::fmt::Display| format!("{}: {e}", abs.display());
+    let m = fs::symlink_metadata(abs).map_err(|e| err(&e))?;
+    if m.is_dir() {
+        let mut e = ArchiveEntry::from_path(abs, rel.to_string());
+        e.is_directory = true;
+        w.push_archive_entry::<File>(e, None).map_err(|e| err(&e))?;
+        for (name, child) in pk.children(abs)? {
+            add_7z(w, &child, &format!("{rel}/{name}"), pk)?;
+        }
+    } else if m.is_file() {
+        let f = File::open(abs).map_err(|e| err(&e))?;
+        let e = ArchiveEntry::from_path(abs, rel.to_string());
+        w.push_archive_entry(e, Some(pk.reader(f)))
+            .map_err(|e| err(&e))?;
+    }
+    Ok(())
+}
+
+// ------------------------------------------------- extract here / extract to
+
+/// Result of [`extract_here`] / [`extract_to`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct Extracted {
+    /// the new top-level item (folder, or the lone file)
+    pub out: PathBuf,
+    pub files: usize,
+    /// members refused as unsafe or unsupported
+    pub skipped: Vec<String>,
+}
+
+/// Does this error mean "ask for a (different) password"?
+pub fn is_password_error(e: &str) -> bool {
+    e.to_ascii_lowercase().contains("password")
+}
+
+/// The archive's file name without its archive extension(s).
+pub fn base_name(path: &Path) -> String {
+    stem(path)
+}
+
+/// Entries of `path` (a password opens 7z archives with encrypted headers).
+pub fn list_entries(path: &Path, password: Option<&str>) -> Result<Vec<Entry>, String> {
+    let (kind, _) = kind_of(path).ok_or("not a supported archive")?;
+    match (kind, password.filter(|p| !p.is_empty())) {
+        (Kind::SevenZ, Some(pw)) => list_7z(path, sevenz_rust2::Password::from(pw)),
+        _ => list(path, kind),
+    }
+}
+
+/// Progress total for [`extract_here`] / [`extract_to`]: uncompressed bytes
+/// for zip/7z (cheap to list), the archive's own size for tar and single
+/// files (whose progress counts compressed bytes read).
+pub fn extract_total(path: &Path, password: Option<&str>) -> u64 {
+    match kind_of(path).map(|k| k.0) {
+        Some(Kind::Zip | Kind::SevenZ) => list_entries(path, password)
+            .map(|es| es.iter().filter_map(|e| e.size).sum())
+            .unwrap_or(0),
+        Some(_) => fs::metadata(path).map(|m| m.len()).unwrap_or(0),
+        None => 0,
+    }
+}
+
+fn run_extract(
+    archive: &Path,
+    kind: Kind,
+    dest: &Path,
+    password: Option<&str>,
+    cancel: &AtomicBool,
+    progress: &mut dyn FnMut(u64),
+) -> Result<Report, String> {
+    match kind {
+        // count compressed bytes: the uncompressed total isn't known
+        // without a second full decompression pass
+        Kind::Tar(comp) => {
+            let f = File::open(archive).map_err(|e| e.to_string())?;
+            let counted = Counting {
+                inner: f,
+                cancel,
+                progress,
+            };
+            fs::create_dir_all(dest).map_err(|e| e.to_string())?;
+            let mut cx = Ctx {
+                dest,
+                cancel,
+                progress: &mut |_| {},
+                report: Report::default(),
+            };
+            extract_tar(decoder(comp, counted)?, &|_| true, &mut cx).map(|()| cx.report)
+        }
+        _ => extract(archive, kind, &|_| true, dest, password, cancel, progress),
+    }
+    .map_err(|e| {
+        if cancel.load(Ordering::Relaxed) {
+            CANCELLED.to_string()
+        } else {
+            e
+        }
+    })
+}
+
+/// "Extract here" into folder `parent`: an archive holding one top-level
+/// item (the usual `project-1.2/`) puts that item straight into `parent`;
+/// anything else goes into a new folder named after the archive. Taken
+/// names get " (2)" etc. Works in a hidden staging folder inside `parent`
+/// that is removed on failure or cancel, so nothing half-done is left.
+pub fn extract_here(
+    archive: &Path,
+    parent: &Path,
+    password: Option<&str>,
+    cancel: &AtomicBool,
+    progress: &mut dyn FnMut(u64),
+) -> Result<Extracted, String> {
+    let (kind, _) = kind_of(archive).ok_or("not a supported archive")?;
+    let name = stem(archive);
+    if let Kind::Single(c) = kind {
+        let out = crate::ops::unique_name(parent, &name);
+        single_counted(archive, c, &out, cancel, progress)?;
+        return Ok(Extracted {
+            out,
+            files: 1,
+            skipped: Vec::new(),
+        });
+    }
+    let stage = crate::ops::unique_name(parent, &format!(".{name}.og-extract"));
+    let rep = match run_extract(archive, kind, &stage, password, cancel, progress) {
+        Ok(r) => r,
+        Err(e) => {
+            let _ = fs::remove_dir_all(&stage);
+            return Err(e);
+        }
+    };
+    let finish = || -> Result<PathBuf, String> {
+        let mut tops: Vec<PathBuf> = fs::read_dir(&stage)
+            .map_err(|e| e.to_string())?
+            .flatten()
+            .map(|e| e.path())
+            .collect();
+        if tops.len() == 1 {
+            let item = tops.remove(0);
+            let n = item.file_name().unwrap_or_default().to_string_lossy();
+            let out = crate::ops::unique_name(parent, &n);
+            fs::rename(&item, &out).map_err(|e| e.to_string())?;
+            let _ = fs::remove_dir(&stage);
+            Ok(out)
+        } else {
+            let out = crate::ops::unique_name(parent, &name);
+            fs::rename(&stage, &out).map_err(|e| e.to_string())?;
+            Ok(out)
+        }
+    };
+    match finish() {
+        Ok(out) => Ok(Extracted {
+            out,
+            files: rep.files,
+            skipped: rep.skipped,
+        }),
+        Err(e) => {
+            let _ = fs::remove_dir_all(&stage);
+            Err(e)
+        }
+    }
+}
+
+/// Extract everything into folder `dest` (created; removed again on
+/// failure if this call created it).
+pub fn extract_to(
+    archive: &Path,
+    dest: &Path,
+    password: Option<&str>,
+    cancel: &AtomicBool,
+    progress: &mut dyn FnMut(u64),
+) -> Result<Extracted, String> {
+    let (kind, _) = kind_of(archive).ok_or("not a supported archive")?;
+    let existed = dest.exists();
+    let r = match kind {
+        Kind::Single(c) => {
+            let out = dest.join(stem(archive));
+            single_counted(archive, c, &out, cancel, progress).map(|()| Report {
+                files: 1,
+                skipped: Vec::new(),
+            })
+        }
+        _ => run_extract(archive, kind, dest, password, cancel, progress),
+    };
+    match r {
+        Ok(rep) => Ok(Extracted {
+            out: dest.to_path_buf(),
+            files: rep.files,
+            skipped: rep.skipped,
+        }),
+        Err(e) => {
+            if !existed {
+                let _ = fs::remove_dir_all(dest);
+            }
+            Err(e)
+        }
+    }
+}
+
+/// `extract_single`, but progress counts compressed bytes read.
+fn single_counted(
+    archive: &Path,
+    comp: Comp,
+    out: &Path,
+    cancel: &AtomicBool,
+    progress: &mut dyn FnMut(u64),
+) -> Result<(), String> {
+    let f = File::open(archive).map_err(|e| e.to_string())?;
+    let mut r = decoder(
+        comp,
+        Counting {
+            inner: f,
+            cancel,
+            progress,
+        },
+    )?;
+    if let Some(parent) = out.parent() {
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let mut o = File::create(out).map_err(|e| format!("{}: {e}", out.display()))?;
+    if let Err(e) = io::copy(&mut r, &mut o) {
+        drop(o);
+        let _ = fs::remove_file(out);
+        return Err(if cancel.load(Ordering::Relaxed) {
+            CANCELLED.into()
+        } else {
+            e.to_string()
+        });
+    }
+    Ok(())
 }
 
 // --------------------------------------------------------------------- tree
@@ -1591,6 +2015,162 @@ mod tests {
         assert_eq!((s.is_dirty(), s.is_editing()), (false, None));
         let _ = s.toggle_edit();
         let _ = s.save();
+    }
+
+    /// temp dir (not under $HOME) for the tools tests
+    fn tmp2(tag: &str) -> Tmp {
+        static N: AtomicU64 = AtomicU64::new(0);
+        let p = std::env::temp_dir().join(format!(
+            "ogx-archive-tools-{tag}-{}-{}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::SeqCst)
+        ));
+        let _ = fs::remove_dir_all(&p);
+        fs::create_dir_all(&p).unwrap();
+        Tmp(p)
+    }
+
+    fn no_cancel() -> AtomicBool {
+        AtomicBool::new(false)
+    }
+
+    #[test]
+    fn every_format_round_trips() {
+        for f in Format::ALL {
+            let t = tmp2("fmt");
+            let src = tree(&t);
+            let out = t.p(&format!("bundle{}", f.ext()));
+            let total = source_bytes(&src, &no_cancel());
+            assert_eq!(total, 5 + 5 + 7 + 5);
+            let mut seen = 0;
+            compress_with(&src, &out, f, &no_cancel(), &mut |n| seen += n).unwrap();
+            assert_eq!(seen, total, "{f:?} progress");
+            assert_eq!(Format::from_name(&out), Some(f));
+            check_round_trip(&out, &t);
+            assert_eq!(
+                extract_total(&out, None),
+                match f {
+                    Format::Zip | Format::SevenZ => total,
+                    _ => fs::metadata(&out).unwrap().len(),
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn extract_here_is_smart_about_names() {
+        let t = tmp2("here");
+        let src = tree(&t);
+        let dest = t.p("dest");
+        fs::create_dir_all(&dest).unwrap();
+        // one top-level folder: lands straight in dest, then "proj (2)"
+        let one = t.p("one.tar.xz");
+        compress_with(&src[..1], &one, Format::TarXz, &no_cancel(), &mut |_| {}).unwrap();
+        let mut done = 0;
+        let a = extract_here(&one, &dest, None, &no_cancel(), &mut |n| done += n).unwrap();
+        assert_eq!(a.out, dest.join("proj"));
+        assert_eq!(a.files, 3);
+        assert_eq!(done, fs::metadata(&one).unwrap().len());
+        let b = extract_here(&one, &dest, None, &no_cancel(), &mut |_| {}).unwrap();
+        assert_eq!(b.out, dest.join("proj (2)"));
+        assert!(dest.join("proj (2)/sub/deep/c.txt").is_file());
+        // several top-level items: wrapped in a folder named after the archive
+        let many = t.p("bundle.zip");
+        compress_with(&src, &many, Format::Zip, &no_cancel(), &mut |_| {}).unwrap();
+        let c = extract_here(&many, &dest, None, &no_cancel(), &mut |_| {}).unwrap();
+        assert_eq!(c.out, dest.join("bundle"));
+        assert!(dest.join("bundle/loose.md").is_file() && dest.join("bundle/proj/a.txt").is_file());
+        let d = extract_here(&many, &dest, None, &no_cancel(), &mut |_| {}).unwrap();
+        assert_eq!(d.out, dest.join("bundle (2)"));
+        // a lone file in the archive also goes straight in
+        let lone = t.p("lone.7z");
+        compress_with(&src[1..], &lone, Format::SevenZ, &no_cancel(), &mut |_| {}).unwrap();
+        let e = extract_here(&lone, &dest, None, &no_cancel(), &mut |_| {}).unwrap();
+        assert_eq!(e.out, dest.join("loose.md"));
+        // single compressed file
+        let gz = t.p("notes.txt.gz");
+        {
+            let mut w = flate2::write::GzEncoder::new(
+                File::create(&gz).unwrap(),
+                flate2::Compression::default(),
+            );
+            w.write_all(b"hi").unwrap();
+            w.finish().unwrap();
+        }
+        let g = extract_here(&gz, &dest, None, &no_cancel(), &mut |_| {}).unwrap();
+        assert_eq!(g.out, dest.join("notes.txt"));
+        let g2 = extract_to(&gz, &t.p("gzout"), None, &no_cancel(), &mut |_| {}).unwrap();
+        assert_eq!(fs::read_to_string(g2.out.join("notes.txt")).unwrap(), "hi");
+        // no staging folders left behind
+        let hidden: Vec<_> = fs::read_dir(&dest)
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().starts_with('.'))
+            .collect();
+        assert!(hidden.is_empty(), "{hidden:?}");
+    }
+
+    #[test]
+    fn cancel_leaves_nothing() {
+        let t = tmp2("cancel");
+        let src = tree(&t);
+        let yes = AtomicBool::new(true);
+        let out = t.p("c.tar.gz");
+        assert_eq!(
+            compress_with(&src, &out, Format::TarGz, &yes, &mut |_| {}),
+            Err(CANCELLED.to_string())
+        );
+        assert!(!out.exists());
+        compress_with(&src, &out, Format::TarGz, &no_cancel(), &mut |_| {}).unwrap();
+        let dest = t.p("d");
+        fs::create_dir_all(&dest).unwrap();
+        assert_eq!(
+            extract_here(&out, &dest, None, &yes, &mut |_| {}),
+            Err(CANCELLED.to_string())
+        );
+        assert_eq!(fs::read_dir(&dest).unwrap().count(), 0);
+        assert!(extract_to(&out, &t.p("new"), None, &yes, &mut |_| {}).is_err());
+        assert!(!t.p("new").exists());
+        assert!(compress_with(&[], &out, Format::Zip, &no_cancel(), &mut |_| {}).is_err());
+    }
+
+    #[test]
+    fn encrypted_zip_needs_the_password() {
+        let t = tmp2("aes");
+        let z = t.p("secret.zip");
+        {
+            let mut w = zip::ZipWriter::new(File::create(&z).unwrap());
+            let o = zip::write::SimpleFileOptions::default()
+                .with_aes_encryption(zip::AesMode::Aes256, "hunter2");
+            w.start_file("s/a.txt", o).unwrap();
+            w.write_all(b"top secret").unwrap();
+            w.finish().unwrap();
+        }
+        let dest = t.p("d");
+        fs::create_dir_all(&dest).unwrap();
+        let e = extract_here(&z, &dest, None, &no_cancel(), &mut |_| {}).unwrap_err();
+        assert!(is_password_error(&e), "{e}");
+        let e = extract_here(&z, &dest, Some("nope"), &no_cancel(), &mut |_| {}).unwrap_err();
+        assert!(is_password_error(&e), "{e}");
+        assert_eq!(fs::read_dir(&dest).unwrap().count(), 0);
+        let ok = extract_here(&z, &dest, Some("hunter2"), &no_cancel(), &mut |_| {}).unwrap();
+        assert_eq!(ok.out, dest.join("s"));
+        assert_eq!(
+            fs::read_to_string(dest.join("s/a.txt")).unwrap(),
+            "top secret"
+        );
+        assert!(list_entries(&z, None).unwrap()[0].encrypted);
+    }
+
+    #[test]
+    fn format_names() {
+        assert_eq!(Format::from_name(Path::new("a.TGZ")), Some(Format::TarGz));
+        assert_eq!(Format::from_name(Path::new("a.tar.bz2")), None);
+        assert_eq!(Format::from_name(Path::new("a.gz")), None);
+        assert_eq!(Format::TarGz.strip("x.TAR.GZ").as_deref(), Some("x"));
+        assert_eq!(Format::Zip.strip("x.tar"), None);
+        assert_eq!(base_name(Path::new("/a/b.tar.zst")), "b");
+        assert!(is_password_error("wrong password") && !is_password_error("crc"));
     }
 
     #[test]

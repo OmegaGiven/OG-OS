@@ -5,16 +5,19 @@
 //! Rule: `update` never blocks and `view` never touches the filesystem —
 //! the two things that made og-files feel laggy. See SPEC.md §4.
 
+use crate::archops::{self, ArchiveJob};
 use crate::details::{self, Details};
 use crate::devices::{self, Drive};
 use crate::filetype::Kind;
 use crate::inspector::{self, Inspector};
 use crate::net::{self as netb, Conn, Discovered, LanEvent};
 use crate::netui;
+use crate::openwith;
 use crate::ops::{self, JobControl, JobEvent, JobId, JobKind, JobSpec, Resolution, UndoOp};
 use crate::sidebar::{self, Sidebar, Target};
 use crate::tabs::{self, Tabs};
 use crate::theme;
+use crate::viewers::archive::{self, Format};
 use iced::keyboard::{self, key, Key, Modifiers};
 use iced::widget::pane_grid::{self, Axis, Configuration, PaneGrid};
 use iced::widget::{
@@ -23,6 +26,7 @@ use iced::widget::{
 };
 use iced::{task, Element, Length, Point, Subscription, Task, Theme};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PaneKind {
@@ -67,6 +71,25 @@ struct JobUi {
     current: String,
     control: JobControl,
     spec: JobSpec,
+    /// archive extract / compress (runs outside `ops`)
+    arch: Option<ArchiveJob>,
+}
+
+/// State of the "Open with…" dialog (plain data copied from the registry).
+#[derive(Debug, Clone)]
+struct OpenWithDlg {
+    files: Vec<PathBuf>,
+    mime: String,
+    /// (id, name), the default first
+    recommended: Vec<(String, String)>,
+    default: Option<String>,
+    /// every listed app (id, name), and the indices matching `query`
+    all: Vec<(String, String)>,
+    filtered: Vec<usize>,
+    query: String,
+    show_all: bool,
+    selected: Option<String>,
+    set_default: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -98,6 +121,21 @@ enum Dialog {
         all: bool,
     },
     Connect(Box<netui::Form>),
+    OpenWith(Box<OpenWithDlg>),
+    Compress {
+        sources: Vec<PathBuf>,
+        dir: PathBuf,
+        name: String,
+        format: Format,
+    },
+    ExtractTo {
+        archive: PathBuf,
+        name: String,
+    },
+    ArchivePassword {
+        job: ArchiveJob,
+        pw: String,
+    },
     NetPassword {
         conn: Conn,
         pw: String,
@@ -127,6 +165,11 @@ pub enum MenuAction {
     MakePdf,
     Compress,
     DiskUsage,
+    OpenDefault,
+    OpenWith,
+    OpenTerminal,
+    ExtractHere,
+    ExtractTo,
     NetConnect,
     NetDisconnect,
     NetEdit,
@@ -173,6 +216,10 @@ pub struct App {
     net_ssh: Vec<Discovered>,
     /// Err = rclone/fuse missing (shown in the connect dialog)
     net_backend: Result<(), String>,
+    /// installed apps / MIME associations (loaded off the UI thread)
+    apps: Option<Arc<openwith::Registry>>,
+    /// "Open in <default app>" label for the open context menu
+    menu_open_label: String,
 }
 
 #[derive(Debug, Clone)]
@@ -234,6 +281,12 @@ pub enum Message {
     DndReady(Result<crate::extdnd::Dnd, String>),
     ExtDrop(crate::extdnd::DropEvent),
     CursorLeft,
+    AppsLoaded(Arc<openwith::Registry>),
+    /// registry, files, MIME type of the first file
+    OpenWithReady(Arc<openwith::Registry>, Vec<PathBuf>, String),
+    OpenWithPick(String),
+    OpenWithShowAll,
+    CompressFormat(Format),
 }
 
 impl App {
@@ -301,6 +354,8 @@ impl App {
             net_lan: Vec::new(),
             net_ssh: Vec::new(),
             net_backend: Ok(()),
+            apps: None,
+            menu_open_label: String::new(),
         };
         // og-files [--view tree|list|grid] [--search TEXT] [--focus] [--usage DIR] [PATH]
         // a folder PATH opens in the files pane, a file PATH in a tab
@@ -382,6 +437,46 @@ impl App {
                         title: "notes.md".into(),
                     })
                 }
+                // menu / dialogs for the file OGX_SHOW_PATH
+                "menu-file" | "openwith" | "compress" | "extract-to" | "password" => {
+                    let f = std::env::var_os("OGX_SHOW_PATH")
+                        .map(PathBuf::from)
+                        .unwrap_or(p.clone());
+                    let t = Target {
+                        net: None,
+                        items: vec![(f.clone(), Kind::of(&f, f.is_dir()))],
+                        dir: f.parent().map(Path::to_path_buf).unwrap_or_default(),
+                        drive: None,
+                        in_trash: false,
+                        bookmarked: false,
+                    };
+                    app.apps = Some(Arc::new(openwith::Registry::load(
+                        &openwith::Env::from_env(),
+                    )));
+                    app.cursor = Point::new(120.0, 200.0);
+                    match show.as_str() {
+                        "menu-file" => app.show_menu(t),
+                        "password" => {
+                            app.dialog = Some(Dialog::ArchivePassword {
+                                job: ArchiveJob::ExtractHere {
+                                    archive: f,
+                                    parent: PathBuf::new(),
+                                    password: None,
+                                },
+                                pw: String::new(),
+                            })
+                        }
+                        s => {
+                            app.menu = Some((app.cursor, t));
+                            let a = match s {
+                                "openwith" => MenuAction::OpenWith,
+                                "compress" => MenuAction::Compress,
+                                _ => MenuAction::ExtractTo,
+                            };
+                            tasks.push(app.update(Message::Menu(a)));
+                        }
+                    }
+                }
                 _ => {}
             }
         }
@@ -405,6 +500,7 @@ impl App {
                 |(c, b, ssh)| Message::NetLoaded(c, b, ssh),
             ),
             Task::perform(netb::discover_tailnet(), Message::NetTailnet),
+            Self::load_apps(),
             Task::batch(tasks),
         ]);
         (app, boot)
@@ -561,8 +657,93 @@ impl App {
             current: String::new(),
             control,
             spec,
+            arch: None,
         });
         Task::run(stream, Message::Job)
+    }
+
+    /// Archive extract / compress as a job in the Details list.
+    fn start_archive(&mut self, job: ArchiveJob) -> Task<Message> {
+        let sources = match &job {
+            ArchiveJob::Compress { sources, .. } => sources.clone(),
+            _ => vec![job.archive().to_path_buf()],
+        };
+        let spec = JobSpec {
+            kind: JobKind::Copy,
+            sources,
+            dest: Some(job.out_dir()),
+        };
+        let (control, stream) = archops::start(job.clone());
+        self.jobs.push(JobUi {
+            id: control.id,
+            label: job.label(),
+            total_items: 0,
+            total_bytes: 0,
+            done_items: 0,
+            done_bytes: 0,
+            current: String::new(),
+            control,
+            spec,
+            arch: Some(job),
+        });
+        Task::run(stream, Message::Job)
+    }
+
+    /// Installed apps + associations, read on a worker.
+    fn load_apps() -> Task<Message> {
+        Task::perform(
+            async {
+                tokio::task::spawn_blocking(|| {
+                    Arc::new(openwith::Registry::load(&openwith::Env::from_env()))
+                })
+                .await
+                .unwrap_or_default()
+            },
+            Message::AppsLoaded,
+        )
+    }
+
+    /// The loaded registry, or load it now (on the worker running `f`).
+    fn with_apps<T: Send + 'static>(
+        &self,
+        f: impl FnOnce(Arc<openwith::Registry>) -> T + Send + 'static,
+        done: impl Fn(T) -> Message + Send + 'static,
+    ) -> Task<Message> {
+        let have = self.apps.clone();
+        Task::perform(
+            async move {
+                tokio::task::spawn_blocking(move || {
+                    let reg = have.unwrap_or_else(|| {
+                        Arc::new(openwith::Registry::load(&openwith::Env::from_env()))
+                    });
+                    f(reg)
+                })
+                .await
+            },
+            move |r| match r {
+                Ok(v) => done(v),
+                Err(e) => Message::OpDone(Err(e.to_string()), vec![]),
+            },
+        )
+    }
+
+    /// Show the context menu for `t` at the pointer; works out the label of
+    /// "Open in <app>" from the file names (no disk access).
+    fn show_menu(&mut self, t: Target) {
+        self.menu_open_label = "Open in default app".into();
+        if let Some(reg) = &self.apps {
+            let mut names = t.items.iter().map(|(p, _)| {
+                reg.mime_by_name(p)
+                    .and_then(|m| reg.default_for(&m))
+                    .map(|a| a.name.clone())
+            });
+            if let Some(Some(first)) = names.next() {
+                if names.all(|n| n.as_deref() == Some(first.as_str())) {
+                    self.menu_open_label = format!("Open in {first}");
+                }
+            }
+        }
+        self.menu = Some((self.cursor, t));
     }
 
     /// Folders whose listing a job touched.
@@ -626,28 +807,59 @@ impl App {
                 if matches!(&self.dialog, Some(Dialog::Conflict { job: j, .. }) if *j == id) {
                     self.dialog = None;
                 }
-                match result {
-                    Ok(s) => {
-                        let mut msg = format!("{} — {} done", job.label, s.items_done);
-                        if s.items_skipped > 0 {
-                            msg += &format!(", {} skipped", s.items_skipped);
-                        }
+                let mut focus = Task::none();
+                match (result, job.arch.clone()) {
+                    (Ok(s), Some(_)) => {
+                        let out = archops::output_of(&undo).map(Path::to_path_buf);
+                        let mut msg = match &out {
+                            Some(o) => format!("{} → {}", job.label, o.display()),
+                            None => format!("{} — done", job.label),
+                        };
                         if let Some(e) = s.errors.first() {
-                            msg += &format!(", {} failed (first: {e})", s.errors.len());
+                            msg += &format!(
+                                " (skipped {} unsafe/unsupported, first: {e})",
+                                s.errors.len()
+                            );
                         }
-                        let first = job.spec.sources.first().cloned();
-                        self.details.record_for(msg, first.as_deref());
+                        self.details.record_for(msg, out.as_deref());
                         if let Some(u) = undo {
                             self.undo.push(u);
                         }
                     }
-                    Err(e) => self.details.record(format!("{} failed: {e}", job.label)),
+                    (Err(e), Some(a)) if a.is_extract() && archive::is_password_error(&e) => {
+                        self.details.record(format!("{}: {e}", job.label));
+                        if self.dialog.is_none() {
+                            self.dialog = Some(Dialog::ArchivePassword {
+                                job: a,
+                                pw: String::new(),
+                            });
+                            focus = text_input::focus(text_input::Id::new(DIALOG_INPUT));
+                        }
+                    }
+                    (result, _) => match result {
+                        Ok(s) => {
+                            let mut msg = format!("{} — {} done", job.label, s.items_done);
+                            if s.items_skipped > 0 {
+                                msg += &format!(", {} skipped", s.items_skipped);
+                            }
+                            if let Some(e) = s.errors.first() {
+                                msg += &format!(", {} failed (first: {e})", s.errors.len());
+                            }
+                            let first = job.spec.sources.first().cloned();
+                            self.details.record_for(msg, first.as_deref());
+                            if let Some(u) = undo {
+                                self.undo.push(u);
+                            }
+                        }
+                        Err(e) => self.details.record(format!("{} failed: {e}", job.label)),
+                    },
                 }
                 let dirs = Self::affected(&job.spec);
                 // disk-usage tabs drop/rescan what the job removed or moved
                 let mut changed = job.spec.sources.clone();
                 changed.extend(dirs.iter().cloned());
                 Task::batch([
+                    focus,
                     self.sidebar.refresh(&dirs).map(Message::Sidebar),
                     self.tabs.fs_changed(&changed).map(Message::Tabs),
                 ])
@@ -905,25 +1117,84 @@ impl App {
                 if items.is_empty() {
                     return Task::none();
                 }
-                let base = match items.as_slice() {
-                    [p] => p
-                        .file_stem()
-                        .map(|s| s.to_string_lossy().into_owned())
-                        .unwrap_or_else(|| "Archive".into()),
-                    _ => "Archive".to_string(),
+                let name = archops::default_name(&items);
+                self.dialog = Some(Dialog::Compress {
+                    sources: items,
+                    dir,
+                    name,
+                    format: Format::Zip,
+                });
+                Task::batch([
+                    text_input::focus(text_input::Id::new(DIALOG_INPUT)),
+                    text_input::select_all(text_input::Id::new(DIALOG_INPUT)),
+                ])
+            }
+            MenuAction::ExtractHere => {
+                let tasks: Vec<_> = items
+                    .into_iter()
+                    .filter(|p| archive::supported(p))
+                    .filter_map(|p| {
+                        let parent = p.parent()?.to_path_buf();
+                        Some(self.start_archive(ArchiveJob::ExtractHere {
+                            archive: p,
+                            parent,
+                            password: None,
+                        }))
+                    })
+                    .collect();
+                Task::batch(tasks)
+            }
+            MenuAction::ExtractTo => match items.as_slice() {
+                [p] if archive::supported(p) => {
+                    self.dialog = Some(Dialog::ExtractTo {
+                        archive: p.clone(),
+                        name: archive::base_name(p),
+                    });
+                    Task::batch([
+                        text_input::focus(text_input::Id::new(DIALOG_INPUT)),
+                        text_input::select_all(text_input::Id::new(DIALOG_INPUT)),
+                    ])
+                }
+                _ => Task::none(),
+            },
+            MenuAction::OpenTerminal => {
+                let at = match items.as_slice() {
+                    [p] if p.is_dir() => p.clone(),
+                    _ => dir,
                 };
-                let out_dir = dir.clone();
                 Task::perform(
                     async move {
                         tokio::task::spawn_blocking(move || {
-                            let dest = ops::unique_name(&out_dir, &format!("{base}.zip"));
-                            crate::viewers::archive::compress(&items, &dest)
-                                .map(|_| format!("Created {}", dest.display()))
+                            crate::terminal::open_here(&at)
+                                .map(|(t, _)| format!("Opened {t} in {}", at.display()))
                         })
                         .await
                         .map_err(|e| e.to_string())?
                     },
-                    move |r| Message::OpDone(r, vec![dir.clone()]),
+                    |r| Message::OpDone(r, vec![]),
+                )
+            }
+            MenuAction::OpenDefault => {
+                let files: Vec<PathBuf> = items.into_iter().filter(|p| !p.is_dir()).collect();
+                if files.is_empty() {
+                    return Task::none();
+                }
+                self.with_apps(
+                    move |reg| openwith::open_default(&reg, &files).map(|l| l.join("; ")),
+                    |r| Message::OpDone(r, vec![]),
+                )
+            }
+            MenuAction::OpenWith => {
+                let files: Vec<PathBuf> = items.into_iter().filter(|p| !p.is_dir()).collect();
+                let Some(first) = files.first().cloned() else {
+                    return Task::none();
+                };
+                self.with_apps(
+                    move |reg| {
+                        let mime = reg.mime_of(&first);
+                        (reg, files, mime)
+                    },
+                    |(reg, files, mime)| Message::OpenWithReady(reg, files, mime),
                 )
             }
             MenuAction::MakePdf => {
@@ -1102,6 +1373,83 @@ impl App {
                 None => Task::none(),
             },
             Dialog::Conflict { .. } => Task::none(),
+            Dialog::Compress {
+                sources,
+                dir,
+                name,
+                format,
+            } => {
+                let name = name.trim();
+                if name.is_empty() || name.contains('/') {
+                    self.dialog = Some(Dialog::Compress {
+                        sources,
+                        dir,
+                        name: name.to_string(),
+                        format,
+                    });
+                    return Task::none();
+                }
+                // "x.zip" typed with zip picked: don't double the suffix
+                let base = format.strip(name).unwrap_or_else(|| name.to_string());
+                let dest = dir.join(format!("{base}{}", format.ext()));
+                self.start_archive(ArchiveJob::Compress {
+                    sources,
+                    dest,
+                    format,
+                })
+            }
+            Dialog::ExtractTo { archive, name } => {
+                let name = name.trim().to_string();
+                let parent = archive.parent().map(Path::to_path_buf);
+                match parent {
+                    Some(parent) if !name.is_empty() && !name.contains('/') => {
+                        self.start_archive(ArchiveJob::ExtractTo {
+                            dest: parent.join(name),
+                            archive,
+                            password: None,
+                        })
+                    }
+                    _ => {
+                        self.dialog = Some(Dialog::ExtractTo { archive, name });
+                        Task::none()
+                    }
+                }
+            }
+            Dialog::ArchivePassword { job, pw } => self.start_archive(job.with_password(pw)),
+            Dialog::OpenWith(d) => {
+                let (Some(id), Some(reg)) = (d.selected.clone(), self.apps.clone()) else {
+                    self.dialog = Some(Dialog::OpenWith(d));
+                    return Task::none();
+                };
+                let set_default = d.set_default;
+                let reload = if set_default {
+                    Self::load_apps()
+                } else {
+                    Task::none()
+                };
+                let launch = Task::perform(
+                    async move {
+                        tokio::task::spawn_blocking(move || {
+                            let app = reg.get(&id).ok_or("That app is gone")?;
+                            let mut note = String::new();
+                            if set_default {
+                                openwith::set_default(&reg.user_list, &d.mime, &app.id)?;
+                                note = format!(" (now the default for {})", d.mime);
+                            }
+                            openwith::launch(app, &d.files)?;
+                            Ok(format!(
+                                "Opened {} in {}{note}",
+                                openwith::describe(&d.files),
+                                app.name
+                            ))
+                        })
+                        .await
+                        .map_err(|e| e.to_string())?
+                    },
+                    |r| Message::OpDone(r, vec![]),
+                );
+                launch.chain(reload)
+            }
             Dialog::Connect(f) => {
                 // Enter in the form = Connect / Save
                 self.dialog = Some(Dialog::Connect(f));
@@ -1153,7 +1501,7 @@ impl App {
                 self.inspector.focus(Some((p, k))).map(Message::Inspector)
             }
             sidebar::Event::Menu(t) => {
-                self.menu = Some((self.cursor, t));
+                self.show_menu(t);
                 Task::none()
             }
             sidebar::Event::Mount(d) => {
@@ -1351,17 +1699,14 @@ impl App {
             Message::BackgroundMenu => {
                 self.sidebar.sel.clear();
                 let dir = self.sidebar.current_dir();
-                self.menu = Some((
-                    self.cursor,
-                    Target {
-                        net: None,
-                        items: vec![],
-                        dir,
-                        drive: None,
-                        in_trash: false,
-                        bookmarked: false,
-                    },
-                ));
+                self.show_menu(Target {
+                    net: None,
+                    items: vec![],
+                    dir,
+                    drive: None,
+                    in_trash: false,
+                    bookmarked: false,
+                });
                 Task::none()
             }
             Message::DialogInput(s) => {
@@ -1369,9 +1714,29 @@ impl App {
                     Some(
                         Dialog::Rename { name, .. }
                         | Dialog::NewFolder { name, .. }
-                        | Dialog::NewFile { name, .. },
+                        | Dialog::NewFile { name, .. }
+                        | Dialog::Compress { name, .. }
+                        | Dialog::ExtractTo { name, .. },
                     ) => *name = s,
-                    Some(Dialog::NetPassword { pw, .. }) => *pw = s,
+                    Some(Dialog::NetPassword { pw, .. } | Dialog::ArchivePassword { pw, .. }) => {
+                        *pw = s
+                    }
+                    Some(Dialog::OpenWith(d)) => {
+                        let q = s.to_lowercase();
+                        d.filtered = d
+                            .all
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, (id, n))| {
+                                q.is_empty()
+                                    || n.to_lowercase().contains(&q)
+                                    || id.to_lowercase().contains(&q)
+                            })
+                            .map(|(i, _)| i)
+                            .collect();
+                        d.query = s;
+                        d.show_all = true;
+                    }
                     _ => {}
                 }
                 Task::none()
@@ -1380,6 +1745,7 @@ impl App {
                 match &mut self.dialog {
                     Some(Dialog::Conflict { all, .. }) => *all = b,
                     Some(Dialog::NetPassword { remember, .. }) => *remember = b,
+                    Some(Dialog::OpenWith(d)) => d.set_default = b,
                     _ => {}
                 }
                 Task::none()
@@ -1712,6 +2078,60 @@ impl App {
                 self.details.record("Path copied to clipboard");
                 Task::none()
             }
+            Message::AppsLoaded(reg) => {
+                self.apps = Some(reg);
+                Task::none()
+            }
+            Message::OpenWithReady(reg, files, mime) => {
+                let c = reg.choices(&mime);
+                let name = |id: &String| reg.get(id).map(|a| (id.clone(), a.name.clone()));
+                let recommended: Vec<(String, String)> = c.apps.iter().filter_map(name).collect();
+                let all: Vec<(String, String)> = reg
+                    .listed()
+                    .map(|a| (a.id.clone(), a.name.clone()))
+                    .collect();
+                let filtered = (0..all.len()).collect();
+                let show_all = recommended.is_empty();
+                self.dialog = Some(Dialog::OpenWith(Box::new(OpenWithDlg {
+                    files,
+                    mime: c.mime,
+                    selected: c.default.clone(),
+                    default: c.default,
+                    recommended,
+                    all,
+                    filtered,
+                    query: String::new(),
+                    show_all,
+                    set_default: false,
+                })));
+                self.apps = Some(reg);
+                Task::none()
+            }
+            Message::OpenWithPick(id) => {
+                if let Some(Dialog::OpenWith(d)) = &mut self.dialog {
+                    if d.selected.as_deref() == Some(id.as_str()) {
+                        // second click on the same app opens it
+                        return self.dialog_ok();
+                    }
+                    d.selected = Some(id);
+                }
+                Task::none()
+            }
+            Message::OpenWithShowAll => {
+                if let Some(Dialog::OpenWith(d)) = &mut self.dialog {
+                    d.show_all = !d.show_all;
+                    if d.show_all {
+                        return text_input::focus(text_input::Id::new(DIALOG_INPUT));
+                    }
+                }
+                Task::none()
+            }
+            Message::CompressFormat(f) => {
+                if let Some(Dialog::Compress { format, .. }) = &mut self.dialog {
+                    *format = f;
+                }
+                Task::none()
+            }
         }
     }
 
@@ -1913,16 +2333,35 @@ impl App {
             entries.push(("New folder…", MenuAction::NewFolder, true));
             entries.push(("New file…", MenuAction::NewFile, true));
             entries.push(("Paste", MenuAction::Paste, has_clip));
+            entries.push((
+                "Open terminal here  Ctrl+Alt+T",
+                MenuAction::OpenTerminal,
+                true,
+            ));
             entries.push(("Analyze disk usage here", MenuAction::DiskUsage, true));
         } else {
             entries.push(("Open", MenuAction::Open, true));
+            let files_only = t.items.iter().all(|(_, k)| *k != Kind::Folder);
+            if files_only {
+                entries.push((self.menu_open_label.as_str(), MenuAction::OpenDefault, true));
+                entries.push(("Open with…", MenuAction::OpenWith, true));
+            }
+            if n == 1 && t.items[0].1 == Kind::Folder && t.drive.is_none() && t.net.is_none() {
+                entries.push(("Open terminal here", MenuAction::OpenTerminal, true));
+            }
+            if files_only && t.items.iter().all(|(p, _)| archive::supported(p)) {
+                entries.push(("Extract here", MenuAction::ExtractHere, true));
+                if n == 1 {
+                    entries.push(("Extract to folder…", MenuAction::ExtractTo, true));
+                }
+            }
             entries.push(("Copy  Ctrl+C", MenuAction::Copy, true));
             entries.push(("Cut  Ctrl+X", MenuAction::Cut, true));
             entries.push(("Paste into folder  Ctrl+V", MenuAction::Paste, has_clip));
             entries.push(("Duplicate", MenuAction::Duplicate, true));
             entries.push(("Rename…  F2", MenuAction::Rename, n == 1));
             entries.push(("Copy path", MenuAction::CopyPath, true));
-            entries.push(("Compress to .zip", MenuAction::Compress, true));
+            entries.push(("Compress…", MenuAction::Compress, true));
             if n == 1 && t.items[0].1 == Kind::Folder {
                 entries.push(("Analyze disk usage", MenuAction::DiskUsage, true));
             }
@@ -2006,6 +2445,103 @@ impl App {
         stack![backdrop, placed].into()
     }
 
+    fn open_with_view<'a>(&'a self, d: &'a OpenWithDlg) -> Element<'a, Message> {
+        let app_row = |id: &'a String, label: &'a str, is_default: bool| -> Element<'a, Message> {
+            let selected = d.selected.as_deref() == Some(id.as_str());
+            let mut r = row![text(label).size(13)].spacing(8);
+            if is_default {
+                r = r.push(text("default").size(11).color(theme::MUTED));
+            }
+            button(r)
+                .on_press(Message::OpenWithPick(id.clone()))
+                .style(if selected {
+                    button::primary
+                } else {
+                    button::text
+                })
+                .width(Length::Fill)
+                .padding([4, 10])
+                .into()
+        };
+        let what = openwith::describe(&d.files);
+        let mut col = column![
+            text(format!("Open \"{what}\" with")).size(16),
+            text(d.mime.clone()).size(12).color(theme::MUTED),
+        ]
+        .spacing(8);
+        if d.recommended.is_empty() {
+            col = col.push(
+                text("No app is registered for this type.")
+                    .size(13)
+                    .color(theme::MUTED),
+            );
+        } else {
+            col = col.push(
+                iced::widget::scrollable(column(
+                    d.recommended
+                        .iter()
+                        .map(|(id, n)| app_row(id, n, d.default.as_deref() == Some(id.as_str()))),
+                ))
+                .height(Length::Shrink),
+            );
+        }
+        col = col.push(
+            button(
+                text(if d.show_all {
+                    "Other app ▾"
+                } else {
+                    "Other app…"
+                })
+                .size(13),
+            )
+            .on_press(Message::OpenWithShowAll)
+            .style(button::text),
+        );
+        if d.show_all {
+            col = col.push(
+                text_input("Search apps", &d.query)
+                    .id(text_input::Id::new(DIALOG_INPUT))
+                    .on_input(Message::DialogInput)
+                    .on_submit(Message::DialogOk)
+                    .size(13),
+            );
+            col = col.push(
+                iced::widget::scrollable(column(
+                    d.filtered
+                        .iter()
+                        .map(|&i| app_row(&d.all[i].0, &d.all[i].1, false)),
+                ))
+                .height(220),
+            );
+        }
+        let ext = d
+            .files
+            .first()
+            .and_then(|p| p.extension())
+            .map(|e| format!(".{} files", e.to_string_lossy()))
+            .unwrap_or_else(|| "this type".into());
+        col.push(
+            checkbox(
+                format!("Always open {ext} ({}) with this app", d.mime),
+                d.set_default,
+            )
+            .on_toggle(Message::DialogFlag)
+            .size(15)
+            .text_size(13),
+        )
+        .push(
+            row![
+                Space::with_width(Length::Fill),
+                button(text("Cancel"))
+                    .on_press(Message::DialogCancel)
+                    .style(button::secondary),
+                button(text("Open")).on_press_maybe(d.selected.as_ref().map(|_| Message::DialogOk)),
+            ]
+            .spacing(8),
+        )
+        .into()
+    }
+
     fn dialog_view<'a>(&'a self, d: &'a Dialog) -> Element<'a, Message> {
         let input = |label: &'a str, value: &'a str, ok: &'a str| -> Element<'a, Message> {
             column![
@@ -2069,6 +2605,103 @@ impl App {
                 "Delete",
                 true,
             ),
+            Dialog::Compress {
+                sources,
+                name: v,
+                format,
+                ..
+            } => {
+                let pills = row(Format::ALL.iter().map(|&f| {
+                    button(text(f.ext()).size(13))
+                        .on_press(Message::CompressFormat(f))
+                        .style(if f == *format {
+                            button::primary
+                        } else {
+                            button::secondary
+                        })
+                        .padding([4, 10])
+                        .into()
+                }))
+                .spacing(6);
+                column![
+                    text(match sources.as_slice() {
+                        [one] => format!("Compress \"{}\"", name(one)),
+                        s => format!("Compress {} items", s.len()),
+                    })
+                    .size(16),
+                    row![
+                        text_input("name", v)
+                            .id(text_input::Id::new(DIALOG_INPUT))
+                            .on_input(Message::DialogInput)
+                            .on_submit(Message::DialogOk)
+                            .size(14),
+                        text(format.ext()).size(14).color(theme::MUTED),
+                    ]
+                    .spacing(6)
+                    .align_y(iced::Alignment::Center),
+                    pills,
+                    row![
+                        Space::with_width(Length::Fill),
+                        button(text("Cancel"))
+                            .on_press(Message::DialogCancel)
+                            .style(button::secondary),
+                        button(text("Create")).on_press(Message::DialogOk),
+                    ]
+                    .spacing(8),
+                ]
+                .spacing(12)
+                .into()
+            }
+            Dialog::ExtractTo { archive, name: v } => column![
+                text(format!("Extract \"{}\" to a new folder", name(archive))).size(16),
+                text(format!(
+                    "in {}",
+                    archive
+                        .parent()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_default()
+                ))
+                .size(12)
+                .color(theme::MUTED),
+                text_input("folder name", v)
+                    .id(text_input::Id::new(DIALOG_INPUT))
+                    .on_input(Message::DialogInput)
+                    .on_submit(Message::DialogOk)
+                    .size(14),
+                row![
+                    Space::with_width(Length::Fill),
+                    button(text("Cancel"))
+                        .on_press(Message::DialogCancel)
+                        .style(button::secondary),
+                    button(text("Extract")).on_press(Message::DialogOk),
+                ]
+                .spacing(8),
+            ]
+            .spacing(12)
+            .into(),
+            Dialog::ArchivePassword { job, pw } => column![
+                text(format!("Password for \"{}\"", name(job.archive()))).size(16),
+                text("The archive is encrypted.")
+                    .size(12)
+                    .color(theme::MUTED),
+                text_input("password", pw)
+                    .id(text_input::Id::new(DIALOG_INPUT))
+                    .secure(true)
+                    .on_input(Message::DialogInput)
+                    .on_submit(Message::DialogOk)
+                    .size(14),
+                row![
+                    Space::with_width(Length::Fill),
+                    button(text("Cancel"))
+                        .on_press(Message::DialogCancel)
+                        .style(button::secondary),
+                    button(text("Extract")).on_press(Message::DialogOk),
+                ]
+                .spacing(8),
+            ]
+            .spacing(12)
+            .into(),
+            Dialog::OpenWith(d) => self.open_with_view(d),
             Dialog::Connect(f) => f.view(
                 self.net_backend.as_ref().err().map(String::as_str),
                 Message::ConnForm,
@@ -2221,6 +2854,9 @@ fn shortcut(key: Key, mods: Modifiers) -> Option<Message> {
             Key::Character("v") => Some(Message::Shortcut(MenuAction::Paste)),
             Key::Character("z") => Some(Message::Undo),
             Key::Character("a") => Some(Message::Key(K::SelectAll)),
+            Key::Character("t") | Key::Character("T") if mods.alt() => {
+                Some(Message::Shortcut(MenuAction::OpenTerminal))
+            }
             Key::Character("n") | Key::Character("N") if mods.shift() => {
                 Some(Message::Shortcut(MenuAction::NewFolder))
             }

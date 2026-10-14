@@ -177,6 +177,23 @@ pub fn start(spec: JobSpec) -> (JobControl, impl Stream<Item = JobEvent> + Send 
     start_with(spec, Opts::default())
 }
 
+/// A job id and control for work that runs outside this engine (archive
+/// extract / compress) but shows in the same jobs list. `JobControl::cancel`
+/// sets the returned flag; conflicts never happen for these.
+pub fn external_control() -> (JobControl, Arc<AtomicBool>) {
+    let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+    let cancel = Arc::new(AtomicBool::new(false));
+    let (answers, _) = mpsc::channel();
+    (
+        JobControl {
+            id,
+            cancel: cancel.clone(),
+            answers,
+        },
+        cancel,
+    )
+}
+
 /// The job that undoes `op`. For `MoveBack` this also records the original
 /// locations so the returned `Move` job (with `dest: None`) knows where each
 /// source goes (see the module docs).

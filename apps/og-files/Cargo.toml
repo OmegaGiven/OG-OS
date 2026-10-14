@@ -54,7 +54,7 @@ flate2 = "1"
 xz2 = "0.1"
 zstd = "0.13"
 bzip2 = "0.4"
-sevenz-rust2 = { version = "0.20", default-features = false, features = ["aes256", "bzip2", "deflate", "ppmd"] }
+sevenz-rust2 = { version = "0.20", default-features = false, features = ["aes256", "bzip2", "deflate", "ppmd", "compress"] }
 
 og-config = { path = "../../crates/og-config", optional = true }
 og-theme = { path = "../../crates/og-theme", optional = true }

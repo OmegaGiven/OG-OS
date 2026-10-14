@@ -65,6 +65,24 @@ pub fn cache_dir() -> PathBuf {
     xdg("XDG_CACHE_HOME", ".cache").join("og-files")
 }
 
+/// `$XDG_CONFIG_HOME/og-files/settings.json` (hand-edited; every key
+/// optional). Example: `{ "terminal": "foot" }`.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct Settings {
+    /// terminal command for "Open terminal here" and Terminal=true apps
+    #[serde(default)]
+    pub terminal: Option<String>,
+}
+
+impl Settings {
+    pub fn load() -> Self {
+        std::fs::read_to_string(config_dir().join("settings.json"))
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default()
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Bookmarks {
     #[serde(default)]
