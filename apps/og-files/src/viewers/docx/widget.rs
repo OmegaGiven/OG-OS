@@ -178,6 +178,36 @@ fn twips(t: f32) -> f32 {
     t / 15.0
 }
 
+/// Per-column minimum width for autofit tables: the longest unbreakable
+/// word in any single-span cell of that column (approximate glyph width at
+/// the cell text's size), plus cell padding.
+fn autofit_min(t: &super::model::Table, cols: usize) -> Vec<f32> {
+    let mut min = vec![0.0f32; cols];
+    for row in &t.rows {
+        let mut col = 0;
+        for cell in &row.cells {
+            let span = usize::from(cell.span);
+            if span == 1 && col < cols {
+                for e in &cell.entries {
+                    if let Block::Para(p) = &e.block {
+                        let word = p
+                            .text()
+                            .split_whitespace()
+                            .map(|w| w.chars().count())
+                            .max()
+                            .unwrap_or(0);
+                        // ~0.62em per glyph covers bold body text
+                        let w = word as f32 * px(11.0) * 0.62 + 2.0 * CELL_PAD + 2.0;
+                        min[col] = min[col].max(w);
+                    }
+                }
+            }
+            col += span;
+        }
+    }
+    min
+}
+
 fn font(b: bool, i: bool) -> Font {
     Font {
         weight: if b { Weight::Bold } else { Weight::Normal },
@@ -767,6 +797,14 @@ impl<'a> Page<'a> {
         let mut g: Vec<f32> = t.grid.iter().map(|w| twips(*w)).collect();
         if g.len() != cols || g.iter().any(|w| *w <= 1.0) {
             g = vec![width / cols as f32; cols];
+        }
+        if !t.fixed {
+            // Word's default "autofit" layout: a column is never narrower
+            // than its longest word, so words don't break mid-word.
+            let min = autofit_min(t, cols);
+            for (w, m) in g.iter_mut().zip(min) {
+                *w = w.max(m);
+            }
         }
         let sum: f32 = g.iter().sum();
         let scale = if sum > width { width / sum } else { 1.0 };
@@ -1858,6 +1896,43 @@ mod tests {
                 assert_eq!(hit, Pos::new(path, off), "{text:?} at {off}: {r:?}");
             }
         }
+    }
+
+    #[test]
+    fn autofit_widens_narrow_columns_unless_fixed() {
+        let tbl = |layout: &str| {
+            format!(
+                r#"<w:tbl><w:tblPr>{layout}</w:tblPr><w:tblGrid><w:gridCol w:w="400"/><w:gridCol w:w="400"/></w:tblGrid><w:tr><w:tc><w:p><w:r><w:t>Region</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>Q1</w:t></w:r></w:p></w:tc></w:tr></w:tbl>"#
+            )
+        };
+        let widths = |body: &str| {
+            let pkg = parse::open_package(build(body, true)).unwrap();
+            let ed = Model::new(pkg.doc);
+            let (images, labels) = (HashMap::new(), HashMap::new());
+            let page = Page {
+                ed: &ed,
+                images: &images,
+                labels: &labels,
+                editing: false,
+                focus_gen: 0,
+            };
+            let t = ed
+                .doc
+                .body
+                .iter()
+                .find_map(|e| match &e.block {
+                    Block::Table(t) => Some(t.clone()),
+                    _ => None,
+                })
+                .unwrap();
+            page.table_widths(&t, 800.0)
+        };
+        let auto = widths(&tbl(""));
+        // "Region" needs more than the declared 400 twips (~27px)
+        assert!(auto[0] > 60.0, "{auto:?}");
+        assert!(auto[1] < auto[0]);
+        let fixed = widths(&tbl(r#"<w:tblLayout w:type="fixed"/>"#));
+        assert!((fixed[0] - twips(400.0)).abs() < 0.1, "{fixed:?}");
     }
 
     #[test]

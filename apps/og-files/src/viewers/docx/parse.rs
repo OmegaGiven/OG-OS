@@ -407,6 +407,11 @@ fn table_from(src: &str, n: &Node) -> Table {
         orig: Some(n.start..n.end),
         pieces,
         grid,
+        fixed: n
+            .child("tblPr")
+            .and_then(|p| p.child("tblLayout"))
+            .and_then(|l| l.attr(src, "type"))
+            .is_some_and(|v| v == "fixed"),
         rows,
     }
 }

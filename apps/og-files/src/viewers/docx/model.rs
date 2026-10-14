@@ -188,6 +188,8 @@ pub struct Table {
     pub pieces: Vec<Range<usize>>,
     /// column widths, twips
     pub grid: Vec<f32>,
+    /// `w:tblLayout w:type="fixed"`: widths are exact (no autofit)
+    pub fixed: bool,
     pub rows: Vec<Row>,
 }
 
