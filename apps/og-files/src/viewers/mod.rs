@@ -15,6 +15,7 @@ pub mod audio;
 pub mod convert;
 pub mod diskusage;
 pub mod doc;
+pub mod docx;
 pub mod hex;
 pub mod image;
 pub mod model3d;
@@ -47,6 +48,7 @@ pub enum Loaded {
     Archive(archive::Opened),
     Hex(hex::Opened),
     Doc(doc::Opened),
+    Docx(docx::Opened),
     Model3d(model3d::Opened),
 }
 
@@ -66,6 +68,7 @@ pub enum Viewer {
     Archive(archive::State),
     Hex(hex::State),
     Doc(doc::State),
+    Docx(docx::State),
     Model3d(model3d::State),
 }
 
@@ -86,6 +89,7 @@ pub enum Msg {
     Archive(archive::Msg),
     Hex(hex::Msg),
     Doc(doc::Msg),
+    Docx(docx::Msg),
     Model3d(model3d::Msg),
 }
 
@@ -117,6 +121,13 @@ pub fn load(path: PathBuf, kind: Kind) -> Task<Msg> {
             };
         }
         claim!(sheet, Sheet);
+        // .docx opens in the editor; documents it can't model fall back to
+        // the read-only reader in doc.rs
+        if docx::supported(&path) {
+            if let Ok(o) = docx::open(path.clone()).await {
+                return Ok(Loaded::Docx(o));
+            }
+        }
         claim!(doc, Doc);
         claim!(audio, Audio);
         claim!(video, Video);
@@ -188,6 +199,10 @@ impl Viewer {
                 let (st, t) = doc::State::new(o);
                 return (Viewer::Doc(st), t.map(Msg::Doc));
             }
+            Loaded::Docx(o) => {
+                let (st, t) = docx::State::new(o);
+                return (Viewer::Docx(st), t.map(Msg::Docx));
+            }
             Loaded::Model3d(o) => {
                 let (st, t) = model3d::State::new(o);
                 return (Viewer::Model3d(st), t.map(Msg::Model3d));
@@ -209,6 +224,7 @@ impl Viewer {
             Viewer::Archive(s) => s.is_dirty(),
             Viewer::Hex(s) => s.is_dirty(),
             Viewer::Doc(s) => s.is_dirty(),
+            Viewer::Docx(s) => s.is_dirty(),
             Viewer::Model3d(s) => s.is_dirty(),
             _ => false,
         }
@@ -227,6 +243,7 @@ impl Viewer {
             Viewer::Archive(s) => s.is_editing(),
             Viewer::Hex(s) => s.is_editing(),
             Viewer::Doc(s) => s.is_editing(),
+            Viewer::Docx(s) => s.is_editing(),
             Viewer::Model3d(s) => s.is_editing(),
             _ => None,
         }
@@ -242,6 +259,7 @@ impl Viewer {
             Viewer::Archive(s) => s.toggle_edit().map(Msg::Archive),
             Viewer::Hex(s) => s.toggle_edit().map(Msg::Hex),
             Viewer::Doc(s) => s.toggle_edit().map(Msg::Doc),
+            Viewer::Docx(s) => s.toggle_edit().map(Msg::Docx),
             Viewer::Model3d(s) => s.toggle_edit().map(Msg::Model3d),
             _ => Task::none(),
         }
@@ -320,6 +338,10 @@ impl Viewer {
                 let (t, ev) = s.update(m);
                 (t.map(Msg::Doc), ev)
             }
+            (Viewer::Docx(s), Msg::Docx(m)) => {
+                let (t, ev) = s.update(m);
+                (t.map(Msg::Docx), ev)
+            }
             (Viewer::Model3d(s), Msg::Model3d(m)) => {
                 let (t, ev) = s.update(m);
                 (t.map(Msg::Model3d), ev)
@@ -383,6 +405,7 @@ impl Viewer {
             Viewer::Archive(s) => s.save().map(Msg::Archive),
             Viewer::Hex(s) => s.save().map(Msg::Hex),
             Viewer::Doc(s) => s.save().map(Msg::Doc),
+            Viewer::Docx(s) => s.save().map(Msg::Docx),
             Viewer::Model3d(s) => s.save().map(Msg::Model3d),
             _ => Task::none(),
         }
@@ -405,6 +428,7 @@ impl Viewer {
             Viewer::Archive(s) => s.view().map(Msg::Archive),
             Viewer::Hex(s) => s.view().map(Msg::Hex),
             Viewer::Doc(s) => s.view().map(Msg::Doc),
+            Viewer::Docx(s) => s.view().map(Msg::Docx),
             Viewer::Model3d(s) => s.view().map(Msg::Model3d),
         }
     }

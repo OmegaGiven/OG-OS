@@ -215,7 +215,7 @@ can't reasonably be pure Rust:
 | Text / code | txt, md, json, toml, rs, … | ✅ read-only / edit mode | ✅ edit, save over, discard; find/replace, syntax colours | iced `text_editor` ✅, `syntect` or iced `highlighter` | 0 ✅ / 2 |
 | Image | png, jpg, webp, gif, bmp, tiff, svg, avif | ✅ fit + pan/zoom | crop, rotate, resize, exposure; save over (edit mode) | `image` ✅, `resvg` (svg), `kamadak-exif` | 0 ✅ / 3 |
 | Table | csv, tsv ✅; xlsx, xls, ods | ✅ read-only grid | edit cells, add/remove rows, sort; write csv | own parser ✅ → `csv`, `calamine` (read xlsx/ods), `rust_xlsxwriter` | 0 ✅ / 2 |
-| Doc | md ✅ (as text); **pdf ✅**; docx, odt; epub | PDF ✅ pages + thumbnails + zoom; md rendered preview; docx text | PDF ✅ page editing (§5a); md as text | `hayro` ✅ (render), `lopdf` ✅ (edit), `pulldown-cmark`, `docx-rs`, `zip` + xhtml | 0 ✅ / 2 |
+| Doc | md ✅; **pdf ✅**; **docx ✅**; odt, rtf, epub ✅ (read) | PDF ✅ pages + thumbnails + zoom; md rendered preview; **docx ✅ page view** (rich text, lists, tables, images); odt/rtf/epub reader | PDF ✅ page editing (§5a); md source edit; **docx ✅ Word-style editor (§5b)** with lossless round-trip | `hayro` ✅ (render), `lopdf` ✅ (edit), `zip` + `quick-xml` ✅ (docx/odt/epub), iced advanced text ✅ (docx editor widget) | 0 ✅ / 2 ✅ |
 | Audio | mp3, flac, ogg, opus, wav, m4a/aac | waveform, play/seek, tags | trim, normalize, edit tags, export wav/flac | `symphonia` (decode), `cpal` (output), `lofty` (tags), `hound` (wav write) | 2 |
 | Video | mp4, mkv, webm, mov, avi, … | ✅ embedded **libmpv** (loaded at runtime): GPU decoding (`hwdec=auto-safe`, Vulkan/VAAPI), subtitles, track menus, A/V sync, speed with pitch correction, chapters, A-B loop, folder playlist, resume, stats, mpv keyboard shortcuts, fullscreen. No letterbox: the picture is drawn at its fitted size on the app background with an optional edge line | ✅ trim (stream copy) + frame snapshot, always **new files** | libmpv SW render → one wgpu texture per player; FFmpeg (ffmpeg-next) fallback, thumbnails and trim | ✅ (zero-copy GPU display: later) |
 | 3D model | glTF/glb, obj, stl, ply | orbit/zoom, wireframe, normals, bounding-box size | none (view only; maybe re-export stl→glb) | `gltf`, `tobj`, `stl_io`, iced `shader` widget on wgpu | 3 |
@@ -327,6 +327,84 @@ Test hooks:
   og-files demo_outputs` writes sample outputs for eyeballing.
 - **Screenshots:** `OGX_TOOL="Watermark" og-files file.pdf` opens the
   Tools panel on that tool (`OGX_TOOL=""` opens the list).
+
+## 5b. Word (.docx) editor
+
+`viewers/docx/` (model, parse, write, styles, widget). `.docx` opens here;
+a package the editor can't model safely (not a zip, no prefixed
+WordprocessingML, broken XML) falls back to the read-only reader in
+`viewers/doc.rs`. ODT/RTF/EPUB stay in `doc.rs`.
+
+**View mode** (default) shows the document as a page: an off-white sheet
+(816 px = Letter width, 1-inch margins, narrower panes shrink the margins)
+on the dark pane, with headings/Title from the document's own styles
+(size, colour, bold via `basedOn`), bold/italic/underline/strike, run
+sizes and colours, alignment (per visual line), indents, paragraph
+spacing, bullets and numbers (numbering.xml formats, per-numId counters),
+tables (tblGrid widths, gridSpan), embedded pictures (PNG/JPEG/GIF/BMP/
+WebP/TIFF; others show an `[image]` chip), hyperlinks, page breaks and
+content controls (e.g. a TOC) as muted read-only blocks. Text is selectable
+(click, drag, double/triple click, Shift+click) and Ctrl+C / Ctrl+A work;
+arrows / PageUp / PageDown / Space / Home / End scroll.
+
+**Edit mode** (Ctrl+E / Edit) adds a caret and a toolbar: style menu
+(Normal, Title, Subtitle, Heading 1–4, Quote), B / I / U / S toggles that
+reflect the caret or selection, bulleted / numbered list toggles, left /
+centre / right / justify, undo / redo, plus a live word count. Keys:
+typing, Backspace / Delete (Ctrl = by word; at a paragraph edge they merge
+paragraphs; Backspace at the start of a list item removes the bullet),
+Enter splits (Enter on an empty list item ends the list; Enter at the end
+of a heading continues in Normal), Shift+Enter = line break (`w:br`), Tab
+= next table cell (selects it; Shift+Tab back) or a tab character,
+arrows / Ctrl+arrows by word / Home / End (visual line) / PageUp / PageDown
+/ Ctrl+Home / Ctrl+End, all with Shift to select, Ctrl+B/I/U (on the
+selection, or as the typing style at the caret), Ctrl+Z / Ctrl+Shift+Z /
+Ctrl+Y, Ctrl+X / Ctrl+C / Ctrl+V (plain text; pasted lines become
+paragraphs). Table cells are edited in place (caret moves into cells).
+While the page has keyboard focus every plain key goes to the editor —
+Delete/F2/Backspace/letters never reach the files pane; Ctrl+S, Ctrl+E,
+Ctrl+W still reach the app. Escape or clicking elsewhere releases focus.
+Save (Ctrl+S) writes over the original atomically (temp file + rename);
+leaving edit mode with unsaved changes is refused (Save or Discard);
+the tab shows the modified dot and close asks first.
+
+**Round-trip guarantee.** The model keeps the original document.xml text
+and, for every block, its byte span. Saving rebuilds document.xml:
+untouched paragraphs, tables and unknown elements (sectPr, bookmarks,
+content controls, anything else) are copied **byte for byte**, including
+the whitespace between them; only paragraphs that were actually changed
+are regenerated, reusing their original `<w:p …>` start tag, their pPr,
+and each run's original rPr with just the toggled `b`/`i`/`u`/`strike`
+merged in (in schema order; un-bolding a bold-by-style run writes
+`<w:b w:val="0"/>`). Inline elements the editor doesn't edit (pictures,
+hyperlinks, fields, tracked changes, footnote references, bookmarks) are
+atomic objects kept verbatim. A table is copied verbatim until one of its
+cells changes; then only the changed cell paragraphs are regenerated and
+the row/cell XML around them is copied. Every other zip entry (styles,
+numbering, headers/footers, media, rels, [Content_Types].xml, docProps) is
+copied raw — same compressed bytes — in the original order. An unedited
+save therefore reproduces document.xml exactly, and undoing back to the
+saved state gives byte-identical XML again (tests in `docx/tests.rs`,
+including an optional LibreOffice conversion check run with `--ignored`).
+New paragraphs inherit the pPr of the paragraph they were split from.
+Heading styles are looked up by **name** in styles.xml (`heading 1`, works
+with localized ids), else the conventional `Heading1` id. Lists reuse the
+document's own bullet / decimal definitions; if numbering.xml has none (or
+doesn't exist) a minimal abstractNum/num is appended (creating the part,
+its relationship and content-type override when needed).
+
+**Layout** is lazy: only blocks near the viewport are shaped (cosmic-text
+via iced's `Paragraph`), cached per paragraph id + revision + width;
+blocks off screen use height estimates that are corrected with scroll
+anchoring as they come into view, so 100+ page documents open and scroll
+instantly. Undo snapshots share unchanged blocks (`Arc`), so they're cheap.
+
+**Known limits:** no real pagination (one continuous sheet; page breaks show
+as a marker), no headers/footers/footnotes display, floating images and
+text boxes are shown as inline chips, hyperlink/field text is atomic (can't
+be edited inside), no font family / size / colour picking, no table
+structure editing (add/remove rows), RTL text is laid out but caret
+movement assumes left-to-right, clipboard is plain text only.
 
 ## 6. File-manager features
 
@@ -522,7 +600,8 @@ entered, saved over, discarded, exported, errors.
 **Phase 2: media and docs**
 - [ ] audio (symphonia + cpal, waveform, tags)
 - [ ] video playback (GStreamer to wgpu)
-- [ ] PDF: tool recipes/pipelines, keep outlines through rebuilds, encrypted-save option; markdown preview, docx text
+- [ ] PDF: tool recipes/pipelines, keep outlines through rebuilds, encrypted-save option; markdown preview
+- [x] Word (.docx) editor with lossless round-trip (§5b)
 - [ ] xlsx/ods read, table cell editing, csv write
 - [x] archives as folders; extract / compress from the context menu (§6b)
 - [x] open with / default apps / open terminal here (§6)

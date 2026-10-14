@@ -114,7 +114,7 @@ fn tools_for(kind: Kind) -> &'static str {
         Kind::Table => "sheets · edit cells · rows/columns · sort (edit mode)",
         Kind::Text => "edit mode · syntax colours · find (phase 2)",
         Kind::Doc => {
-            "PDF: page editing + 54-tool panel (Tools). Markdown / DOCX / ODT / EPUB: reader"
+            "PDF: page editing + 54-tool panel (Tools). DOCX: Word-style editor (edit mode). Markdown: edit source. ODT / EPUB: reader"
         }
         Kind::Model3d => "orbit · pan · zoom · shaded / wire / normals · Y/Z up · dimensions",
         Kind::Archive => "browse like a folder · open entries · extract",
