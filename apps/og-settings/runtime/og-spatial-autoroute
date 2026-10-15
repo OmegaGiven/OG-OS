@@ -82,12 +82,17 @@ function wakeOnboard() {
 }
 
 function preferredSink() {
+  // 4: a connected Bluetooth headset/headphones (AirPods, ...) — the
+  //    sink only exists while it's connected, so connecting one takes
+  //    the audio and disconnecting falls back to the wired ranking
   // 3: onboard analog with headphones plugged in
   // 2: any USB analog output (ATR monitor jack, G935, ...)
   // 1: anything else real (HDMI monitor speakers)
   // 0: onboard analog with nothing plugged in
   const score = (s) => {
-    if (s.name.startsWith('effect_') || !s.name.startsWith('alsa_output.')) return -1;
+    if (s.name.startsWith('effect_')) return -1;
+    if (s.name.startsWith('bluez_output.')) return 4;
+    if (!s.name.startsWith('alsa_output.')) return -1;
     const analog = /analog/.test(s.name);
     if (s.name.startsWith('alsa_output.pci-') && analog) return hpLive(s.ports) ? 3 : 0;
     if (s.name.startsWith('alsa_output.usb-') && analog) return 2;
