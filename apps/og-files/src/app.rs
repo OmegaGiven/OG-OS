@@ -105,6 +105,8 @@ enum Dialog {
     NewFile {
         dir: PathBuf,
         name: String,
+        /// extension added when the typed name has none ("" = as typed)
+        ext: &'static str,
     },
     ConfirmDelete {
         paths: Vec<PathBuf>,
@@ -156,6 +158,8 @@ pub enum MenuAction {
     Restore,
     NewFolder,
     NewFile,
+    NewText,
+    NewMarkdown,
     Bookmark,
     CopyPath,
     Mount,
@@ -252,6 +256,8 @@ pub enum Message {
     Job(JobEvent),
     JobCancel(JobId),
     OpDone(Result<String, String>, Vec<PathBuf>),
+    /// "New file" finished: refresh the folder, open the file to edit
+    FileCreated(Result<PathBuf, String>, PathBuf),
     Drives(Result<Vec<Drive>, String>),
     DrivesChanged,
     DriveDone(Result<String, String>),
@@ -997,10 +1003,16 @@ impl App {
                     text_input::select_all(text_input::Id::new(DIALOG_INPUT)),
                 ])
             }
-            MenuAction::NewFile => {
+            MenuAction::NewFile | MenuAction::NewText | MenuAction::NewMarkdown => {
+                let (name, ext) = match a {
+                    MenuAction::NewText => ("Untitled", ".txt"),
+                    MenuAction::NewMarkdown => ("Untitled", ".md"),
+                    _ => ("untitled.txt", ""),
+                };
                 self.dialog = Some(Dialog::NewFile {
                     dir,
-                    name: "untitled.txt".into(),
+                    name: name.into(),
+                    ext,
                 });
                 Task::batch([
                     text_input::focus(text_input::Id::new(DIALOG_INPUT)),
@@ -1320,10 +1332,9 @@ impl App {
                     move |r| Message::OpDone(r, vec![dir.clone()]),
                 )
             }
-            Dialog::NewFolder { dir, name } | Dialog::NewFile { dir, name }
+            Dialog::NewFolder { name, .. } | Dialog::NewFile { name, .. }
                 if name.trim().is_empty() =>
             {
-                let _ = dir;
                 Task::none()
             }
             Dialog::NewFolder { dir, name } => {
@@ -1340,18 +1351,23 @@ impl App {
                     move |r| Message::OpDone(r, vec![d2.clone()]),
                 )
             }
-            Dialog::NewFile { dir, name } => {
+            Dialog::NewFile { dir, name, ext } => {
+                let name = with_ext(name.trim(), ext);
+                // a new Markdown file starts with its name as the title
+                let body = if name.ends_with(".md") {
+                    let stem = name.trim_end_matches(".md");
+                    format!("# {stem}\n\n")
+                } else {
+                    String::new()
+                };
                 let d2 = dir.clone();
                 Task::perform(
                     async move {
-                        tokio::task::spawn_blocking(move || {
-                            ops::new_file(&dir, name.trim())
-                                .map(|p| format!("Created {}", p.display()))
-                        })
-                        .await
-                        .map_err(|e| e.to_string())?
+                        tokio::task::spawn_blocking(move || ops::new_file_with(&dir, &name, &body))
+                            .await
+                            .map_err(|e| e.to_string())?
                     },
-                    move |r| Message::OpDone(r, vec![d2.clone()]),
+                    move |r| Message::FileCreated(r, d2.clone()),
                 )
             }
             Dialog::ConfirmDelete { paths } => self.start_job(JobSpec {
@@ -1783,6 +1799,22 @@ impl App {
                     j.control.cancel();
                 }
                 Task::none()
+            }
+            Message::FileCreated(r, dir) => {
+                let refresh = self.sidebar.refresh(&[dir]).map(Message::Sidebar);
+                match r {
+                    Ok(p) => {
+                        self.details
+                            .record_for(format!("Created {}", p.display()), Some(&p));
+                        let k = Kind::of(&p, false);
+                        let (t, ev) = self.tabs.open_to_edit(p, k);
+                        Task::batch([refresh, t.map(Message::Tabs), self.on_tabs_event(ev)])
+                    }
+                    Err(e) => {
+                        self.details.record(format!("Failed: {e}"));
+                        refresh
+                    }
+                }
             }
             Message::OpDone(r, dirs) => {
                 match r {
@@ -2331,7 +2363,9 @@ impl App {
             entries.push(("Empty trash…", MenuAction::EmptyTrash, true));
         } else if n == 0 {
             entries.push(("New folder…", MenuAction::NewFolder, true));
-            entries.push(("New file…", MenuAction::NewFile, true));
+            entries.push(("New text file…  Ctrl+N", MenuAction::NewText, true));
+            entries.push(("New Markdown file…", MenuAction::NewMarkdown, true));
+            entries.push(("New empty file…", MenuAction::NewFile, true));
             entries.push(("Paste", MenuAction::Paste, has_clip));
             entries.push((
                 "Open terminal here  Ctrl+Alt+T",
@@ -2405,6 +2439,8 @@ impl App {
             entries.push(("Move to trash  Del", MenuAction::Trash, true));
             entries.push(("Delete permanently…  Shift+Del", MenuAction::Delete, true));
             entries.push(("New folder here…", MenuAction::NewFolder, true));
+            entries.push(("New text file here…", MenuAction::NewText, true));
+            entries.push(("New Markdown file here…", MenuAction::NewMarkdown, true));
         }
         let menu = container(
             column(entries.into_iter().map(|(label, a, enabled)| {
@@ -2543,14 +2579,29 @@ impl App {
     }
 
     fn dialog_view<'a>(&'a self, d: &'a Dialog) -> Element<'a, Message> {
-        let input = |label: &'a str, value: &'a str, ok: &'a str| -> Element<'a, Message> {
+        let input = |label: &'a str,
+                     value: &'a str,
+                     ok: &'a str,
+                     suffix: &'a str|
+         -> Element<'a, Message> {
+            // `suffix`: extension added on create unless the name has one
+            let suffix = if suffix.is_empty() || value.contains('.') {
+                ""
+            } else {
+                suffix
+            };
             column![
                 text(label).size(16),
-                text_input("", value)
-                    .id(text_input::Id::new(DIALOG_INPUT))
-                    .on_input(Message::DialogInput)
-                    .on_submit(Message::DialogOk)
-                    .size(14),
+                row![
+                    text_input("", value)
+                        .id(text_input::Id::new(DIALOG_INPUT))
+                        .on_input(Message::DialogInput)
+                        .on_submit(Message::DialogOk)
+                        .size(14),
+                    text(suffix).size(14).color(theme::MUTED),
+                ]
+                .spacing(6)
+                .align_y(iced::Alignment::Center),
                 row![
                     Space::with_width(Length::Fill),
                     button(text("Cancel"))
@@ -2592,9 +2643,18 @@ impl App {
                 .unwrap_or_else(|| p.display().to_string())
         };
         let body: Element<'a, Message> = match d {
-            Dialog::Rename { name: v, .. } => input("Rename", v, "Rename"),
-            Dialog::NewFolder { name: v, .. } => input("New folder", v, "Create"),
-            Dialog::NewFile { name: v, .. } => input("New file", v, "Create"),
+            Dialog::Rename { name: v, .. } => input("Rename", v, "Rename", ""),
+            Dialog::NewFolder { name: v, .. } => input("New folder", v, "Create", ""),
+            Dialog::NewFile { name: v, ext, .. } => input(
+                match *ext {
+                    ".txt" => "New text file",
+                    ".md" => "New Markdown file",
+                    _ => "New file",
+                },
+                v,
+                "Create",
+                ext,
+            ),
             Dialog::ConfirmDelete { paths } => confirm(
                 if paths.len() == 1 {
                     format!("Delete \"{}\" permanently?", name(&paths[0]))
@@ -2860,6 +2920,7 @@ fn shortcut(key: Key, mods: Modifiers) -> Option<Message> {
             Key::Character("n") | Key::Character("N") if mods.shift() => {
                 Some(Message::Shortcut(MenuAction::NewFolder))
             }
+            Key::Character("n") => Some(Message::Shortcut(MenuAction::NewText)),
             Key::Named(key::Named::F4) => Some(Message::CloseTab),
             _ => None,
         };
@@ -2900,5 +2961,23 @@ fn files_key(key: Key, mods: Modifiers) -> Option<Message> {
             .filter(|c| !c.is_control())
             .map(|c| Message::Key(K::Char(c))),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn new_file_names_get_extension_once() {
+    assert_eq!(with_ext("Untitled", ".md"), "Untitled.md");
+    assert_eq!(with_ext("notes.txt", ".md"), "notes.txt");
+    assert_eq!(with_ext("todo", ".txt"), "todo.txt");
+    assert_eq!(with_ext("Makefile", ""), "Makefile");
+}
+
+/// `name` plus `ext` unless the name already has an extension.
+fn with_ext(name: &str, ext: &str) -> String {
+    if ext.is_empty() || Path::new(name).extension().is_some() {
+        name.to_string()
+    } else {
+        format!("{name}{ext}")
     }
 }

@@ -302,14 +302,15 @@ pub fn new_folder(dir: &Path, name: &str) -> Result<PathBuf, String> {
     create_unique(dir, name, |p| DirBuilder::new().create(p))
 }
 
-/// Create an empty file `name` in `dir` (unique like new_folder).
-pub fn new_file(dir: &Path, name: &str) -> Result<PathBuf, String> {
+/// Create file `name` in `dir` holding `body` (unique like new_folder).
+pub fn new_file_with(dir: &Path, name: &str, body: &str) -> Result<PathBuf, String> {
     create_unique(dir, name, |p| {
+        use std::io::Write;
         OpenOptions::new()
             .write(true)
             .create_new(true)
-            .open(p)
-            .map(|_| ())
+            .open(p)?
+            .write_all(body.as_bytes())
     })
 }
 
@@ -2392,11 +2393,13 @@ mod tests {
             new_folder(&t.0, "New Folder").unwrap(),
             t.p("New Folder (2)")
         );
-        assert_eq!(new_file(&t.0, "n.txt").unwrap(), t.p("n.txt"));
-        assert_eq!(new_file(&t.0, "n.txt").unwrap(), t.p("n (2).txt"));
+        assert_eq!(new_file_with(&t.0, "n.txt", "").unwrap(), t.p("n.txt"));
+        assert_eq!(new_file_with(&t.0, "n.txt", "").unwrap(), t.p("n (2).txt"));
         assert!(t.p("New Folder (2)").is_dir() && t.p("n (2).txt").is_file());
         assert!(new_folder(&t.0, "a/b").is_err());
-        assert!(new_file(&t.p("missing"), "x").is_err());
+        assert!(new_file_with(&t.p("missing"), "x", "").is_err());
+        let md = new_file_with(&t.0, "a.md", "# a\n\n").unwrap();
+        assert_eq!(std::fs::read_to_string(md).unwrap(), "# a\n\n");
     }
 
     #[test]

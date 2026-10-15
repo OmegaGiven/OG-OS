@@ -256,3 +256,82 @@ fn item_style(
         ..Default::default()
     }
 }
+
+// ---------------------------------------------------------- editor focus
+
+/// Focus the last multi-line editor on screen (a `text_editor`: focusable,
+/// unnamed, and not a text input). Used when a new file opens straight
+/// into edit mode so typing lands in it without a click. Two passes: find
+/// the target's index, then focus it and unfocus everything else.
+pub fn focus_last_editor<T: Send + 'static>() -> iced::Task<T> {
+    use iced::advanced::widget::operation::{Focusable, Operation, Outcome};
+    use iced::advanced::widget::Id;
+    use iced::Rectangle;
+
+    #[derive(Default)]
+    struct Find {
+        n: usize,
+        target: Option<usize>,
+        /// index of the last focusable seen, if unnamed
+        pending: Option<usize>,
+    }
+    impl Find {
+        fn settle(&mut self) {
+            if let Some(i) = self.pending.take() {
+                self.target = Some(i);
+            }
+        }
+    }
+    impl<T: Send + 'static> Operation<T> for Find {
+        fn container(
+            &mut self,
+            _id: Option<&Id>,
+            _b: Rectangle,
+            children: &mut dyn FnMut(&mut dyn Operation<T>),
+        ) {
+            children(self);
+        }
+        fn focusable(&mut self, _s: &mut dyn Focusable, id: Option<&Id>) {
+            self.settle();
+            self.pending = id.is_none().then_some(self.n);
+            self.n += 1;
+        }
+        fn text_input(
+            &mut self,
+            _s: &mut dyn iced::advanced::widget::operation::TextInput,
+            _id: Option<&Id>,
+        ) {
+            self.pending = None; // a single-line input, not an editor
+        }
+        fn finish(&self) -> Outcome<T> {
+            let target = self.pending.or(self.target);
+            match target {
+                Some(t) => Outcome::Chain(Box::new(Apply { n: 0, target: t })),
+                None => Outcome::None,
+            }
+        }
+    }
+    struct Apply {
+        n: usize,
+        target: usize,
+    }
+    impl<T: Send + 'static> Operation<T> for Apply {
+        fn container(
+            &mut self,
+            _id: Option<&Id>,
+            _b: Rectangle,
+            children: &mut dyn FnMut(&mut dyn Operation<T>),
+        ) {
+            children(self);
+        }
+        fn focusable(&mut self, s: &mut dyn Focusable, _id: Option<&Id>) {
+            if self.n == self.target {
+                s.focus();
+            } else {
+                s.unfocus();
+            }
+            self.n += 1;
+        }
+    }
+    iced::advanced::widget::operate(Find::default())
+}

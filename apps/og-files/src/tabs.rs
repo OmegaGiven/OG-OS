@@ -16,6 +16,8 @@ pub struct Tab {
     /// single-click preview: replaced by the next preview, pinned by a
     /// double-click or by editing
     preview: bool,
+    /// enter edit mode as soon as the viewer has loaded (new files)
+    edit_on_load: bool,
 }
 
 #[derive(Default)]
@@ -79,6 +81,7 @@ impl Tabs {
             title: title_for(&path),
             viewer: Viewer::Loading,
             preview: !pin,
+            edit_on_load: false,
         };
         let reusable = self
             .tabs
@@ -91,6 +94,18 @@ impl Tabs {
         self.active = Some(id);
         let task = viewers::load(path, kind).map(move |m| Msg::Viewer(id, m));
         (task, self.focus_event())
+    }
+
+    /// Open `path` pinned and switch it to edit mode once loaded (if the
+    /// viewer has one).
+    pub fn open_to_edit(&mut self, path: PathBuf, kind: Kind) -> (Task<Msg>, Event) {
+        let r = self.open(path, kind, true);
+        if let Some(t) = self.active_mut() {
+            if matches!(t.viewer, Viewer::Loading) {
+                t.edit_on_load = true;
+            }
+        }
+        r
     }
 
     pub fn close_active(&mut self) -> Option<Event> {
@@ -169,6 +184,7 @@ impl Tabs {
             kind: Kind::Folder,
             title,
             viewer,
+            edit_on_load: false,
             preview: false,
         });
         self.active = Some(id);
@@ -204,7 +220,17 @@ impl Tabs {
                 let Some(tab) = self.tabs.iter_mut().find(|t| t.id == id) else {
                     return (Task::none(), None); // tab closed while loading
                 };
-                let (task, ev) = tab.viewer.update(&tab.path, m);
+                let (mut task, ev) = tab.viewer.update(&tab.path, m);
+                if tab.edit_on_load && !matches!(tab.viewer, Viewer::Loading) {
+                    tab.edit_on_load = false;
+                    if tab.viewer.is_editing() == Some(false) {
+                        task = Task::batch([
+                            task,
+                            tab.viewer.toggle_edit(),
+                            crate::widgets::focus_last_editor(),
+                        ]);
+                    }
+                }
                 if tab.viewer.is_dirty() || tab.viewer.is_editing() == Some(true) {
                     tab.preview = false; // work in progress: never replace it
                 }
