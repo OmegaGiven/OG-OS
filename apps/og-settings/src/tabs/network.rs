@@ -2,7 +2,8 @@ use iced::widget::{button, column, container, row, scrollable, text, text_input,
 use iced::{Background, Border, Color, Element, Length};
 
 use crate::app::{AppColors, Message};
-use crate::sway::{BluetoothAdapter, BluetoothDevice, EthernetInterface, WifiNetwork, WifiStatus};
+use crate::bluetooth::BtUi;
+use crate::sway::{EthernetInterface, WifiNetwork, WifiStatus};
 use crate::galias::Alias;
 use crate::vpn::{SplitApp, TailscaleStatus, VpnState};
 
@@ -11,8 +12,7 @@ pub fn view<'a>(
     wifi_status: &'a WifiStatus,
     wifi_networks: &'a [WifiNetwork],
     ethernet_interfaces: &'a [EthernetInterface],
-    bluetooth_adapter: &'a BluetoothAdapter,
-    bluetooth_devices: &'a [BluetoothDevice],
+    bt: &'a BtUi,
     scanning: bool,
     tailscale: &'a TailscaleStatus,
     vpn_state: &'a VpnState,
@@ -56,25 +56,6 @@ pub fn view<'a>(
     };
     let dim = move |t: String| -> Element<'a, Message> {
         text(t).size(12).style(move |_| iced::widget::text::Style { color: Some(colors.dim_text) }).into()
-    };
-    // Three-tier brightness since the shared theme has no dedicated
-    // "warning" color: Connected gets the strongest (accent), Paired-but-
-    // disconnected sits at full text brightness (distinct from both ends),
-    // Not paired gets the dimmest.
-    let bt_status_pill = move |status: &'static str| -> Element<'a, Message> {
-        let color = match status {
-            "Connected" => colors.accent,
-            "Paired" => colors.text,
-            _ => colors.dim_text,
-        };
-        container(text(status).size(11).style(move |_| iced::widget::text::Style { color: Some(color) }))
-            .padding([2, 8])
-            .style(move |_| container::Style {
-                background: Some(Background::Color(color.scale_alpha(0.15))),
-                border: Border { color, width: 1.0, radius: 999.0.into() },
-                ..Default::default()
-            })
-            .into()
     };
     #[derive(Clone, Copy)]
     enum ActionKind { Plain, Accent, Danger }
@@ -220,91 +201,8 @@ pub fn view<'a>(
     .width(Length::Fill);
 
     // ── Bluetooth ────────────────────────────────────────────────────────
-    let bt_scan_label: &'static str = if scanning { "Scanning…" } else { "Scan" };
-    let bt_scan_btn = button(text(bt_scan_label).size(12).style(move |_| iced::widget::text::Style { color: Some(colors.text) }))
-        .style(btn_style)
-        .on_press_maybe(if scanning || !bluetooth_adapter.powered { None } else { Some(Message::BluetoothScanStart) })
-        .padding([6, 14]);
-
-    let mut bt_rows: Vec<Element<Message>> = Vec::new();
-    if !bluetooth_adapter.present {
-        bt_rows.push(dim("No Bluetooth adapter found.".to_string()));
-    } else if bluetooth_adapter.powered {
-        bt_rows.push(
-            row![
-                label("Discoverable".to_string()), iced::widget::horizontal_space(),
-                toggler(bluetooth_adapter.discoverable).on_toggle(Message::BluetoothDiscoverableToggled),
-            ]
-            .align_y(iced::Alignment::Center).spacing(12).into()
-        );
-        bt_rows.push(
-            row![
-                label("Pairable".to_string()), iced::widget::horizontal_space(),
-                toggler(bluetooth_adapter.pairable).on_toggle(Message::BluetoothPairableToggled),
-            ]
-            .align_y(iced::Alignment::Center).spacing(12).into()
-        );
-
-        if bluetooth_devices.is_empty() {
-            bt_rows.push(dim("No devices found. Try Scan.".to_string()));
-        } else {
-            for d in bluetooth_devices {
-                let status = if d.connected { "Connected" } else if d.paired { "Paired" } else { "Not paired" };
-                let mac = d.mac.clone();
-
-                let mut actions: Vec<Element<Message>> = Vec::new();
-                if d.paired {
-                    if d.connected {
-                        actions.push(action_btn("Disconnect", Message::BluetoothDisconnect(mac.clone()), ActionKind::Plain));
-                    } else {
-                        actions.push(action_btn("Connect", Message::BluetoothConnect(mac.clone()), ActionKind::Accent));
-                    }
-                    actions.push(action_btn("Remove", Message::BluetoothRemove(mac.clone()), ActionKind::Danger));
-                } else {
-                    actions.push(action_btn("Pair", Message::BluetoothPair(mac.clone()), ActionKind::Accent));
-                }
-
-                bt_rows.push(
-                    row![
-                        column![
-                            row![label(d.name.clone()), bt_status_pill(status)]
-                                .align_y(iced::Alignment::Center)
-                                .spacing(8),
-                            dim(d.mac.clone()),
-                        ]
-                        .spacing(2)
-                        .width(Length::Fill),
-                        row(actions).spacing(8),
-                    ]
-                    .align_y(iced::Alignment::Center)
-                    .spacing(10)
-                    .into()
-                );
-            }
-        }
-    }
-
-    let bt_card = container(
-        column(
-            std::iter::once(
-                row![
-                    title("Bluetooth"),
-                    iced::widget::horizontal_space(),
-                    bt_scan_btn,
-                    toggler(bluetooth_adapter.powered).on_toggle(Message::BluetoothPowerToggled),
-                ]
-                .align_y(iced::Alignment::Center)
-                .spacing(12)
-                .into()
-            )
-            .chain(bt_rows)
-            .collect::<Vec<_>>()
-        )
-        .spacing(12)
-        .padding(20),
-    )
-    .style(card_style)
-    .width(Length::Fill);
+    // Live BlueZ state + pairing flows; rendered by `tabs::bluetooth`.
+    let bt_card = crate::tabs::bluetooth::card(colors, bt);
 
     // ── Tailscale (private VPN) ─────────────────────────────────────────
     let mut ts_rows: Vec<Element<Message>> = Vec::new();
