@@ -1944,7 +1944,7 @@ mod tests {
     fn wrapped_and_centred_lines() {
         let long = "word ".repeat(120);
         let body = format!(
-            r#"<w:p><w:r><w:t xml:space="preserve">{long}</w:t></w:r></w:p><w:p><w:pPr><w:jc w:val="center"/></w:pPr><w:r><w:t xml:space="preserve">{long}</w:t></w:r></w:p><w:p><w:pPr><w:jc w:val="right"/></w:pPr><w:r><w:t>short</w:t></w:r></w:p>"#
+            r#"<w:p><w:r><w:t xml:space="preserve">{long}</w:t></w:r></w:p><w:p><w:pPr><w:jc w:val="center"/></w:pPr><w:r><w:t xml:space="preserve">{long}</w:t></w:r><w:r><w:br/><w:t>end</w:t></w:r></w:p><w:p><w:pPr><w:jc w:val="right"/></w:pPr><w:r><w:t>short</w:t></w:r></w:p>"#
         );
         agree(&body, 1000.0);
         agree(&body, 420.0);
@@ -1970,6 +1970,8 @@ mod tests {
         assert!(l.pieces.len() > 3);
         let first = &l.pieces[0];
         let last = l.pieces.last().unwrap();
+        // the last line is just "end" (after a line break): centred, it
+        // starts far right of the full-width first line, whatever the font
         assert!(last.x > first.x + 20.0, "short last line is centred");
     }
 }
