@@ -18,6 +18,7 @@ from pathlib import Path
 
 APP = Path(__file__).resolve().parent.parent
 ROOT = Path(subprocess.check_output(["git", "-C", str(APP), "rev-parse", "--show-toplevel"], text=True).strip())
+SELF = "packaging/export-public.py"
 SUITE_DEPS = ("og-config", "og-theme", "og-wayland")
 
 # strings that must never be published (real tailnet / personal ids)
@@ -38,6 +39,8 @@ def scan(files):
     bad = []
     rx = [re.compile(b) for b in BLOCK]
     for f in files:
+        if f == SELF:
+            continue  # holds the block list itself; never exported
         try:
             text = (APP / f).read_text(errors="ignore")
         except IsADirectoryError:
@@ -89,7 +92,7 @@ def main():
             continue
         shutil.rmtree(entry) if entry.is_dir() and not entry.is_symlink() else entry.unlink()
     for f in files:
-        if f == "packaging/export-public.py":
+        if f == SELF:
             continue  # monorepo tooling
         d = dest / f
         d.parent.mkdir(parents=True, exist_ok=True)
@@ -97,9 +100,9 @@ def main():
     cargo = dest / "Cargo.toml"
     cargo.write_text(standalone_toml(cargo.read_text()))
     shutil.copy2(ROOT / "Cargo.lock", dest / "Cargo.lock")
-    # resolve offline against the copied lock: drops unused packages,
+    # resolve against the copied lock: drops unused packages,
     # keeps every version that's shared
-    subprocess.check_call(["cargo", "metadata", "--offline", "--format-version", "1",
+    subprocess.check_call(["cargo", "metadata", "--format-version", "1",
                            "--manifest-path", str(cargo)], stdout=subprocess.DEVNULL)
     print(f"exported {len(files)} files to {dest}")
 
