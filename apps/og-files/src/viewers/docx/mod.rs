@@ -100,7 +100,7 @@ pub struct State {
 }
 
 /// Bullet / number text for every list paragraph (Word counts per numId).
-fn list_labels(ed: &Editor) -> HashMap<u64, String> {
+pub(crate) fn list_labels(ed: &Editor) -> HashMap<u64, String> {
     let mut out = HashMap::new();
     let mut counters: HashMap<String, [u32; 9]> = HashMap::new();
     let num = &ed.doc.numbering;

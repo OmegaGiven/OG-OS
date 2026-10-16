@@ -26,6 +26,9 @@
 //!                   images)
 //!   * [`convert`]   PDF → docx/odt/pptx/xlsx/csv/html/md/txt/rtf/xml/epub
 //!                   writers over the extracted layout
+//!   * [`topdf`]     anything → PDF (office files, HTML/web pages,
+//!                   Markdown, e-mail, e-books, comics, SVG) via an
+//!                   in-process Typst typesetter
 //!   * [`server`]    optional Stirling-PDF REST backend for OCR, compress,
 //!                   office conversion, PDF/A, certificate signing
 
@@ -39,6 +42,7 @@ pub mod raster;
 pub mod scans;
 pub mod server;
 pub mod structure;
+pub mod topdf;
 
 #[derive(Debug, Clone)]
 pub enum Output {

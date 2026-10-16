@@ -67,6 +67,21 @@ rten = { version = "0.26", default-features = false, features = ["rten_format"] 
 rqrr = "0.11"
 imageproc = { version = "0.27", default-features = false }
 
+# anything → PDF (pdf/tools/topdf): Typst as an in-process typesetter, plus
+# input parsers. All pure Rust.
+typst = "0.15.1"
+typst-layout = "0.15.1"
+typst-pdf = "0.15.1"
+typst-kit = { version = "0.15.1", default-features = false, features = ["scan-fonts"] }
+# SVG sizing/validation (the usvg Typst's PDF export embeds SVGs with)
+usvg = { version = "0.47", default-features = false }
+pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
+scraper = { version = "0.24", default-features = false }
+url = "2"
+mail-parser = { version = "0.11", default-features = false }
+mobi = "0.8"
+rars = { version = "0.11", default-features = false }
+
 og-config = { path = "../../crates/og-config", optional = true }
 og-theme = { path = "../../crates/og-theme", optional = true }
 
@@ -112,3 +127,5 @@ syntect = "5"
 # test-only: QR separator pages and rendered text for the vision tools
 qrcode = { version = "0.14", default-features = false, features = ["image"] }
 ab_glyph = "0.2"
+# test-only: builds the .cbr fixture (the app itself only reads RAR)
+rars = { version = "0.11", default-features = false, features = ["write"] }

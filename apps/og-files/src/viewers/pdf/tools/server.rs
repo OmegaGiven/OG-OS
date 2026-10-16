@@ -257,6 +257,7 @@ pub fn convert_from_pdf(cfg: &ServerConfig, pdf: &[u8], target: Target) -> Resul
 
 /// Any supported file (office documents, HTML, Markdown, EML, images…) to
 /// PDF; the server picks the converter from `file_name`'s extension.
+#[allow(dead_code)] // superseded by tools::topdf (server.rs goes away)
 pub fn convert_to_pdf(cfg: &ServerConfig, file_name: &str, bytes: &[u8]) -> Result<Reply, String> {
     let ext = extension_of(file_name).ok_or("file has no extension, can't pick a converter")?;
     let name = safe_name(file_name, &ext);
@@ -298,6 +299,7 @@ pub fn convert_to_pdf(cfg: &ServerConfig, file_name: &str, bytes: &[u8]) -> Resu
     post(cfg, path, form, "pdf")
 }
 
+#[allow(dead_code)] // superseded by tools::topdf::url_to_pdf
 pub fn url_to_pdf(cfg: &ServerConfig, url: &str) -> Result<Reply, String> {
     let url = url.trim();
     let lower = url.to_ascii_lowercase();

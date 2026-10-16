@@ -245,7 +245,7 @@ impl Tool {
             SinglePage => "Stacks every page into one tall page.",
             Overlay => "Draws another PDF's pages over or under these.",
             InsertImages => "Adds image files as pages after the current page.",
-            InsertUrl => "Renders a web page to PDF (server) and inserts it after the current page.",
+            InsertUrl => "Typesets a web page (HTML and images; scripts don't run) and inserts it after the current page.",
             PageNumbers => "Placeholders: {n}, {total}, {filename}.",
             TextStamp => "Stamps a line of text on the chosen pages.",
             Watermark => "Large faint text on every page, centred or tiled.",
@@ -292,11 +292,7 @@ impl Tool {
     pub fn needs_server(self) -> bool {
         matches!(
             self,
-            InsertUrl
-                | CertSign
-                | ValidateSignature
-                | CompressServer
-                | PdfA
+            CertSign | ValidateSignature | CompressServer | PdfA
         )
     }
 }
@@ -722,14 +718,8 @@ pub fn job(tool: Tool, form: &Form, input: JobInput) -> Result<Job, String> {
             })
         }
         InsertUrl => {
-            let (cfg, url) = (srv()?, form.t("url", ""));
-            Box::new(move |_| {
-                let r = server::url_to_pdf(&cfg, url.trim())?;
-                if r.ext != "pdf" {
-                    return Err(format!("server returned .{} instead of a PDF", r.ext));
-                }
-                Ok(JobOut::Insert(r.bytes))
-            })
+            let url = form.t("url", "");
+            Box::new(move |_| tools::topdf::url_to_pdf(url.trim()).map(JobOut::Insert))
         }
         PageNumbers => {
             let p = range("pages")?;

@@ -167,6 +167,7 @@ pub enum MenuAction {
     Eject,
     EmptyTrash,
     MakePdf,
+    ConvertPdf,
     Compress,
     DiskUsage,
     OpenDefault,
@@ -1227,6 +1228,31 @@ impl App {
                         (reg, files, mime)
                     },
                     |(reg, files, mime)| Message::OpenWithReady(reg, files, mime),
+                )
+            }
+            MenuAction::ConvertPdf => {
+                let files: Vec<PathBuf> = items
+                    .into_iter()
+                    .filter(|p| crate::viewers::pdf::tools::topdf::supported(p))
+                    .collect();
+                if files.is_empty() {
+                    return Task::none();
+                }
+                Task::perform(
+                    async move {
+                        let mut last = None;
+                        for p in &files {
+                            let out = crate::viewers::convert::to_pdf(p.clone())
+                                .await
+                                .map_err(|e| format!("{}: {e}", p.display()))?;
+                            last = Some(out);
+                        }
+                        Ok(match (files.len(), last) {
+                            (1, Some(out)) => format!("Converted to {}", out.display()),
+                            (n, _) => format!("Converted {n} files to PDF"),
+                        })
+                    },
+                    move |r| Message::OpDone(r, vec![dir.clone()]),
                 )
             }
             MenuAction::MakePdf => {
@@ -2432,6 +2458,13 @@ impl App {
             }
             if t.items.iter().all(|(_, k)| *k == Kind::Image) {
                 entries.push(("Combine into PDF", MenuAction::MakePdf, true));
+            }
+            if files_only
+                && t.items
+                    .iter()
+                    .all(|(p, _)| crate::viewers::pdf::tools::topdf::supported(p))
+            {
+                entries.push(("Convert to PDF", MenuAction::ConvertPdf, true));
             }
             if let Some(c) = &t.net {
                 if self.is_mounted(c) {

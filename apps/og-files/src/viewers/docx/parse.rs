@@ -334,7 +334,7 @@ fn opaque(src: &str, n: &Node, visible_label: Option<&str>) -> Block {
     })
 }
 
-fn block_from(src: &str, n: &Node, in_cell: bool) -> Block {
+pub fn block_from(src: &str, n: &Node, in_cell: bool) -> Block {
     match &*n.name {
         "p" => Block::Para(para_from(src, n)),
         "tbl" if !in_cell => Block::Table(table_from(src, n)),
@@ -365,7 +365,7 @@ fn entries(src: &str, kids: &[&Node], in_cell: bool) -> Vec<Entry> {
         .collect()
 }
 
-fn table_from(src: &str, n: &Node) -> Table {
+pub fn table_from(src: &str, n: &Node) -> Table {
     let grid = n
         .child("tblGrid")
         .map(|g| {

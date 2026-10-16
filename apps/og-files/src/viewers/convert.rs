@@ -1,12 +1,12 @@
 //! "Convert to PDF" for files that aren't PDFs, plus the unlock screen for
 //! password-protected PDFs.
 //!
-//! Images convert natively (`tools::layout::images_to_pdf`). Office
-//! documents, HTML, Markdown, e-mail and e-books go through the optional
-//! Stirling server (`tools::server::convert_to_pdf`), since they need
-//! LibreOffice-class engines.
+//! Everything converts natively: images through
+//! `tools::layout::images_to_pdf`, office documents, HTML, Markdown,
+//! e-mail, e-books, comics and SVG through `tools::topdf` (Typst
+//! typesetting in-process).
 
-use super::pdf::tools::{layout, scans, server, structure};
+use super::pdf::tools::{layout, scans, structure, topdf};
 use super::Event;
 use crate::filetype::Kind;
 use crate::theme;
@@ -14,46 +14,26 @@ use iced::widget::{button, center, column, text, text_input};
 use iced::{Element, Task};
 use std::path::{Path, PathBuf};
 
-const SERVER_EXTS: [&str; 18] = [
-    "doc", "docx", "odt", "rtf", "ppt", "pptx", "odp", "xls", "xlsx", "ods", "epub", "html", "htm",
-    "md", "markdown", "eml", "txt", "csv",
-];
-
-fn ext(path: &Path) -> String {
-    path.extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("")
-        .to_ascii_lowercase()
-}
-
 /// Can this file be turned into a PDF, and does it need the server?
+/// (Nothing does any more; the flag stays for the placeholder's label.)
 pub fn convertible(path: &Path, kind: Kind) -> Option<bool> {
-    if kind == Kind::Image {
+    if kind == Kind::Image || topdf::supported(path) {
         return Some(false);
     }
-    SERVER_EXTS.contains(&ext(path).as_str()).then_some(true)
+    None
 }
 
 /// Convert and write `<stem>.pdf` next to the file (never overwrites).
 pub async fn to_pdf(path: PathBuf) -> Result<PathBuf, String> {
-    let bytes = tokio::fs::read(&path).await.map_err(|e| e.to_string())?;
-    let is_image = crate::filetype::Kind::of(&path, false) == Kind::Image;
-    let name = path
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
+    // SVG is an "image" by MIME type but converts as a vector drawing
+    let raster = Kind::of(&path, false) == Kind::Image && !topdf::supported(&path);
+    let src = path.clone();
     let pdf = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, String> {
-        if is_image {
+        if raster {
+            let bytes = std::fs::read(&src).map_err(|e| e.to_string())?;
             return layout::images_to_pdf(&[bytes], None, 0.0);
         }
-        let cfg = server::ServerConfig::load().ok_or(
-            "this needs the Stirling server — set it up under PDF Tools → Server settings",
-        )?;
-        let r = server::convert_to_pdf(&cfg, &name, &bytes)?;
-        if r.ext != "pdf" {
-            return Err(format!("server returned .{} instead of a PDF", r.ext));
-        }
-        Ok(r.bytes)
+        topdf::file_to_pdf(&src)
     })
     .await
     .map_err(|e| e.to_string())??;
