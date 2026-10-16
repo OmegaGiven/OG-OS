@@ -1175,7 +1175,8 @@ mod tests {
         assert!(!e.contains_key("KEY_USE_AGENT"));
         c.auth = Auth::KeyFile("~/.ssh/work".into());
         let e = env_map(&remote(&c, None, Some("OBS"), &facts(true)).unwrap());
-        assert_eq!(e["KEY_FILE"], "/home/me/.ssh/work");
+        let want = PathBuf::from("/home/me").join(".ssh/work");
+        assert_eq!(e["KEY_FILE"], want.to_string_lossy());
         assert_eq!(e["KEY_FILE_PASS"], "OBS");
         c.auth = Auth::Anonymous;
         assert!(remote(&c, None, None, &facts(true)).is_err());
@@ -1281,6 +1282,7 @@ mod tests {
         assert_eq!(parse_pid_file("12\n"), None);
     }
 
+    #[cfg(target_os = "linux")] // /proc/self/mountinfo format
     #[test]
     fn net_rclone_proc_mounts_parsing() {
         let text = "proc /proc proc rw 0 0\n\
@@ -1311,6 +1313,7 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "linux")] // /proc/self/mountinfo format
     #[tokio::test]
     async fn net_rclone_mount_flow_password_never_in_argv() {
         let t = TestDir::new("rclone-mount");

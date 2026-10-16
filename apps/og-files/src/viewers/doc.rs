@@ -1876,8 +1876,9 @@ mod tests {
     const W: &str = r#"xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main""#;
 
     fn tmp(name: &str) -> PathBuf {
-        let d = PathBuf::from(std::env::var("HOME").unwrap())
-            .join(".cache/ogx-p2-doc-tests")
+        let d = dirs::cache_dir()
+            .unwrap_or_else(std::env::temp_dir)
+            .join("ogx-p2-doc-tests")
             .join(format!("{}-{name}", std::process::id()));
         std::fs::create_dir_all(&d).unwrap();
         d

@@ -41,9 +41,9 @@ struct Dir(PathBuf);
 
 impl Dir {
     fn new(name: &str) -> Self {
-        let home = std::env::var_os("HOME").expect("HOME");
-        let d = PathBuf::from(home)
-            .join(".cache/ogx-p2-3d-tests")
+        let d = dirs::cache_dir()
+            .unwrap_or_else(std::env::temp_dir)
+            .join("ogx-p2-3d-tests")
             .join(format!("{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();

@@ -200,6 +200,7 @@ mod tests {
         b
     }
 
+    #[cfg(unix)] // bundle paths are built with Unix separators
     #[test]
     fn mac_app_bundle_discovery() {
         let root = crate::config::home()

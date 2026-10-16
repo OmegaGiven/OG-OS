@@ -1940,6 +1940,7 @@ mod tests {
         assert!(fs::symlink_metadata(dest.join("ok/link")).is_err());
     }
 
+    #[cfg(unix)] // Windows extraction skips symlinks by design
     #[test]
     fn tar_symlink_escape_rejected() {
         let t = Tmp::new("tarslip");

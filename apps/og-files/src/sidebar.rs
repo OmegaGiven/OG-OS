@@ -803,8 +803,8 @@ mod tests {
         ));
         assert_eq!(s.sel.paths(), vec![PathBuf::from("/a")]);
         assert_eq!(s.pressed.take(), Some(vec![PathBuf::from("/a")]));
-        // ctrl adds
-        press(&mut s, "/b", Modifiers::CTRL);
+        // ctrl (⌘ on macOS) adds
+        press(&mut s, "/b", Modifiers::COMMAND);
         assert_eq!(s.sel.items.len(), 2);
         // pressing a selected item keeps the group for dragging…
         press(&mut s, "/a", Modifiers::empty());
