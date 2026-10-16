@@ -129,7 +129,7 @@ impl State {
         bar = bar
             .push(toggle("Edge", self.edge, Msg::ToggleEdge))
             .push(
-                button(text("Split scanned photos (server)").size(12))
+                button(text("Split scanned photos").size(12))
                     .on_press(Msg::SplitScan)
                     .style(button::secondary),
             )

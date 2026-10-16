@@ -6,7 +6,7 @@
 //! Stirling server (`tools::server::convert_to_pdf`), since they need
 //! LibreOffice-class engines.
 
-use super::pdf::tools::{layout, server, structure};
+use super::pdf::tools::{layout, scans, server, structure};
 use super::Event;
 use crate::filetype::Kind;
 use crate::theme;
@@ -72,35 +72,46 @@ pub async fn to_pdf(path: PathBuf) -> Result<PathBuf, String> {
     Ok(out)
 }
 
-/// Server-side "extract image scans": several photos scanned on one sheet
-/// come back as separate images (usually a zip), written beside the scan.
-pub async fn split_scan(path: PathBuf) -> Result<PathBuf, String> {
+/// "Extract image scans", natively (`tools::scans`): several photos scanned
+/// on one sheet are cropped, straightened and written beside the scan as
+/// `<stem>-photo-01.<ext>` …. Returns a status line.
+pub async fn split_scan(path: PathBuf) -> Result<String, String> {
     let bytes = tokio::fs::read(&path).await.map_err(|e| e.to_string())?;
-    let name = path
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    let reply = tokio::task::spawn_blocking(move || {
-        let cfg = server::ServerConfig::load().ok_or(
-            "this needs the Stirling server — set it up under PDF Tools → Server settings",
-        )?;
-        server::scanner_image_split(&cfg, &name, &bytes)
+    let photos = tokio::task::spawn_blocking(move || {
+        scans::split_image_file(&bytes, scans::Options::default())
     })
     .await
-    .map_err(|e| e.to_string())??;
+    .map_err(|_| "the photo splitter crashed".to_string())??;
     let dir = path.parent().unwrap_or(Path::new(".")).to_path_buf();
     let stem = path
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| "scan".into());
-    let mut out = dir.join(format!("{stem}-photos.{}", reply.ext));
-    let mut n = 2;
-    while tokio::fs::try_exists(&out).await.unwrap_or(false) {
-        out = dir.join(format!("{stem}-photos ({n}).{}", reply.ext));
-        n += 1;
+    let count = photos.len();
+    let mut first = None;
+    for (suffix, bytes) in photos {
+        let (body, ext) = suffix.rsplit_once('.').unwrap_or((suffix.as_str(), "png"));
+        let mut out = dir.join(format!("{stem}-{body}.{ext}"));
+        let mut n = 2;
+        while tokio::fs::try_exists(&out).await.unwrap_or(false) {
+            out = dir.join(format!("{stem}-{body} ({n}).{ext}"));
+            n += 1;
+        }
+        crate::fsops::write_bytes(out.clone(), bytes).await?;
+        first.get_or_insert(out);
     }
-    crate::fsops::write_bytes(out.clone(), reply.bytes).await?;
-    Ok(out)
+    let first = first.map(|p| p.display().to_string()).unwrap_or_default();
+    Ok(match count {
+        1 => format!("Found 1 photo: {first}"),
+        n => format!("Found {n} photos: {first} …"),
+    })
+}
+
+pub fn split_status(r: Result<String, String>) -> Event {
+    Event::Status(match r {
+        Ok(s) => s,
+        Err(e) => format!("Split scanned photos failed: {e}"),
+    })
 }
 
 pub fn status(r: Result<PathBuf, String>) -> Event {

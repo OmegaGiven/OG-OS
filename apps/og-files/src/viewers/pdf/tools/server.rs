@@ -68,6 +68,9 @@ pub struct Reply {
     pub bytes: Vec<u8>,
 }
 
+// OCR, auto-split and scan splitting run natively now (tools::ocr,
+// tools::qrsplit, tools::scans); their clients stay until server.rs goes.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OcrMode {
     /// skip pages that already have text
@@ -144,6 +147,7 @@ pub fn ping(cfg: &ServerConfig) -> Result<String, String> {
     })
 }
 
+#[allow(dead_code)]
 pub fn ocr(
     cfg: &ServerConfig,
     pdf: &[u8],
@@ -343,6 +347,7 @@ pub fn validate_signature(cfg: &ServerConfig, pdf: &[u8]) -> Result<String, Stri
 
 /// Split at pages carrying a split QR code (Stirling auto-split); usually a
 /// zip of PDFs.
+#[allow(dead_code)]
 pub fn auto_split(cfg: &ServerConfig, pdf: &[u8]) -> Result<Reply, String> {
     let mut form = Form::new();
     form.pdf(pdf);
@@ -351,6 +356,7 @@ pub fn auto_split(cfg: &ServerConfig, pdf: &[u8]) -> Result<Reply, String> {
 }
 
 /// Detect and split multiple photos from one scanned image (zip of images).
+#[allow(dead_code)]
 pub fn scanner_image_split(
     cfg: &ServerConfig,
     image_name: &str,

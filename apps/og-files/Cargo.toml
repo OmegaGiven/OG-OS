@@ -59,6 +59,13 @@ xz2 = "0.1"
 zstd = "0.13"
 bzip2 = "0.4"
 sevenz-rust2 = { version = "0.20", default-features = false, features = ["aes256", "bzip2", "deflate", "ppmd", "compress"] }
+# PDF vision tools (tools/ocr.rs, qrsplit.rs, scans.rs): pure-Rust OCR
+# (ocrs on the rten runtime, models embedded from assets/ocr/), QR
+# detection and scanned-photo segmentation
+ocrs = { version = "0.13", default-features = false, features = ["rten"] }
+rten = { version = "0.26", default-features = false, features = ["rten_format"] }
+rqrr = "0.11"
+imageproc = { version = "0.27", default-features = false }
 
 og-config = { path = "../../crates/og-config", optional = true }
 og-theme = { path = "../../crates/og-theme", optional = true }
@@ -102,3 +109,6 @@ tokio = { version = "1.52.3", features = ["macros", "rt", "time", "sync", "fs"] 
 naga = { version = "0.19", features = ["wgsl-in"] }
 # test-only: checks the highlighter language tokens resolve (already an iced dep)
 syntect = "5"
+# test-only: QR separator pages and rendered text for the vision tools
+qrcode = { version = "0.14", default-features = false, features = ["image"] }
+ab_glyph = "0.2"

@@ -247,6 +247,7 @@ translated.
 |---|---|---|
 | Render | `hayro` 0.7 (pure Rust, MIT/Apache, CPU) | One worker thread per open PDF that keeps its parse and font cache (`viewers/pdf/engine.rs`). Panics are caught per page. Bitmaps are capped at 40 MP. Limits: no blending/knockout groups yet, and password-protected files fail to open. |
 | Edit | `lopdf` 0.45 (pure Rust, MIT) | `compose::build(sources, plan)` turns a plan of (source, page, rotation) into a new PDF. That single primitive covers reorder, delete, rotate, duplicate, merge/insert, extract and split. Inherited page attributes are pushed down, and unused objects are pruned. |
+| Vision | `ocrs` 0.13 on `rten` 0.26 (OCR), `rqrr` 0.11 (QR), `imageproc` 0.27 (photo segmentation); all pure Rust | Offline and in-process. The OCR detection and recognition models (CC BY-SA 4.0, 12.2 MB) are compiled in from `assets/ocr/`; source, sha256 and license are in its README. Pages are rendered with hayro. |
 | Heavy tools | Stirling REST API on a self-hosted server (optional) | For jobs that need Tesseract, Ghostscript, qpdf or LibreOffice. The app uploads the file and saves the result next to the original. Config goes in `$XDG_CONFIG_HOME/og-files/stirling.json` (`{ "url": "https://stirling.example.ts.net:8081", "api_key": "…" }`, sent as `X-API-KEY`). Without it those tools are just hidden, so the app stays standalone. |
 
 **Model.** The same rules as every other viewer apply: view mode is
@@ -256,7 +257,7 @@ split, and any tool that makes a different document) always write
 **new files** next to the original (`<name>-pages-1-3.pdf`,
 `<name>-part-01.pdf`), work in either mode, and include unsaved edits.
 
-**Tools panel.** The **Tools** button in the PDF toolbar opens 54 tools
+**Tools panel.** The **Tools** button in the PDF toolbar opens 55 tools
 in five groups. Each tool has a form, and the page fields default to the
 ticked pages. The buttons are:
 - **Apply** (edit mode): the result becomes the working copy. Save
@@ -266,8 +267,8 @@ ticked pages. The buttons are:
 
 Other PDF toolbar additions: **Save copy**, plus **Duplicate** and **Blank
 page** in edit mode. Outside the PDF viewer: password-protected PDFs open
-behind an unlock screen. Images get **Make PDF** (native) and **Split
-scanned photos** (server). Office, HTML, Markdown and e-book files get
+behind an unlock screen. Images get **Make PDF** and **Split
+scanned photos** (both native). Office, HTML, Markdown and e-book files get
 **Convert to PDF** (server).
 
 **Status: all Stirling core tools are built** (2026-10-11). "native" means
@@ -277,18 +278,18 @@ in-process Rust; "server" means the Stirling REST API.
 |---|---|---|
 | Page editing | view, thumbnails, zoom, rotate, delete, reorder, duplicate, blank page, insert PDF, extract, split every N, select | native (plan + compose) |
 | Organize | split by ranges / bookmarks / file size, select pages by range, remove blank pages, crop, n-up (2–16), booklet, fit to paper, scale, split into sections, one long page, overlay PDF, insert images | native |
-| Organize | auto-split at QR pages, insert web page | server |
+| Organize | insert web page | server |
+| Vision | **OCR → searchable PDF** (invisible text layer, skip or redo pages that have text, page range), **auto-split at QR separator pages** (Stirling's sheet or any QR code; duplex drops the blank back), **split scanned photos** (PDF pages, and image files from the image viewer) | native |
 | Add & edit | page numbers, text stamp, watermark (centred / tiled), image stamp, **drawn signature** (canvas pad + click to place), attachments, bookmarks editor, metadata editor / wipe | native |
 | Security | AES-256 password + permissions, remove password, sanitize (JS, files, XMP, info, links, fonts), redact text, **redact areas** (drag boxes on the page, true removal by rasterizing), remove annotations / images, flatten forms, flatten to images, unlock forms, remove signatures, show JavaScript | native |
 | Security | sign with certificate (PKCS#12), validate signatures | server |
 | Convert & extract | pages → PNG/JPEG, extract images, extract attachments, document info, compare (text diff), auto-rename | native |
 | Convert & extract | PDF → Word/ODT/Excel/PowerPoint/HTML/Markdown/text/RTF/XML/CSV/EPUB; Office/HTML/MD/EML/e-book/image → PDF | server |
 | Optimize & colour | lossless compress, repair, greyscale, invert, adjust colours, fake scan | native |
-| Optimize & colour | strong compress (Ghostscript/qpdf), repair via server, OCR (Tesseract), PDF/A-2b | server |
+| Optimize & colour | strong compress (Ghostscript/qpdf), repair via server, PDF/A-2b | server |
 
 **Server endpoints** (paths and fields taken from upstream `app/core` only,
-listed in `tools/server.rs`): `/api/v1/misc/{ocr-pdf, compress-pdf, repair,
-auto-split-pdf, extract-image-scans}`,
+listed in `tools/server.rs`): `/api/v1/misc/{compress-pdf, repair}`,
 `/api/v1/convert/{pdf/pdfa, pdf/word, pdf/presentation, pdf/text, pdf/xlsx,
 pdf/csv, pdf/html, pdf/markdown, pdf/xml, pdf/epub, file/pdf, html/pdf,
 markdown/pdf, eml/pdf, img/pdf, svg/pdf, ebook/pdf, url/pdf}`,
@@ -307,6 +308,23 @@ main ones:
 - Raster tools (colour filters, redact areas, flatten to images) remove
   text selection on the affected pages.
 - The signature box assumes an unrotated page.
+- OCR (`tools/ocr.rs`) reads Latin script only: A–Z, a–z, digits and
+  ASCII punctuation. Accented letters come out unaccented; other scripts
+  (Cyrillic, Greek, CJK, Arabic…) are refused with a message. Pages render
+  at 150 dpi, where the models read best (body text 20–40 px tall; higher
+  dpi measurably dropped letters). Very small print (< 7 pt) is unreliable.
+  Text is assumed horizontal, so skewed lines get an axis-aligned box.
+  The layer is a Type 3 font with empty glyphs and a ToUnicode CMap,
+  drawn in render mode 3 inside its own `q … Q` after the untouched
+  original content, and it follows `/Rotate` and the CropBox. "Redo pages
+  that already have text" doesn't remove the old text, so those pages can
+  extract twice. There is no progress bar or cancel (the job system has
+  neither). A sparse page takes well under a second; dense pages take longer.
+- Auto-split renders each page at 200 dpi; QR codes under ~1.5 cm can be
+  missed. By default only Stirling's separator sheet splits.
+- Split scanned photos needs a background gap of about 2 mm (at 300 dpi)
+  between photos. Photos with large paper-coloured edges can be cropped
+  short, and tilt is straightened up to ±45°.
 - Decrypt can't tell whether a password was actually needed.
 - Phase 2: a `compose::build_from_doc` variant so split-by-size doesn't
   re-parse the file on every probe.

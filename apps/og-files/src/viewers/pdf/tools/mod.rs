@@ -18,12 +18,18 @@
 //!                   images → PDF, signatures)
 //!   * [`raster`]    hayro-rendered operations (to images, flatten, colour,
 //!                   redact regions, blank-page detection, fake scan)
+//!   * [`ocr`]       offline OCR (ocrs) → invisible text layer
+//!   * [`qrsplit`]   auto-split at QR separator pages (rqrr)
+//!   * [`scans`]     split several photos scanned on one sheet (imageproc)
 //!   * [`server`]    optional Stirling-PDF REST backend for OCR, compress,
 //!                   office conversion, PDF/A, certificate signing
 
 pub mod layout;
+pub mod ocr;
 pub mod pages;
+pub mod qrsplit;
 pub mod raster;
+pub mod scans;
 pub mod server;
 pub mod structure;
 

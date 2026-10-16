@@ -62,6 +62,7 @@ pub enum Tool {
     // convert & extract
     ToImages,
     ExtractImages,
+    ExtractScans,
     ExtractAttachments,
     ConvertTo,
     Info,
@@ -141,6 +142,7 @@ pub const CATEGORIES: [(&str, &[Tool]); 5] = [
         &[
             ToImages,
             ExtractImages,
+            ExtractScans,
             ExtractAttachments,
             ConvertTo,
             Info,
@@ -206,6 +208,7 @@ impl Tool {
             ValidateSignature => "Validate signatures",
             ToImages => "Pages to images",
             ExtractImages => "Extract images",
+            ExtractScans => "Split scanned photos",
             ExtractAttachments => "Extract attachments",
             ConvertTo => "Convert PDF to…",
             Info => "Document info",
@@ -265,6 +268,7 @@ impl Tool {
             ValidateSignature => "Checks digital signatures (server).",
             ToImages => "Writes each page as an image next to the PDF.",
             ExtractImages => "Saves embedded images next to the PDF.",
+            ExtractScans => "Several photos scanned on one page → separate, straightened images.",
             ExtractAttachments => "Saves embedded files next to the PDF.",
             ConvertTo => "Word, Excel, PowerPoint, HTML, Markdown and more (server).",
             Info => "Pages, fonts, images, security, metadata.",
@@ -273,9 +277,9 @@ impl Tool {
             CompressLossless => "Smaller file without touching image quality.",
             CompressServer => "Stronger compression incl. images (server).",
             Repair => "Rebuilds a damaged file.",
-            Ocr => "Adds a text layer to scans (server).",
+            Ocr => "Adds an invisible, searchable text layer to scans (offline, Latin script).",
             PdfA => "Archival PDF/A-2b (server).",
-            AutoSplit => "Splits at pages with Stirling's split QR code (server).",
+            AutoSplit => "Splits at separator pages carrying a QR code; drops those pages.",
             Grayscale => "Converts to greyscale (pages become images).",
             Invert => "Dark pages, light text (pages become images).",
             AdjustColors => "Brightness, contrast, saturation (pages become images).",
@@ -291,9 +295,7 @@ impl Tool {
                 | ValidateSignature
                 | ConvertTo
                 | CompressServer
-                | Ocr
                 | PdfA
-                | AutoSplit
         )
     }
 }
@@ -524,6 +526,25 @@ fn split_files(
         })
         .collect::<Result<Vec<_>, _>>()?;
     Ok(JobOut::Out(Output::Files(files)))
+}
+
+/// "Split scanned photos" form → detector settings (Stirling's knobs).
+fn scan_options(form: &Form) -> Result<tools::scans::Options, String> {
+    let d = tools::scans::Options::default();
+    let whole = |k: &'static str, def: u32, max: f32| -> Result<u32, String> {
+        let v = form.num(k, def as f32)?;
+        if !(0.0..=max).contains(&v) {
+            return Err(format!("'{v}' is out of range (0–{max})"));
+        }
+        Ok(v.round() as u32)
+    };
+    Ok(tools::scans::Options {
+        angle_threshold: form.num("angle", d.angle_threshold)?.clamp(0.0, 45.0),
+        tolerance: whole("tolerance", d.tolerance as u32, 255.0)? as u8,
+        min_area: whole("min_area", d.min_area, 1e9)?,
+        min_contour_area: whole("min_contour", d.min_contour_area, 1e9)?,
+        border: whole("border", d.border, 1000.0)?,
+    })
 }
 
 fn slug(s: &str) -> String {
@@ -912,6 +933,13 @@ pub fn job(tool: Tool, form: &Form, input: JobInput) -> Result<Job, String> {
                 Ok(JobOut::Out(Output::Files(f)))
             })
         }
+        ExtractScans => {
+            let p = range("pages")?;
+            let opts = scan_options(form)?;
+            Box::new(move |pdf: Arc<Vec<u8>>| {
+                tools::scans::split_pdf(&pdf, &p, opts).map(|f| JobOut::Out(Output::Files(f)))
+            })
+        }
         ExtractAttachments => Box::new(move |pdf: Arc<Vec<u8>>| {
             let f = structure::attachments_extract(&pdf)?;
             if f.is_empty() {
@@ -967,21 +995,20 @@ pub fn job(tool: Tool, form: &Form, input: JobInput) -> Result<Job, String> {
             })
         }
         Ocr => {
-            let cfg = srv()?;
             let langs: Vec<String> = form
                 .t("langs", "eng")
                 .split([',', ' '])
                 .filter(|s| !s.is_empty())
                 .map(str::to_string)
                 .collect();
+            tools::ocr::check_languages(&langs)?;
+            let p = range("pages")?;
             let mode = if form.f("force", false) {
-                server::OcrMode::Force
+                tools::ocr::Mode::Force
             } else {
-                server::OcrMode::Skip
+                tools::ocr::Mode::Skip
             };
-            Box::new(move |pdf: Arc<Vec<u8>>| {
-                server::ocr(&cfg, &pdf, &langs, mode).map(|r| reply_out(r, "ocr"))
-            })
+            Box::new(move |pdf: Arc<Vec<u8>>| out(tools::ocr::ocr_pdf(&pdf, &p, mode)))
         }
         PdfA => {
             let cfg = srv()?;
@@ -990,9 +1017,12 @@ pub fn job(tool: Tool, form: &Form, input: JobInput) -> Result<Job, String> {
             })
         }
         AutoSplit => {
-            let cfg = srv()?;
+            let opts = tools::qrsplit::Options {
+                any_qr: form.f("any_qr", false),
+                duplex: form.f("duplex", false),
+            };
             Box::new(move |pdf: Arc<Vec<u8>>| {
-                server::auto_split(&cfg, &pdf).map(|r| reply_out(r, "split"))
+                tools::qrsplit::auto_split(&pdf, opts).map(|f| JobOut::Out(Output::Files(f)))
             })
         }
         Grayscale => {
@@ -1379,8 +1409,37 @@ pub fn view_form<'a, M: Clone + 'a>(
             false,
         )],
         Ocr => vec![
-            field("Languages (Tesseract codes)", "langs", "eng, deu"),
+            pages_f(),
+            field(
+                "Languages — Latin script only (eng, deu, fra, spa…); accents are dropped",
+                "langs",
+                "eng",
+            ),
             flag("Redo pages that already have text", "force", false),
+        ],
+        AutoSplit => vec![
+            flag(
+                "Split at any QR code (not only Stirling's separator sheet)",
+                "any_qr",
+                false,
+            ),
+            flag(
+                "Duplex scan: also drop the blank back of each separator",
+                "duplex",
+                false,
+            ),
+        ],
+        ExtractScans => vec![
+            pages_f(),
+            row2(
+                field("Straighten tilts over (°)", "angle", "1"),
+                field("Background tolerance (0–255)", "tolerance", "30"),
+            ),
+            row2(
+                field("Min photo area (px²)", "min_area", "8000"),
+                field("Ignore specks under (px²)", "min_contour", "500"),
+            ),
+            field("Trim edges (px)", "border", "1"),
         ],
         Grayscale | Invert => vec![field("Resolution (dpi)", "dpi", "150")],
         AdjustColors => vec![
@@ -1409,6 +1468,7 @@ pub fn view_form<'a, M: Clone + 'a>(
             | SplitSize
             | ToImages
             | ExtractImages
+            | ExtractScans
             | ExtractAttachments
             | AutoSplit
             | ConvertTo
