@@ -8,12 +8,76 @@
 //! on the root's filesystem (other mounts become size-less `OtherFs`
 //! leaves), counts hard-linked files once (dev+ino), and records both the
 //! allocated (`st_blocks * 512`) and the apparent size.
+//!
+//! Windows: std exposes no device / inode / link count / block count, so
+//! there every file counts with its apparent size, hard links are not
+//! de-duplicated and other drives are only reached through junctions
+//! (which are links and not followed).
 
 use crate::filetype::Kind;
 use std::collections::{HashSet, VecDeque};
 use std::fs::Metadata;
-use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
+
+/// The unix stat fields the scanner needs, with neutral values elsewhere.
+pub trait StatExt {
+    fn dev(&self) -> u64;
+    fn ino(&self) -> u64;
+    fn nlink(&self) -> u64;
+    fn size(&self) -> u64;
+    /// allocated bytes
+    fn alloc(&self) -> u64;
+    /// seconds since the epoch
+    fn mtime(&self) -> i64;
+}
+
+#[cfg(unix)]
+impl StatExt for Metadata {
+    fn dev(&self) -> u64 {
+        std::os::unix::fs::MetadataExt::dev(self)
+    }
+    fn ino(&self) -> u64 {
+        std::os::unix::fs::MetadataExt::ino(self)
+    }
+    fn nlink(&self) -> u64 {
+        std::os::unix::fs::MetadataExt::nlink(self)
+    }
+    fn size(&self) -> u64 {
+        std::os::unix::fs::MetadataExt::size(self)
+    }
+    fn alloc(&self) -> u64 {
+        std::os::unix::fs::MetadataExt::blocks(self) * 512
+    }
+    fn mtime(&self) -> i64 {
+        std::os::unix::fs::MetadataExt::mtime(self)
+    }
+}
+
+#[cfg(not(unix))]
+impl StatExt for Metadata {
+    fn dev(&self) -> u64 {
+        0
+    }
+    fn ino(&self) -> u64 {
+        0
+    }
+    fn nlink(&self) -> u64 {
+        1
+    }
+    fn size(&self) -> u64 {
+        self.len()
+    }
+    fn alloc(&self) -> u64 {
+        self.len()
+    }
+    fn mtime(&self) -> i64 {
+        self.modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0)
+    }
+}
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Condvar, Mutex};
 use std::time::{Duration, Instant};
@@ -62,7 +126,7 @@ impl RawEntry {
         Self {
             kind,
             size: if file { md.size() } else { 0 },
-            alloc: if file { md.blocks() * 512 } else { 0 },
+            alloc: if file { md.alloc() } else { 0 },
             mtime: md.mtime(),
             dev: md.dev(),
             ino: md.ino(),
@@ -350,7 +414,20 @@ pub fn probe(paths: &[PathBuf], root_dev: u64) -> Vec<Probe> {
         .collect()
 }
 
+/// (free for this user, total) bytes of the drive holding `p`.
+#[cfg(windows)]
+pub fn fs_space(p: &Path) -> Option<(u64, u64)> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
+    let w: Vec<u16> = p.as_os_str().encode_wide().chain([0]).collect();
+    let (mut avail, mut total, mut free) = (0u64, 0u64, 0u64);
+    // SAFETY: `w` is NUL-terminated; the out-pointers are valid u64s
+    let ok = unsafe { GetDiskFreeSpaceExW(w.as_ptr(), &mut avail, &mut total, &mut free) };
+    (ok != 0).then_some((avail, total))
+}
+
 /// (free for unprivileged users, total) bytes of the filesystem holding `p`.
+#[cfg(unix)]
 pub fn fs_space(p: &Path) -> Option<(u64, u64)> {
     use std::os::unix::ffi::OsStrExt;
     let c = std::ffi::CString::new(p.as_os_str().as_bytes()).ok()?;

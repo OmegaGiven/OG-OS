@@ -31,6 +31,8 @@ pub(crate) trait Keyring {
 }
 
 pub(crate) struct SecretService;
+/// The platform store (`keyring_os.rs` has the macOS / Windows one).
+pub(crate) use SecretService as Store;
 
 impl Keyring for SecretService {
     async fn lookup(&self, id: &str) -> Result<Option<String>, String> {

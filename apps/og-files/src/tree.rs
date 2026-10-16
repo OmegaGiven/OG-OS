@@ -420,10 +420,11 @@ impl Tree {
                 take(p, None, k)
             })
             .collect();
-        let mut devices = vec![
-            take(config::home(), Some("Home"), Kind::Folder),
-            take("/".into(), Some("Root  /"), Kind::Folder),
-        ];
+        let mut devices = vec![take(config::home(), Some("Home"), Kind::Folder), {
+            let root = crate::devices::root_path();
+            let label = format!("Root  {}", root.display());
+            take(root, Some(&label), Kind::Folder)
+        }];
         for d in self.drives.iter().filter(|d| !d.system || d.removable) {
             let path = d.mount_point.clone().unwrap_or_else(|| d.device.clone());
             let label = format!(
@@ -446,7 +447,10 @@ impl Tree {
             }
             devices.push(n);
         }
-        devices.push(take(PathBuf::from(TRASH), Some("Trash"), Kind::Folder));
+        // macOS: the Finder owns the Trash view (see ops::TRASH_VIEW)
+        if crate::ops::TRASH_VIEW {
+            devices.push(take(PathBuf::from(TRASH), Some("Trash"), Kind::Folder));
+        }
         use iced_fonts::Bootstrap as B;
         // saved connections: mounted ones are real folders, the rest mount on click
         let mut conns = Vec::new();

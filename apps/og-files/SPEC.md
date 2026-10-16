@@ -548,11 +548,13 @@ of the package, not assumed:
 - **Runtime behaviour:**
   - libmpv is opened at runtime; if it's missing (e.g. a stripped-down
     standalone build) the video tab falls back to the built-in FFmpeg
-    player instead of failing.
+    player (cargo feature `ffmpeg`, on by default in the monorepo) or,
+    without it, shows an "Install mpv" placeholder instead of failing.
   - Hardware decoding uses `hwdec=auto-safe`, so any machine without a
     working VAAPI driver silently decodes in software.
-- **Outside OG-OS** (other distros): build with `--no-default-features` and
-  install `mpv` + `ffmpeg` from the distro. A self-contained bundle
+- **Outside OG-OS** (other distros, macOS, Windows): build with
+  `--no-default-features` (add `--features ffmpeg` for the FFmpeg
+  fallback, thumbnails and trim) and install `mpv`; see §11 and README.md. A self-contained bundle
   (AppImage/Flatpak shipping libmpv) is possible later if needed.
 
 ## 8. History (bottom panel)
@@ -637,3 +639,47 @@ entered, saved over, discarded, exported, errors.
    or specific excluded folders be configurable?
 3. **Grid in tree mode:** should the tree be able to show thumbnails inline
    (bigger rows for images), or are thumbnails grid-only?
+
+## 11. Platform support
+
+Linux is the reference platform; macOS (aarch64, x86_64) and Windows
+(x86_64 MSVC) build from the same code with `--no-default-features`
+(optionally `--features ffmpeg`). Per-OS code sits behind
+`cfg(target_os = …)`; small shared helpers are in `platform.rs` (finding
+programs, detached / console-less child processes, symlinks, hidden files,
+the Windows console for CLI subcommands).
+
+| Feature | Linux | macOS | Windows |
+|---|---|---|---|
+| Browse, viewers, editors, archives, search, CLI | ✅ | ✅ | ✅ (hidden attribute honoured; symlinks in archives skipped) |
+| Config / state / cache dirs | XDG (unchanged) | `~/Library/Application Support`, `~/Library/Caches` | `%APPDATA%`, `%LOCALAPPDATA%` |
+| Move to trash | ✅ freedesktop, per-volume | ✅ system Trash (`trash` crate) | ✅ Recycle Bin (`trash` crate) |
+| Trash view (list / restore / empty), undo of trash | ✅ | hidden — use the Finder; the status line says undo isn't available | ✅ (`trash::os_limited`) |
+| Drives | ✅ UDisks2: mount, unmount, eject, live | mounted volumes (`/`, `/Volumes/*`) with size; unmount + eject via `diskutil` | mounted drives with size, read-only (no unmount / eject) |
+| Live folder refresh | ✅ inotify | ✅ FSEvents | ✅ ReadDirectoryChanges |
+| Open in default app | mimeapps.list | `open` | ShellExecute |
+| Open with… | app dialog + "always open with" | app dialog (bundles in /Applications, ~/Applications, /System/Applications → `open -a`); no "set default" | the system "Open with" dialog |
+| Open terminal here | `$TERMINAL` / known terminals | Terminal.app, or `terminal` setting (app name or command) | Windows Terminal, else cmd (or `powershell` / `pwsh`) |
+| Inspector permissions | mode + writable | mode + writable | read-only flag |
+| Disk usage | hard links counted once, other filesystems not entered, statvfs | same | apparent sizes, no hard-link dedupe; GetDiskFreeSpaceEx |
+| Network: saved connections, Test | ✅ | ✅ | ✅ |
+| Network: mount | rclone + fuse3 (`--daemon`) | official rclone + macFUSE / FUSE-T; unmount `umount`, then `diskutil unmount force` | rclone + WinFsp, started in the background (pid file in the state dir); unmount ends it |
+| Network: tailnet peers | LocalAPI unix socket | `tailscale status --json` | `tailscale status --json` |
+| Network: LAN discovery (Avahi) | ✅ | none (section stays empty) | none (section stays empty) |
+| Remembered passwords | Secret Service | Keychain (`keyring` crate) | Credential Manager (`keyring` crate) |
+| Video (libmpv, loaded at runtime) | `../lib/libmpv.so.2` (AppImage), then `libmpv.so.2` / `.so` | `.app/Contents/Frameworks`, Homebrew, then `libmpv.2.dylib` | `libmpv-2.dll` next to the exe, then the DLL search path |
+| Video without libmpv | FFmpeg player (feature `ffmpeg`), else an "Install mpv" placeholder | same | same |
+| Video thumbnails, trim export | feature `ffmpeg` | feature `ffmpeg` | feature `ffmpeg` |
+| Audio | ALSA (cpal) | CoreAudio | WASAPI |
+| `og-suite` (suite theme, Wayland drag-out) | ✅ | — | — |
+
+Windows release builds use the GUI subsystem (no console window); the CLI
+subcommands attach to the parent console so they still print. Helper
+processes (rclone, tailscale) start without a console window; apps opened
+from og-files are detached.
+
+Tests: the whole suite runs on Linux. Tests of Linux-only backends
+(UDisks2, freedesktop trash, Avahi, the LocalAPI socket, desktop entries,
+unix permissions) are `cfg(target_os = "linux")`; pure per-OS logic
+(terminal choice, libmpv search order, mac app bundles, mount output and
+pid files) is tested on Linux too.

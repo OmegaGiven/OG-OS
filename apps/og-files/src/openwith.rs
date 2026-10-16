@@ -2,6 +2,12 @@
 //! globs + a small magic table), default apps (mimeapps.list chain and
 //! mimeinfo.cache), Exec field codes and detached launching.
 //!
+//! macOS: the apps are the bundles found by `macapps` (launched through
+//! `open -a`), and the default app is whatever `open` picks. Windows: the
+//! default app is ShellExecute's "open" verb and "Open with…" is the
+//! system dialog (`open_with_dialog`); the registry stays empty there.
+//! "Set as default" (mimeapps.list) is Linux-only.
+//!
 //! Everything that normally comes from the environment is gathered in
 //! [`Env`], so tests pass temp dirs instead of touching env vars or the
 //! user's real config. Loading ([`Registry::load`]) and MIME sniffing read
@@ -10,10 +16,18 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::Read;
-use std::os::unix::fs::PermissionsExt;
-use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+
+pub use crate::platform::find_in;
+
+/// The OS picks the default app (`open` on macOS, ShellExecute on
+/// Windows) instead of mimeapps.list.
+pub const SYSTEM_DEFAULT: bool = cfg!(any(target_os = "macos", windows));
+/// "Always open … with this app" writes mimeapps.list: Linux only.
+pub const CAN_SET_DEFAULT: bool = !SYSTEM_DEFAULT;
+/// "Open with…" uses the system dialog instead of ours (Windows).
+pub const SYSTEM_OPEN_WITH: bool = cfg!(windows);
 
 /// Where to look for desktop files, MIME data and mimeapps.list.
 #[derive(Debug, Clone, Default)]
@@ -29,6 +43,9 @@ pub struct Env {
     pub flatpak: Vec<PathBuf>,
     /// $PATH, for TryExec
     pub path: Vec<PathBuf>,
+    /// macOS: folders holding .app bundles (empty elsewhere)
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub mac_app_dirs: Vec<PathBuf>,
 }
 
 fn env_dirs(var: &str, default: &str) -> Vec<PathBuf> {
@@ -68,6 +85,10 @@ impl Env {
             path: std::env::var_os("PATH")
                 .map(|p| std::env::split_paths(&p).collect())
                 .unwrap_or_default(),
+            #[cfg(target_os = "macos")]
+            mac_app_dirs: crate::macapps::app_dirs(&home),
+            #[cfg(not(target_os = "macos"))]
+            mac_app_dirs: Vec::new(),
         }
     }
 
@@ -128,21 +149,6 @@ impl Env {
     pub fn runnable(&self, prog: &str) -> bool {
         find_in(prog, &self.path).is_some()
     }
-}
-
-/// Look `prog` up in `path` (absolute or containing '/' = checked as is).
-pub fn find_in(prog: &str, path: &[PathBuf]) -> Option<PathBuf> {
-    let exec = |p: &Path| {
-        fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
-    };
-    if prog.is_empty() {
-        return None;
-    }
-    if prog.contains('/') {
-        let p = PathBuf::from(prog);
-        return exec(&p).then_some(p);
-    }
-    path.iter().map(|d| d.join(prog)).find(|p| exec(p))
 }
 
 // ------------------------------------------------------------ desktop files
@@ -670,6 +676,8 @@ pub struct Registry {
     desktops: Vec<String>,
     /// file "Set as default" writes
     pub user_list: PathBuf,
+    /// the OS picks the default app: `choices` names none
+    system_default: bool,
 }
 
 impl Registry {
@@ -706,6 +714,14 @@ impl Registry {
                 }
             }
         }
+        #[cfg(any(target_os = "macos", test))]
+        if !env.mac_app_dirs.is_empty() {
+            for a in crate::macapps::scan(&env.mac_app_dirs) {
+                if seen.insert(a.id.clone()) {
+                    apps.push(a);
+                }
+            }
+        }
         apps.sort_by_key(|a| a.name.to_lowercase());
         let lists = env
             .mimeapps_files()
@@ -726,11 +742,15 @@ impl Registry {
             cache,
             desktops: env.desktops.clone(),
             user_list: env.user_mimeapps(),
+            system_default: SYSTEM_DEFAULT,
         }
     }
 
-    /// By desktop id, with or without ".desktop".
+    /// By desktop id, with or without ".desktop" (macOS: bundle id).
     pub fn get(&self, id: &str) -> Option<&App> {
+        if let Some(&i) = self.by_id.get(id) {
+            return Some(&self.apps[i]);
+        }
         let key = if id.ends_with(".desktop") {
             id.to_string()
         } else {
@@ -806,7 +826,7 @@ impl Registry {
                 push(&a.id);
             }
         }
-        if default.is_none() {
+        if default.is_none() && !self.system_default {
             default = apps.first().cloned();
         }
         if let Some(d) = &default {
@@ -952,11 +972,25 @@ pub fn split_exec(exec: &str) -> Result<Vec<(String, bool)>, String> {
     Ok(out)
 }
 
-/// `file:///a%20b` for a local path.
+/// `file:///a%20b` for a local path (`file:///C:/a%20b` on Windows).
 pub fn file_uri(p: &Path) -> String {
-    use std::os::unix::ffi::OsStrExt;
+    #[cfg(unix)]
+    let bytes = {
+        use std::os::unix::ffi::OsStrExt;
+        p.as_os_str().as_bytes().to_vec()
+    };
+    #[cfg(not(unix))]
+    let bytes = {
+        let s = p.to_string_lossy().replace('\\', "/");
+        let s = if s.starts_with('/') {
+            s
+        } else {
+            format!("/{s}")
+        };
+        s.into_bytes()
+    };
     let mut s = String::from("file://");
-    for &b in p.as_os_str().as_bytes() {
+    for &b in &bytes {
         if b.is_ascii_alphanumeric() || b"/-._~".contains(&b) {
             s.push(b as char);
         } else {
@@ -1066,14 +1100,7 @@ pub fn spawn_detached(argv: &[String], cwd: Option<&Path>) -> Result<u32, String
     if let Some(d) = cwd.filter(|d| d.is_dir()) {
         cmd.current_dir(d);
     }
-    // SAFETY: setsid is async-signal-safe; nothing else runs between fork
-    // and exec.
-    unsafe {
-        cmd.pre_exec(|| {
-            libc::setsid();
-            Ok(())
-        });
-    }
+    crate::platform::detach(&mut cmd);
     let mut child = cmd.spawn().map_err(|e| format!("{prog}: {e}"))?;
     let pid = child.id();
     std::thread::spawn(move || {
@@ -1102,6 +1129,105 @@ pub fn launch(app: &App, files: &[PathBuf]) -> Result<Vec<u32>, String> {
 
 /// Open each file in its default app (files sharing an app go together).
 /// Ok = "Opened x in App" lines; files without an app are reported.
+/// macOS / Windows: the OS picks the app (`reg` unused).
+#[cfg(any(target_os = "macos", windows))]
+pub fn open_default(_reg: &Registry, files: &[PathBuf]) -> Result<Vec<String>, String> {
+    system_open(files)?;
+    Ok(vec![format!("Opened {}", describe(files))])
+}
+
+/// macOS: one `open f1 f2 …` (Launch Services picks each file's app).
+#[cfg(target_os = "macos")]
+fn system_open(files: &[PathBuf]) -> Result<(), String> {
+    let mut argv = vec!["open".to_string()];
+    argv.extend(files.iter().map(|f| f.to_string_lossy().into_owned()));
+    spawn_detached(&argv, None).map(|_| ())
+}
+
+/// Windows: ShellExecuteW "open" per file (no command line, no quoting).
+#[cfg(windows)]
+fn system_open(files: &[PathBuf]) -> Result<(), String> {
+    for f in files {
+        shell_execute("open", f)?;
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn wide(s: &std::ffi::OsStr) -> Vec<u16> {
+    use std::os::windows::ffi::OsStrExt;
+    s.encode_wide().chain(std::iter::once(0)).collect()
+}
+
+#[cfg(windows)]
+fn shell_execute(verb: &str, file: &Path) -> Result<(), String> {
+    use windows_sys::Win32::UI::Shell::ShellExecuteW;
+    use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+    let verb = wide(std::ffi::OsStr::new(verb));
+    let path = wide(file.as_os_str());
+    let dir = file.parent().map(|d| wide(d.as_os_str()));
+    // SAFETY: all strings are NUL-terminated UTF-16 that outlive the call
+    let r = unsafe {
+        ShellExecuteW(
+            std::ptr::null_mut(),
+            verb.as_ptr(),
+            path.as_ptr(),
+            std::ptr::null(),
+            dir.as_ref().map_or(std::ptr::null(), |d| d.as_ptr()),
+            SW_SHOWNORMAL,
+        )
+    };
+    // > 32 = success (HINSTANCE compatibility value)
+    if r as isize > 32 {
+        Ok(())
+    } else {
+        Err(format!(
+            "{}: no app is associated with this file (code {})",
+            file.display(),
+            r as isize
+        ))
+    }
+}
+
+/// Windows: the system "Open with" dialog for `file` (blocks until the user
+/// picks; run it off the UI thread).
+#[cfg(windows)]
+pub fn open_with_dialog(file: &Path) -> Result<(), String> {
+    use windows_sys::Win32::UI::Shell::{
+        SHOpenWithDialog, OAIF_ALLOW_REGISTRATION, OAIF_EXEC, OPENASINFO,
+    };
+    let path = wide(file.as_os_str());
+    let info = OPENASINFO {
+        pcszFile: path.as_ptr(),
+        pcszClass: std::ptr::null(),
+        oaifInFlags: OAIF_ALLOW_REGISTRATION | OAIF_EXEC,
+    };
+    // SAFETY: `info` and the path it points to live across the call
+    let hr = unsafe { SHOpenWithDialog(std::ptr::null_mut(), &info) };
+    // HRESULT_FROM_WIN32(ERROR_CANCELLED) when the user closes it
+    if hr >= 0 || hr == 0x8007_04C7_u32 as i32 {
+        Ok(())
+    } else {
+        Err(format!(
+            "{}: Open with failed (0x{:08X})",
+            file.display(),
+            hr as u32
+        ))
+    }
+}
+
+/// Only Windows has a system "Open with" dialog (`SYSTEM_OPEN_WITH`).
+#[cfg(not(windows))]
+pub fn open_with_dialog(file: &Path) -> Result<(), String> {
+    Err(format!(
+        "{}: no system Open with dialog here",
+        file.display()
+    ))
+}
+
+/// Open each file in its default app (files sharing an app go together).
+/// Ok = "Opened x in App" lines; files without an app are reported.
+#[cfg(not(any(target_os = "macos", windows)))]
 pub fn open_default(reg: &Registry, files: &[PathBuf]) -> Result<Vec<String>, String> {
     let mut groups: Vec<(String, Vec<PathBuf>)> = Vec::new();
     let mut missing = Vec::new();
@@ -1138,7 +1264,8 @@ pub fn describe(files: &[PathBuf]) -> String {
     }
 }
 
-#[cfg(test)]
+// desktop entries, mimeapps.list and /bin tools: the Linux behaviour
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
 
@@ -1165,6 +1292,7 @@ mod tests {
                 desktops: vec!["sway".into()],
                 flatpak: vec![self.0.join("flatpak/exports/share")],
                 path: vec![self.0.join("bin")],
+                mac_app_dirs: Vec::new(),
             }
         }
     }

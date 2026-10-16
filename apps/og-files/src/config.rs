@@ -1,13 +1,26 @@
 //! App-owned config under XDG dirs. No dependency on the OG-OS
 //! `~/.config/sway-power` layout so the app works on any desktop.
+//!
+//! Linux (and other unixes) use the XDG base dirs exactly as before. macOS
+//! and Windows honour an explicit (absolute) `$XDG_*` variable too, but
+//! otherwise use the platform's own folders via the `dirs` crate:
+//! `~/Library/Application Support/og-files` + `~/Library/Caches/og-files`
+//! on macOS; `%APPDATA%\og-files` (config), `%LOCALAPPDATA%\og-files`
+//! (state) and `%LOCALAPPDATA%\og-files\cache` on Windows.
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+#[cfg(not(any(target_os = "macos", windows)))]
 pub fn home() -> PathBuf {
     std::env::var_os("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| "/".into())
+}
+
+#[cfg(any(target_os = "macos", windows))]
+pub fn home() -> PathBuf {
+    dirs::home_dir().unwrap_or_else(std::env::temp_dir)
 }
 
 /// `~/x` → `$HOME/x`; anything else unchanged.
@@ -22,7 +35,25 @@ fn xdg(var: &str, fallback: &str) -> PathBuf {
     std::env::var_os(var)
         .map(PathBuf::from)
         .filter(|p| p.is_absolute())
-        .unwrap_or_else(|| home().join(fallback))
+        .unwrap_or_else(|| native_base(var).unwrap_or_else(|| home().join(fallback)))
+}
+
+/// The platform folder standing in for an unset `$XDG_*` variable.
+#[cfg(not(any(target_os = "macos", windows)))]
+fn native_base(_var: &str) -> Option<PathBuf> {
+    None
+}
+
+#[cfg(any(target_os = "macos", windows))]
+fn native_base(var: &str) -> Option<PathBuf> {
+    match var {
+        "XDG_CONFIG_HOME" => dirs::config_dir(),
+        "XDG_DATA_HOME" => dirs::data_dir(),
+        // no "state" dir on macOS / Windows: local app data
+        "XDG_STATE_HOME" => dirs::data_local_dir(),
+        "XDG_CACHE_HOME" => dirs::cache_dir(),
+        _ => None,
+    }
 }
 
 /// One-time move of data written while the app was called og-explorer
@@ -36,7 +67,7 @@ pub fn migrate_old_dirs() {
         ),
         (
             xdg("XDG_STATE_HOME", ".local/state").join("og-explorer"),
-            xdg("XDG_STATE_HOME", ".local/state").join("og-files"),
+            state_dir(),
         ),
     ];
     for (old, new) in pairs {
@@ -60,9 +91,19 @@ pub fn config_dir() -> PathBuf {
     xdg("XDG_CONFIG_HOME", ".config").join("og-files")
 }
 
-#[allow(dead_code)] // thumbnail cache lands in phase 1 (SPEC.md §9)
 pub fn cache_dir() -> PathBuf {
-    xdg("XDG_CACHE_HOME", ".cache").join("og-files")
+    let d = xdg("XDG_CACHE_HOME", ".cache").join("og-files");
+    // %LOCALAPPDATA% is both the state and the cache base on Windows
+    if cfg!(windows) && d == state_dir() {
+        return d.join("cache");
+    }
+    d
+}
+
+/// `$XDG_STATE_HOME/og-files` (activity log, video positions, network
+/// state).
+pub fn state_dir() -> PathBuf {
+    xdg("XDG_STATE_HOME", ".local/state").join("og-files")
 }
 
 /// `$XDG_CONFIG_HOME/og-files/settings.json` (hand-edited; every key

@@ -851,6 +851,10 @@ impl App {
                             if let Some(e) = s.errors.first() {
                                 msg += &format!(", {} failed (first: {e})", s.errors.len());
                             }
+                            if job.spec.kind == ops::JobKind::Trash && !ops::TRASH_UNDO {
+                                msg +=
+                                    " (can't be undone here: restore it from the Finder's Trash)";
+                            }
                             let first = job.spec.sources.first().cloned();
                             self.details.record_for(msg, first.as_deref());
                             if let Some(u) = undo {
@@ -1201,6 +1205,22 @@ impl App {
                 let Some(first) = files.first().cloned() else {
                     return Task::none();
                 };
+                if openwith::SYSTEM_OPEN_WITH {
+                    // Windows: the system "Open with" dialog, one per file
+                    return Task::perform(
+                        async move {
+                            tokio::task::spawn_blocking(move || {
+                                for f in &files {
+                                    openwith::open_with_dialog(f)?;
+                                }
+                                Ok(format!("Open with… {}", openwith::describe(&files)))
+                            })
+                            .await
+                            .map_err(|e| e.to_string())?
+                        },
+                        |r| Message::OpDone(r, vec![]),
+                    );
+                }
                 self.with_apps(
                     move |reg| {
                         let mime = reg.mime_of(&first);
@@ -2429,7 +2449,7 @@ impl App {
             if let Some(d) = &t.drive {
                 if d.mount_point.is_none() {
                     entries.push(("Mount", MenuAction::Mount, !d.encrypted));
-                } else if !d.system {
+                } else if !d.system && devices::CAN_UNMOUNT {
                     entries.push(("Unmount", MenuAction::Unmount, true));
                 }
                 if d.ejectable {
@@ -2556,16 +2576,18 @@ impl App {
             .and_then(|p| p.extension())
             .map(|e| format!(".{} files", e.to_string_lossy()))
             .unwrap_or_else(|| "this type".into());
+        if openwith::CAN_SET_DEFAULT {
+            col = col.push(
+                checkbox(
+                    format!("Always open {ext} ({}) with this app", d.mime),
+                    d.set_default,
+                )
+                .on_toggle(Message::DialogFlag)
+                .size(15)
+                .text_size(13),
+            );
+        }
         col.push(
-            checkbox(
-                format!("Always open {ext} ({}) with this app", d.mime),
-                d.set_default,
-            )
-            .on_toggle(Message::DialogFlag)
-            .size(15)
-            .text_size(13),
-        )
-        .push(
             row![
                 Space::with_width(Length::Fill),
                 button(text("Cancel"))

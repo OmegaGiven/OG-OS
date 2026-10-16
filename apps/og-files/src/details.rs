@@ -46,11 +46,7 @@ pub enum Msg {
 }
 
 fn log_path() -> PathBuf {
-    let base = std::env::var_os("XDG_STATE_HOME")
-        .map(PathBuf::from)
-        .filter(|p| p.is_absolute())
-        .unwrap_or_else(|| crate::config::home().join(".local/state"));
-    base.join("og-files").join("activity.jsonl")
+    crate::config::state_dir().join("activity.jsonl")
 }
 
 /// Exists while the history is hidden.

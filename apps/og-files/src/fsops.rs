@@ -42,11 +42,18 @@ fn list_dir_sync(path: &Path) -> Result<Vec<Entry>, String> {
             // metadata() follows symlinks so a link to a folder shows as one
             let meta = std::fs::metadata(&path).ok();
             let is_dir = meta.as_ref().map(|m| m.is_dir()).unwrap_or(false);
+            // the hidden attribute (Windows) needs the entry's own metadata
+            let own = if cfg!(windows) {
+                e.metadata().ok()
+            } else {
+                None
+            };
+            let hidden = crate::platform::is_hidden(&name, own.as_ref());
             Entry {
                 kind: Kind::of(&path, is_dir),
                 size: meta.as_ref().map(|m| m.len()).unwrap_or(0),
                 modified: meta.as_ref().and_then(|m| m.modified().ok()),
-                hidden: name.starts_with('.'),
+                hidden,
                 name,
                 path,
             }

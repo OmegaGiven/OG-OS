@@ -67,22 +67,23 @@ impl Inspector {
                     field("Type", m.kind.label().into()),
                     field("Size", fsops::human_size(m.size)),
                     field("Modified", fsops::ago(m.modified)),
-                    field(
-                        "Mode",
-                        m.mode
-                            .map(|x| format!("{:o}", x & 0o7777))
-                            .unwrap_or_else(|| "—".into())
-                    ),
-                    field(
-                        "Writable",
-                        if m.readonly {
-                            "no".into()
-                        } else {
-                            "yes".into()
-                        }
-                    ),
                 ]
                 .spacing(6);
+                // unix permission bits; Windows only has the read-only flag
+                if let Some(x) = m.mode {
+                    c = c.push(field("Mode", format!("{:o}", x & 0o7777)));
+                }
+                c = c.push(field(
+                    if m.mode.is_some() {
+                        "Writable"
+                    } else {
+                        "Read-only"
+                    },
+                    match (m.mode.is_some(), m.readonly) {
+                        (true, ro) => if ro { "no" } else { "yes" }.into(),
+                        (false, ro) => if ro { "yes" } else { "no" }.into(),
+                    },
+                ));
                 if let Some(n) = m.child_count {
                     c = c.push(field("Items", n.to_string()));
                 }

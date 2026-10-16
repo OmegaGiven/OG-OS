@@ -14,6 +14,8 @@
 
 mod scan;
 #[cfg(test)]
+// unix stat (dev / inode / blocks) behaviour
+#[cfg(all(test, unix))]
 mod tests;
 mod tree;
 mod treemap;
@@ -768,7 +770,7 @@ impl State {
         Task::perform(
             async move {
                 tokio::task::spawn_blocking(move || {
-                    use std::os::unix::fs::MetadataExt;
+                    use scan::StatExt;
                     let dev = dev
                         .or_else(|| std::fs::symlink_metadata(&root).ok().map(|m| m.dev()))
                         .unwrap_or(0);
