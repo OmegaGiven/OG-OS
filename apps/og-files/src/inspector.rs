@@ -105,7 +105,7 @@ impl Inspector {
 
 fn tools_for(kind: Kind) -> &'static str {
     match kind {
-        Kind::Image => "view · Make PDF · split scanned photos (server); editing: phase 3",
+        Kind::Image => "view · Make PDF · split scanned photos; editing: phase 3",
         Kind::Video => {
             "play · seek · frame step · speed; edit mode: snapshot frame, trim → new file"
         }

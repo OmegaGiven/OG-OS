@@ -232,8 +232,11 @@ streamed loading.
 
 ## 5a. PDF toolkit (Stirling-PDF, rebuilt natively)
 
-The goal is to bring Stirling-PDF's feature set (a self-hosted Stirling-PDF
-server, optionally) into the file manager.
+The goal is to bring Stirling-PDF's whole feature set into the file
+manager **with none of its dependencies**: every tool runs in-process in
+pure Rust (no Stirling server, Java, LibreOffice, Tesseract, Ghostscript,
+qpdf or browser engine), so the app works offline on Linux, macOS and
+Windows with nothing else installed.
 
 **Licensing.** The fork's only change from upstream is unlocking the
 enterprise features. Stirling's `app/core` is MIT. `app/proprietary` is
@@ -250,7 +253,8 @@ translated.
 | Vision | `ocrs` 0.13 on `rten` 0.26 (OCR), `rqrr` 0.11 (QR), `imageproc` 0.27 (photo segmentation); all pure Rust | Offline and in-process. The OCR detection and recognition models (CC BY-SA 4.0, 12.2 MB) are compiled in from `assets/ocr/`; source, sha256 and license are in its README. Pages are rendered with hayro. |
 | Convert from PDF | `tools/extract.rs` + `tools/convert/` (pure Rust, in-process) | hayro interprets each page into a recording device (glyphs with Unicode, font, size, colour; images; rules), then a layout pass builds lines, columns, paragraphs, headings, lists and tables that eleven writers turn into files. See *Convert from PDF* below. |
 | Signatures | RustCrypto: `rsa` 0.9, `p256`/`p384` 0.13, `sha1`/`sha2`, `der` + `x509-cert` 0.2, `pkcs8`, `p12-keystore` 0.2 (all pure Rust, MIT/Apache) | CMS built and parsed with a small DER reader/writer in `tools/sign.rs`. |
-| Heavy tools | Stirling REST API on a self-hosted server (optional) | For jobs that need Tesseract, Ghostscript, qpdf or LibreOffice. The app uploads the file and saves the result next to the original. Config goes in `$XDG_CONFIG_HOME/og-files/stirling.json` (`{ "url": "https://stirling.example.ts.net:8081", "api_key": "…" }`, sent as `X-API-KEY`). Without it those tools are just hidden, so the app stays standalone. |
+| Typeset | `typst` 0.15 (in-process `World`, no packages), GNU FreeFont compiled in (GPL-3.0+ with font exception) | Anything → PDF (`tools/topdf/`): every input becomes Typst source with escaped text, compiled to PDF with title + outline. |
+| Optimize | `tools/compress.rs`, `repair.rs`, `pdfa.rs` (lopdf + hayro + image) | Image downsampling by placed resolution, object dedup, object/xref streams; byte-scan repair; PDF/A-2b with sRGB intent, XMP, embedded standard-14 fonts and a verifier. |
 
 **Model.** The same rules as every other viewer apply: view mode is
 read-only, and **Edit pages** (`Ctrl+E`) enables page operations. **Save**
@@ -270,35 +274,27 @@ ticked pages. The buttons are:
 Other PDF toolbar additions: **Save copy**, plus **Duplicate** and **Blank
 page** in edit mode. Outside the PDF viewer: password-protected PDFs open
 behind an unlock screen. Images get **Make PDF** and **Split
-scanned photos** (both native). Office, HTML, Markdown and e-book files get
-**Convert to PDF** (server).
-behind an unlock screen. Images get **Make PDF** (native) and **Split
-scanned photos** (server). Office documents, spreadsheets, presentations,
+scanned photos**. Office documents, spreadsheets, presentations,
 HTML, Markdown, plain text, e-mail, e-books, comics and SVG get **Convert
 to PDF** (native, see "Anything → PDF" below) from the placeholder view and
 from the files pane's context menu (any selection of supported files).
 
-**Status: all Stirling core tools are built** (2026-10-11). "native" means
-in-process Rust; "server" means the Stirling REST API.
+**Status: all Stirling core tools are built natively** (2026-10-16). Every
+row below runs in-process; there is no server backend any more.
 
 | Group | Tools | Engine |
 |---|---|---|
 | Page editing | view, thumbnails, zoom, rotate, delete, reorder, duplicate, blank page, insert PDF, extract, split every N, select | native (plan + compose) |
 | Organize | split by ranges / bookmarks / file size, select pages by range, remove blank pages, crop, n-up (2–16), booklet, fit to paper, scale, split into sections, one long page, overlay PDF, insert images | native |
-| Organize | insert web page | server |
 | Vision | **OCR → searchable PDF** (invisible text layer, skip or redo pages that have text, page range), **auto-split at QR separator pages** (Stirling's sheet or any QR code; duplex drops the blank back), **split scanned photos** (PDF pages, and image files from the image viewer) | native |
 | Organize | insert web page (fetch + typeset, see below) | native |
-| Organize | auto-split at QR pages | server |
 | Add & edit | page numbers, text stamp, watermark (centred / tiled), image stamp, **drawn signature** (canvas pad + click to place), attachments, bookmarks editor, metadata editor / wipe | native |
 | Security | AES-256 password + permissions, remove password, sanitize (JS, files, XMP, info, links, fonts), redact text, **redact areas** (drag boxes on the page, true removal by rasterizing), remove annotations / images, flatten forms, flatten to images, unlock forms, remove signatures, show JavaScript | native |
 | Security | sign with certificate (PAdES B-B; PKCS#12 or PEM; RSA / ECDSA P-256 / P-384), validate signatures | native (`tools/sign.rs`) |
 | Convert & extract | pages → PNG/JPEG, extract images, extract attachments, document info, compare (text diff), auto-rename | native |
 | Convert & extract | PDF → Word/ODT/Excel/PowerPoint/HTML/Markdown/text/RTF/XML/CSV/EPUB | native |
-| Convert & extract | Office/HTML/MD/EML/e-book/image → PDF | server |
 | Convert & extract | Office/HTML/MD/text/EML/e-book/comic/SVG/image/web page → PDF | native (Typst, `tools/topdf`) |
-| Convert & extract | PDF → Word/ODT/Excel/PowerPoint/HTML/Markdown/text/RTF/XML/CSV/EPUB | server |
 | Optimize & colour | lossless compress, repair, greyscale, invert, adjust colours, fake scan | native |
-| Optimize & colour | strong compress (Ghostscript/qpdf), repair via server, PDF/A-2b | server |
 
 **Convert from PDF** (Tools → *Convert PDF to…*, `tools/convert`). No
 server, no external programs. Files are written next to the PDF as
@@ -405,9 +401,7 @@ reach Typst, so one broken picture never fails a document.
 | .fb2 | XML → HTML (sections, titles, emphasis, poems, epigraphs, base64 binaries) | |
 | .cbz .cbr .cb7 .cbt | archive images natural-sorted → existing images → PDF (page per image); RAR via the pure-Rust `rars` crate (RAR 1.3–7, solid) | ≤2 GB of pages |
 | .doc .ppt (binary) | — | refused with "save as .docx/.pptx" |
-| Convert & extract | PDF → Word/ODT/Excel/PowerPoint/HTML/Markdown/text/RTF/XML/CSV/EPUB; Office/HTML/MD/EML/e-book/image → PDF | server |
 | Optimize & colour | lossless compress, **compress levels 1–9** (image downsampling by placed resolution), repair, **PDF/A-2b** + verifier, greyscale, invert, adjust colours, fake scan | native (`tools/compress.rs`, `repair.rs`, `pdfa.rs`) |
-| Optimize & colour | OCR (Tesseract) | server |
 
 **Native compress / repair / PDF/A / certificate signatures** (2026-10-16,
 pure Rust; no Ghostscript, qpdf, Java or OpenSSL). Each tool that changes
@@ -491,16 +485,6 @@ the document also shows a report in the panel (`JobOut::PdfReport`).
   imprint). Trust isn't evaluated, because there is no certificate store.
   `adbe.x509.rsa_sha1` is reported as unsupported.
 
-**Server endpoints** (paths and fields taken from upstream `app/core` only,
-listed in `tools/server.rs`): `/api/v1/misc/{compress-pdf, repair}`,
-`/api/v1/convert/{pdf/pdfa, file/pdf, html/pdf,
-markdown/pdf, eml/pdf, img/pdf, svg/pdf, ebook/pdf, url/pdf}`,
-`/api/v1/security/{cert-sign, validate-signature}`, and
-`/api/v1/info/status` for **Test connection**. (`server::convert_from_pdf`
-and its `pdf/word … pdf/epub` endpoints are no longer called: PDF → other
-formats is native.) The URL and API key are
-entered in Tools → Server settings and saved to `stirling.json` (mode 600).
-
 **Known limits.** Each module's doc comments list them per function. The
 main ones:
 - Rebuilding pages (n-up, booklet, scale, overlay…) drops those pages'
@@ -541,8 +525,8 @@ open: phase 3.
   fixtures (docx/pptx/odp/epub/eml/mobi/fb2/comics built in memory, a local
   HTTP server for web pages): output parses, page count, page size, text,
   images, outline and title are checked;
-- compose, pages, and every public function of structure, layout, raster
-  and server (server tests use a local mock HTTP server, no network);
+- compose, pages, and every public function of structure, layout and
+  raster;
 - the converters (`tools/convert/tests.rs`): a generated three-page PDF
   (standard-14 and CID/ToUnicode text, two columns, a heading, a list, a
   ruled and an unruled table, an image) checks the reading order, the
@@ -820,7 +804,7 @@ entered, saved over, discarded, exported, errors.
 - [x] CLI: `og-files [--view tree|list|grid] [--search TEXT] [--focus] [PATH]`; subcommands extract / compress / list / open / open-with / apps (§6c)
 - [x] viewers: text (read-only → edit mode, save over, discard), image, CSV/TSV
 - [x] PDF: hayro viewer + thumbnails; edit pages (rotate, delete, reorder, insert, duplicate, blank); export (extract, split, save copy)
-- [x] PDF toolkit: all Stirling core tools, 54 in a Tools panel (native + optional Stirling server), unlock screen, convert-to-PDF from other viewers; 62 tests
+- [x] PDF toolkit: all Stirling core tools, 55 in a Tools panel, all native (no server), unlock screen, convert-to-PDF from other viewers; 62 tests
 - [x] inspector metadata, details activity log
 - [x] placeholders naming each planned backend
 

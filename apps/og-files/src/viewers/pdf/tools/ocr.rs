@@ -752,7 +752,7 @@ pub(crate) mod tests {
     }
 
     /// OCR, auto-split and photo splitting driven through the tool panel
-    /// like the UI does, with no server configured.
+    /// like the UI does.
     #[test]
     fn vision_tools_run_from_the_panel_without_a_server() {
         use super::super::super::toolpanel::{job, Form, FormMsg, JobInput, JobOut, Tool};
@@ -763,11 +763,7 @@ pub(crate) mod tests {
             current: 0,
             selected: vec![],
             file_name: "scan.pdf".into(),
-            server: None,
         };
-        for t in [Tool::Ocr, Tool::AutoSplit, Tool::ExtractScans] {
-            assert!(!t.needs_server(), "{}", t.label());
-        }
         let scan = Arc::new(scanned_pdf(&[&["Searchable now"]]));
         let mut form = Form::default();
         form.update(FormMsg::Text("langs", "eng, fra".into()));

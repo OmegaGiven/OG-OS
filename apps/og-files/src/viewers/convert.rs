@@ -14,13 +14,9 @@ use iced::widget::{button, center, column, text, text_input};
 use iced::{Element, Task};
 use std::path::{Path, PathBuf};
 
-/// Can this file be turned into a PDF, and does it need the server?
-/// (Nothing does any more; the flag stays for the placeholder's label.)
-pub fn convertible(path: &Path, kind: Kind) -> Option<bool> {
-    if kind == Kind::Image || topdf::supported(path) {
-        return Some(false);
-    }
-    None
+/// Can this file be turned into a PDF (all in-process)?
+pub fn convertible(path: &Path, kind: Kind) -> bool {
+    kind == Kind::Image || topdf::supported(path)
 }
 
 /// Convert and write `<stem>.pdf` next to the file (never overwrites).

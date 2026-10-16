@@ -17,9 +17,10 @@ _Screenshots coming soon._
   - text and code (syntax colours, edit mode, atomic save)
   - images (fit, pan / zoom)
   - tables: CSV / TSV / XLSX / XLS / ODS (edit cells, save)
-  - PDF: fast renderer, page editing, and a 54-tool panel (merge, split,
-    watermark, redact, sign, encrypt, …), optionally backed by a
-    self-hosted Stirling-PDF server for OCR and conversions
+  - PDF: fast renderer, page editing, and a 55-tool panel (merge, split,
+    watermark, redact, sign, OCR, compress, PDF/A, convert to and from
+    Office / HTML / Markdown / EPUB…) — Stirling-PDF's feature set, all
+    built in, nothing else to install
   - Word (.docx) editor with lossless round-trip; ODT / RTF / EPUB reader
   - audio (waveform, tags, trim / normalize)
   - video (libmpv: GPU decoding, subtitles, tracks, chapters, A-B loop,
@@ -135,7 +136,7 @@ Plain JSON files, all optional:
 
 | | Linux | macOS | Windows |
 |---|---|---|---|
-| config (`settings.json`, `bookmarks.json`, `connections.json`, `stirling.json`) | `~/.config/og-files` | `~/Library/Application Support/og-files` | `%APPDATA%\og-files` |
+| config (`settings.json`, `bookmarks.json`, `connections.json`) | `~/.config/og-files` | `~/Library/Application Support/og-files` | `%APPDATA%\og-files` |
 | state (activity log, video positions, rclone logs) | `~/.local/state/og-files` | `~/Library/Application Support/og-files` | `%LOCALAPPDATA%\og-files` |
 | cache (thumbnails) | `~/.cache/og-files` | `~/Library/Caches/og-files` | `%LOCALAPPDATA%\og-files\cache` |
 

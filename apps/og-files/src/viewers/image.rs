@@ -60,7 +60,7 @@ pub enum Msg {
     ToggleChecker,
     /// handled by the registry (needs the path): writes `<name>.pdf`
     ToPdf,
-    /// handled by the registry: split photos out of a scan (server)
+    /// handled by the registry: split photos out of a scan
     SplitScan,
 }
 

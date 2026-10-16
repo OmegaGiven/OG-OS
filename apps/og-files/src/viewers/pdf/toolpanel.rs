@@ -6,8 +6,8 @@
 //! tool's form is just a list of `field(...)` calls — no per-tool state.
 
 use super::tools::{
-    self, compress, convert, layout, pages, pdfa, raster, repair, server, sign, structure, Anchor,
-    Output, Paper,
+    self, compress, convert, layout, pages, pdfa, raster, repair, sign, structure, Anchor, Output,
+    Paper,
 };
 use crate::theme;
 use iced::mouse;
@@ -73,7 +73,7 @@ pub enum Tool {
     AutoRename,
     // optimize & colour
     CompressLossless,
-    CompressServer,
+    CompressImages,
     Repair,
     Ocr,
     PdfA,
@@ -157,7 +157,7 @@ pub const CATEGORIES: [(&str, &[Tool]); 5] = [
         "Optimize & colour",
         &[
             CompressLossless,
-            CompressServer,
+            CompressImages,
             Repair,
             Ocr,
             PdfA,
@@ -218,7 +218,7 @@ impl Tool {
             Compare => "Compare with another PDF",
             AutoRename => "Auto-rename from content",
             CompressLossless => "Compress (lossless)",
-            CompressServer => "Compress (images)",
+            CompressImages => "Compress (images)",
             Repair => "Repair",
             Ocr => "OCR (make text searchable)",
             PdfA => "Convert to PDF/A",
@@ -278,7 +278,7 @@ impl Tool {
             Compare => "Text differences, page by page.",
             AutoRename => "Renames the file from its title or first line.",
             CompressLossless => "Smaller file without touching image quality.",
-            CompressServer => "Downsamples and re-encodes images, levels 1–9.",
+            CompressImages => "Downsamples and re-encodes images, levels 1–9.",
             Repair => "Rebuilds a damaged file.",
             Ocr => "Adds an invisible, searchable text layer to scans (offline, Latin script).",
             PdfA => "Archival PDF/A-2b (best effort) with a verifier report.",
@@ -288,10 +288,6 @@ impl Tool {
             AdjustColors => "Brightness, contrast, saturation (pages become images).",
             FakeScan => "Slight tilt, noise and paper tone.",
         }
-    }
-
-    pub fn needs_server(self) -> bool {
-        matches!(self, InsertUrl) && false
     }
 }
 
@@ -464,7 +460,6 @@ pub struct JobInput {
     pub current: usize,
     pub selected: Vec<usize>,
     pub file_name: String,
-    pub server: Option<server::ServerConfig>,
 }
 
 fn read(path: &str) -> Result<Vec<u8>, String> {
@@ -495,17 +490,6 @@ pub fn expand_home(p: &str) -> PathBuf {
     match p.strip_prefix("~/") {
         Some(rest) => crate::config::home().join(rest),
         None => PathBuf::from(p),
-    }
-}
-
-fn reply_out(r: server::Reply, suffix: &str) -> JobOut {
-    if r.ext == "pdf" {
-        JobOut::Out(Output::Pdf(r.bytes))
-    } else {
-        JobOut::Out(Output::Files(vec![(
-            format!("{suffix}.{}", r.ext),
-            r.bytes,
-        )]))
     }
 }
 
@@ -603,11 +587,6 @@ pub fn job(tool: Tool, form: &Form, input: JobInput) -> Result<Job, String> {
             spec
         };
         pages::parse(&spec, n)
-    };
-    let srv = || {
-        input.server.clone().ok_or_else(|| {
-            "Set up the Stirling server first (see Settings in this panel)".to_string()
-        })
     };
     let out = |r: Result<Vec<u8>, String>| r.map(|b| JobOut::Out(Output::Pdf(b)));
 
@@ -992,7 +971,7 @@ pub fn job(tool: Tool, form: &Form, input: JobInput) -> Result<Job, String> {
         CompressLossless => {
             Box::new(move |pdf: Arc<Vec<u8>>| out(structure::compress_lossless(&pdf)))
         }
-        CompressServer => {
+        CompressImages => {
             let opts = compress::Options {
                 level: form.num("level", 5.0)?.clamp(1.0, 9.0) as u8,
                 grayscale: form.f("gray", false),
@@ -1114,7 +1093,6 @@ pub fn view_form<'a, M: Clone + 'a>(
     tool: Tool,
     form: &'a Form,
     editing: bool,
-    has_server: bool,
     on_form: impl Fn(FormMsg) -> M + Copy + 'a,
     on_action: impl Fn(Action) -> M + 'a,
 ) -> Element<'a, M> {
@@ -1420,7 +1398,7 @@ pub fn view_form<'a, M: Clone + 'a>(
             on_form,
         )],
         Compare => vec![field("Other PDF", "other", "/path/to/other.pdf")],
-        CompressServer => vec![
+        CompressImages => vec![
             field("Level 1 (lossless) – 9 (strongest)", "level", "5"),
             flag("Greyscale", "gray", false),
         ],
@@ -1475,7 +1453,6 @@ pub fn view_form<'a, M: Clone + 'a>(
         _ => vec![],
     };
 
-    let blocked = tool.needs_server() && !has_server;
     let produces_report = matches!(tool, ShowJavaScript | Info | Compare | ValidateSignature);
     let produces_files = matches!(
         tool,
@@ -1492,13 +1469,7 @@ pub fn view_form<'a, M: Clone + 'a>(
     let modifies = !(produces_report || produces_files || matches!(tool, SelectPages | AutoRename));
 
     let mut actions = row![].spacing(6);
-    if blocked {
-        actions = actions.push(
-            text("Needs the Stirling server — see Server settings at the bottom of the tool list.")
-                .size(12)
-                .color(theme::MUTED),
-        );
-    } else if modifies {
+    if modifies {
         let inserts = matches!(tool, InsertImages | InsertUrl);
         actions = actions
             .push(
@@ -1522,7 +1493,7 @@ pub fn view_form<'a, M: Clone + 'a>(
 
     let mut col = column(fields).spacing(8);
     col = col.push(Space::with_height(4)).push(actions);
-    if modifies && !editing && !blocked {
+    if modifies && !editing {
         col = col.push(
             text("Turn on Edit pages to apply to this file; or save the result as a new file.")
                 .size(11)
@@ -1715,7 +1686,7 @@ mod tests {
             (Compare, vec![("other", other.as_str())]),
             (AutoRename, vec![]),
             (CompressLossless, vec![]),
-            (CompressServer, vec![("level", "9")]),
+            (CompressImages, vec![("level", "9")]),
             (Repair, vec![]),
             (PdfA, vec![]),
             (ValidateSignature, vec![]),
@@ -1735,7 +1706,6 @@ mod tests {
                 current: 0,
                 selected: vec![],
                 file_name: "sample.pdf".into(),
-                server: None,
             };
             let result = job(tool, &form, input).and_then(|j| j(doc.clone()));
             let check = match result {
@@ -1776,7 +1746,6 @@ mod tests {
             current: 1,
             selected: vec![],
             file_name: "s.pdf".into(),
-            server: None,
         };
         if let Err(e) = job(Signature, &form, input).and_then(|j| j(doc.clone())) {
             failures.push(format!("Draw signature: {e}"));
@@ -1790,7 +1759,6 @@ mod tests {
             current: 0,
             selected: vec![],
             file_name: "s.pdf".into(),
-            server: None,
         };
         if let Err(e) = job(RedactAreas, &form, input).and_then(|j| j(doc.clone())) {
             failures.push(format!("Redact areas: {e}"));
@@ -1826,7 +1794,6 @@ mod tests {
                 current: 0,
                 selected: vec![],
                 file_name: "demo.pdf".into(),
-                server: None,
             };
             match job(tool, &form, input)
                 .and_then(|j| j(doc.clone()))
