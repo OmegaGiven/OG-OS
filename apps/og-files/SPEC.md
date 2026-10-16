@@ -232,8 +232,8 @@ streamed loading.
 
 ## 5a. PDF toolkit (Stirling-PDF, rebuilt natively)
 
-The goal is to bring the homelab Stirling-PDF (`stirling-homelab` on `go`,
-fork `OmegaGiven/Stirling-PDF@homelab-edition`) into the file manager.
+The goal is to bring Stirling-PDF's feature set (a self-hosted Stirling-PDF
+server, optionally) into the file manager.
 
 **Licensing.** The fork's only change from upstream is unlocking the
 enterprise features. Stirling's `app/core` is MIT. `app/proprietary` is
@@ -247,7 +247,7 @@ translated.
 |---|---|---|
 | Render | `hayro` 0.7 (pure Rust, MIT/Apache, CPU) | One worker thread per open PDF that keeps its parse and font cache (`viewers/pdf/engine.rs`). Panics are caught per page. Bitmaps are capped at 40 MP. Limits: no blending/knockout groups yet, and password-protected files fail to open. |
 | Edit | `lopdf` 0.45 (pure Rust, MIT) | `compose::build(sources, plan)` turns a plan of (source, page, rotation) into a new PDF. That single primitive covers reorder, delete, rotate, duplicate, merge/insert, extract and split. Inherited page attributes are pushed down, and unused objects are pruned. |
-| Heavy tools | Stirling REST API on `go` (optional) | For jobs that need Tesseract, Ghostscript, qpdf or LibreOffice. The app uploads the file and saves the result next to the original. Config goes in `$XDG_CONFIG_HOME/og-files/stirling.json` (`{ "url": "https://go.tail6c6721.ts.net:8081", "api_key": "…" }`, sent as `X-API-KEY`). Without it those tools are just hidden, so the app stays standalone. |
+| Heavy tools | Stirling REST API on a self-hosted server (optional) | For jobs that need Tesseract, Ghostscript, qpdf or LibreOffice. The app uploads the file and saves the result next to the original. Config goes in `$XDG_CONFIG_HOME/og-files/stirling.json` (`{ "url": "https://stirling.example.ts.net:8081", "api_key": "…" }`, sent as `X-API-KEY`). Without it those tools are just hidden, so the app stays standalone. |
 
 **Model.** The same rules as every other viewer apply: view mode is
 read-only, and **Edit pages** (`Ctrl+E`) enables page operations. **Save**

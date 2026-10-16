@@ -1,8 +1,8 @@
-//! Optional Stirling-PDF REST backend (the homelab server on `go`) for tools
+//! Optional Stirling-PDF REST backend (e.g. a self-hosted server) for tools
 //! that need Tesseract / Ghostscript / qpdf / LibreOffice.
 //!
 //! Config: `$XDG_CONFIG_HOME/og-files/stirling.json`
-//!   { "url": "https://go.tail6c6721.ts.net:8081", "api_key": "…" }
+//!   { "url": "https://stirling.example.ts.net:8081", "api_key": "…" }
 //! The key is sent as `X-API-KEY`. No config → `ServerConfig::load()` is
 //! None and the UI hides server tools. All calls are blocking (run them on
 //! the blocking pool).
