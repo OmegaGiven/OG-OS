@@ -1,0 +1,108 @@
+#!/usr/bin/env python3
+"""Export apps/og-files from the OG-OS monorepo into the standalone public
+repo (github.com/OmegaGiven/og-files).
+
+    packaging/export-public.py DEST        # DEST = a clone of the public repo
+
+- copies only git-tracked files of apps/og-files (never build output or
+  untracked local files), replacing everything in DEST except .git
+- rewrites Cargo.toml for a standalone build: drops the OG-OS-only
+  `og-suite` feature and its path dependencies (code behind
+  cfg(feature = "og-suite") simply compiles out)
+- writes a pruned Cargo.lock derived from the monorepo's, so the public
+  build uses the exact dependency versions tested here
+- refuses to export if a secret-looking string is found
+"""
+import os, re, shutil, subprocess, sys
+from pathlib import Path
+
+APP = Path(__file__).resolve().parent.parent
+ROOT = Path(subprocess.check_output(["git", "-C", str(APP), "rev-parse", "--show-toplevel"], text=True).strip())
+SUITE_DEPS = ("og-config", "og-theme", "og-wayland")
+
+# strings that must never be published (real tailnet / personal ids)
+BLOCK = [
+    r"tail[0-9a-f]{6}\.ts\.net",  # real tailnet suffixes (tests use tail1234)
+    r"gh[pousr]_[A-Za-z0-9]{20,}", r"sk-[A-Za-z0-9]{20,}",
+    r"-----BEGIN [A-Z ]*PRIVATE KEY-----",
+    r"/home/omegagiven", r"bassheadbeads", r"omegagiven9@",
+]
+
+
+def tracked():
+    out = subprocess.check_output(["git", "-C", str(APP), "ls-files", "-z", "."], text=True)
+    return [p for p in out.split("\0") if p]
+
+
+def scan(files):
+    bad = []
+    rx = [re.compile(b) for b in BLOCK]
+    for f in files:
+        try:
+            text = (APP / f).read_text(errors="ignore")
+        except IsADirectoryError:
+            continue
+        for r in rx:
+            for m in r.finditer(text):
+                if "tail1234" in m.group(0):
+                    continue
+                line = text.count("\n", 0, m.start()) + 1
+                bad.append(f"{f}:{line}: {m.group(0)}")
+    return bad
+
+
+def standalone_toml(src: str) -> str:
+    out, skip_feature_block = [], False
+    for line in src.splitlines():
+        name = line.split("=", 1)[0].strip()
+        if name in SUITE_DEPS and "path" in line:
+            continue  # OG-OS path dependency
+        if line.strip().startswith("og-suite") and "dep:" in line:
+            continue
+        if line.strip().startswith("default") and "og-suite" in line:
+            feats = re.findall(r'"([^"]+)"', line)
+            # standalone default is portable: no og-suite, and no build-time
+            # ffmpeg (video plays through libmpv when installed)
+            feats = [f for f in feats if f not in ("og-suite", "ffmpeg")]
+            line = "default = [" + ", ".join(f'"{f}"' for f in feats) + "]"
+        out.append(line)
+    text = "\n".join(out) + "\n"
+    # og-suite stays a known cfg so the gated code compiles out cleanly
+    text += (
+        "\n[lints.rust]\n"
+        "unexpected_cfgs = { level = \"warn\", check-cfg = ['cfg(feature, values(\"og-suite\"))'] }\n"
+    )
+    return text
+
+
+def main():
+    if len(sys.argv) != 2:
+        sys.exit(__doc__)
+    dest = Path(sys.argv[1]).resolve()
+    files = tracked()
+    bad = scan(files)
+    if bad:
+        sys.exit("refusing to export, sensitive-looking strings:\n  " + "\n  ".join(bad))
+    dest.mkdir(parents=True, exist_ok=True)
+    for entry in dest.iterdir():
+        if entry.name == ".git":
+            continue
+        shutil.rmtree(entry) if entry.is_dir() and not entry.is_symlink() else entry.unlink()
+    for f in files:
+        if f == "packaging/export-public.py":
+            continue  # monorepo tooling
+        d = dest / f
+        d.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(APP / f, d)
+    cargo = dest / "Cargo.toml"
+    cargo.write_text(standalone_toml(cargo.read_text()))
+    shutil.copy2(ROOT / "Cargo.lock", dest / "Cargo.lock")
+    # resolve offline against the copied lock: drops unused packages,
+    # keeps every version that's shared
+    subprocess.check_call(["cargo", "metadata", "--offline", "--format-version", "1",
+                           "--manifest-path", str(cargo)], stdout=subprocess.DEVNULL)
+    print(f"exported {len(files)} files to {dest}")
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,163 @@
+name: Release
+
+# Push a tag like v0.1.0 to build every platform and publish a GitHub
+# Release with downloadable files. "Run workflow" (manual) builds the same
+# files as workflow artifacts without publishing a release.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  linux:
+    name: Linux ${{ matrix.arch }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: x86_64, os: ubuntu-22.04 }
+          - { arch: aarch64, os: ubuntu-22.04-arm }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libxkbcommon-dev libwayland-dev libasound2-dev libvulkan-dev
+      - run: cargo build --locked --release
+      - name: Package (.tar.gz + .deb)
+        shell: bash
+        run: |
+          set -euo pipefail
+          V=$(cargo pkgid | sed 's/.*[#@]//')
+          N=og-files-$V-linux-${{ matrix.arch }}
+          mkdir -p dist/$N
+          cp target/release/og-files README.md dist/$N/ 2>/dev/null || cp target/release/og-files dist/$N/
+          cp packaging/linux/og-files.desktop packaging/icons/og-files.png dist/$N/
+          cat > dist/$N/install.sh <<'SH'
+          #!/bin/sh
+          # Installs OG Files for the current user (~/.local).
+          set -e
+          cd "$(dirname "$0")"
+          install -Dm755 og-files "$HOME/.local/bin/og-files"
+          install -Dm644 og-files.desktop "$HOME/.local/share/applications/og-files.desktop"
+          install -Dm644 og-files.png "$HOME/.local/share/icons/hicolor/512x512/apps/og-files.png"
+          echo "Installed to ~/.local/bin/og-files"
+          SH
+          chmod +x dist/$N/install.sh
+          tar -C dist -czf dist/$N.tar.gz $N
+          # Debian/Ubuntu package
+          D=dist/deb
+          install -Dm755 target/release/og-files $D/usr/bin/og-files
+          install -Dm644 packaging/linux/og-files.desktop $D/usr/share/applications/og-files.desktop
+          install -Dm644 packaging/icons/og-files.png $D/usr/share/icons/hicolor/512x512/apps/og-files.png
+          ARCH=$([ "${{ matrix.arch }}" = x86_64 ] && echo amd64 || echo arm64)
+          mkdir -p $D/DEBIAN
+          cat > $D/DEBIAN/control <<CTL
+          Package: og-files
+          Version: $V
+          Architecture: $ARCH
+          Maintainer: OmegaGiven
+          Depends: libc6, libasound2 | libasound2t64, libxkbcommon0, libvulkan1
+          Recommends: libmpv2 | libmpv1, udisks2, rclone, fuse3
+          Section: utils
+          Priority: optional
+          Description: OG Files — file manager with built-in viewers and editors
+          CTL
+          sed -i 's/^          //' $D/DEBIAN/control
+          dpkg-deb --root-owner-group --build $D dist/og-files_${V}_$ARCH.deb
+          ls -la dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-${{ matrix.arch }}
+          path: |
+            dist/*.tar.gz
+            dist/*.deb
+
+  macos:
+    name: macOS (universal)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --locked --release --target aarch64-apple-darwin
+      - run: cargo build --locked --release --target x86_64-apple-darwin
+      - name: Package (.app in .dmg + .zip)
+        run: |
+          set -euo pipefail
+          V=$(cargo pkgid | sed 's/.*[#@]//')
+          APP="dist/OG Files.app"
+          mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$APP/Contents/Frameworks"
+          lipo -create -output "$APP/Contents/MacOS/og-files" \
+            target/aarch64-apple-darwin/release/og-files target/x86_64-apple-darwin/release/og-files
+          sed "s/@VERSION@/$V/g" packaging/macos/Info.plist > "$APP/Contents/Info.plist"
+          /usr/libexec/PlistBuddy -c "Add :CFBundleIconFile string og-files" "$APP/Contents/Info.plist"
+          cp packaging/icons/og-files.icns "$APP/Contents/Resources/"
+          # ad-hoc signature (no Apple developer account): lets the app run
+          # after the user approves it once (right-click → Open)
+          codesign --force --deep --sign - "$APP"
+          ditto -c -k --keepParent "$APP" "dist/og-files-$V-macos-universal.zip"
+          mkdir -p dmg && cp -R "$APP" dmg/ && ln -s /Applications dmg/Applications
+          hdiutil create -volname "OG Files" -srcfolder dmg -ov -format UDZO "dist/og-files-$V-macos-universal.dmg"
+          ls -la dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-universal
+          path: |
+            dist/*.dmg
+            dist/*.zip
+
+  windows:
+    name: Windows x86_64
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --locked --release
+      - name: Package (.zip)
+        shell: pwsh
+        run: |
+          $V = (cargo pkgid) -replace '.*[#@]', ''
+          $N = "og-files-$V-windows-x86_64"
+          New-Item -ItemType Directory -Force "dist/$N" | Out-Null
+          Copy-Item target/release/og-files.exe "dist/$N/"
+          Copy-Item packaging/icons/og-files.ico "dist/$N/"
+          if (Test-Path README.md) { Copy-Item README.md "dist/$N/" }
+          Compress-Archive -Path "dist/$N/*" -DestinationPath "dist/$N.zip"
+          Get-ChildItem dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-x86_64
+          path: dist/*.zip
+
+  publish:
+    name: Publish release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [linux, macos, windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        run: cd dist && sha256sum * > SHA256SUMS.txt && cat SHA256SUMS.txt
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ github.ref_name }}" dist/* \
+            --repo "${{ github.repository }}" --title "OG Files ${{ github.ref_name }}" \
+            --notes "Downloads: Linux (.tar.gz with install.sh, or .deb), macOS (.dmg, universal — first launch: right-click → Open), Windows (.zip, run og-files.exe). Optional: install mpv for video playback."
