@@ -703,6 +703,15 @@ impl State {
                     .to_lowercase()
                     .replace(|c: char| !c.is_alphanumeric(), "-");
                 let slug = slug.trim_matches('-').replace("--", "-");
+                // a document plus a report: show the report, then treat it
+                // like any other new document version
+                let r = match r {
+                    JobOut::PdfReport(bytes, report) => {
+                        self.report = Some((tool, report));
+                        JobOut::Out(Output::Pdf(bytes))
+                    }
+                    r => r,
+                };
                 match r {
                     JobOut::Out(Output::Pdf(bytes)) | JobOut::Insert(bytes)
                         if new_file || !self.editing =>
@@ -745,6 +754,8 @@ impl State {
                         self.form.prefill(v);
                         none
                     }
+                    // converted to Out(Pdf) above
+                    JobOut::PdfReport(..) => none,
                     JobOut::Rename(name) => {
                         if self.dirty {
                             return (

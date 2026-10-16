@@ -249,6 +249,7 @@ translated.
 | Edit | `lopdf` 0.45 (pure Rust, MIT) | `compose::build(sources, plan)` turns a plan of (source, page, rotation) into a new PDF. That single primitive covers reorder, delete, rotate, duplicate, merge/insert, extract and split. Inherited page attributes are pushed down, and unused objects are pruned. |
 | Vision | `ocrs` 0.13 on `rten` 0.26 (OCR), `rqrr` 0.11 (QR), `imageproc` 0.27 (photo segmentation); all pure Rust | Offline and in-process. The OCR detection and recognition models (CC BY-SA 4.0, 12.2 MB) are compiled in from `assets/ocr/`; source, sha256 and license are in its README. Pages are rendered with hayro. |
 | Convert from PDF | `tools/extract.rs` + `tools/convert/` (pure Rust, in-process) | hayro interprets each page into a recording device (glyphs with Unicode, font, size, colour; images; rules), then a layout pass builds lines, columns, paragraphs, headings, lists and tables that eleven writers turn into files. See *Convert from PDF* below. |
+| Signatures | RustCrypto: `rsa` 0.9, `p256`/`p384` 0.13, `sha1`/`sha2`, `der` + `x509-cert` 0.2, `pkcs8`, `p12-keystore` 0.2 (all pure Rust, MIT/Apache) | CMS built and parsed with a small DER reader/writer in `tools/sign.rs`. |
 | Heavy tools | Stirling REST API on a self-hosted server (optional) | For jobs that need Tesseract, Ghostscript, qpdf or LibreOffice. The app uploads the file and saves the result next to the original. Config goes in `$XDG_CONFIG_HOME/og-files/stirling.json` (`{ "url": "https://stirling.example.ts.net:8081", "api_key": "…" }`, sent as `X-API-KEY`). Without it those tools are just hidden, so the app stays standalone. |
 
 **Model.** The same rules as every other viewer apply: view mode is
@@ -290,7 +291,7 @@ in-process Rust; "server" means the Stirling REST API.
 | Organize | auto-split at QR pages | server |
 | Add & edit | page numbers, text stamp, watermark (centred / tiled), image stamp, **drawn signature** (canvas pad + click to place), attachments, bookmarks editor, metadata editor / wipe | native |
 | Security | AES-256 password + permissions, remove password, sanitize (JS, files, XMP, info, links, fonts), redact text, **redact areas** (drag boxes on the page, true removal by rasterizing), remove annotations / images, flatten forms, flatten to images, unlock forms, remove signatures, show JavaScript | native |
-| Security | sign with certificate (PKCS#12), validate signatures | server |
+| Security | sign with certificate (PAdES B-B; PKCS#12 or PEM; RSA / ECDSA P-256 / P-384), validate signatures | native (`tools/sign.rs`) |
 | Convert & extract | pages → PNG/JPEG, extract images, extract attachments, document info, compare (text diff), auto-rename | native |
 | Convert & extract | PDF → Word/ODT/Excel/PowerPoint/HTML/Markdown/text/RTF/XML/CSV/EPUB | native |
 | Convert & extract | Office/HTML/MD/EML/e-book/image → PDF | server |
@@ -404,6 +405,91 @@ reach Typst, so one broken picture never fails a document.
 | .fb2 | XML → HTML (sections, titles, emphasis, poems, epigraphs, base64 binaries) | |
 | .cbz .cbr .cb7 .cbt | archive images natural-sorted → existing images → PDF (page per image); RAR via the pure-Rust `rars` crate (RAR 1.3–7, solid) | ≤2 GB of pages |
 | .doc .ppt (binary) | — | refused with "save as .docx/.pptx" |
+| Convert & extract | PDF → Word/ODT/Excel/PowerPoint/HTML/Markdown/text/RTF/XML/CSV/EPUB; Office/HTML/MD/EML/e-book/image → PDF | server |
+| Optimize & colour | lossless compress, **compress levels 1–9** (image downsampling by placed resolution), repair, **PDF/A-2b** + verifier, greyscale, invert, adjust colours, fake scan | native (`tools/compress.rs`, `repair.rs`, `pdfa.rs`) |
+| Optimize & colour | OCR (Tesseract) | server |
+
+**Native compress / repair / PDF/A / certificate signatures** (2026-10-16,
+pure Rust; no Ghostscript, qpdf, Java or OpenSSL). Each tool that changes
+the document also shows a report in the panel (`JobOut::PdfReport`).
+- **Compress (images)**, levels 1–9 like Stirling. 1: merge duplicate
+  objects (hash + compare), Flate any uncompressed stream, prune, write
+  object + xref streams. 2: also recompress Flate/LZW/ASCII/RunLength
+  streams at level 9 and drop page thumbnails and `/PieceInfo`. 3–9: also
+  images, targets 300/220/150/150/120/96/72 dpi at JPEG quality
+  90/85/80/70/60/50/40. The effective resolution of every image comes
+  from the CTM at each `Do` on every page (through Form XObjects); the
+  smallest placement wins. Images in patterns or annotation appearances,
+  with colour-key masks, Decode arrays, CMYK/Indexed/16-bit/1-bit data,
+  or JPX/JBIG2/CCITT data are never resampled. Photos become JPEG; line
+  art and masked images stay Flate, and a soft mask is resized with its
+  image. Optional greyscale converts images and `rg/RG/k/K`. The result
+  must parse, keep the page count, render every page the input rendered,
+  and be smaller. Otherwise the original is kept, and the report says why.
+  Measured on local manuals: 6.6 MB colour-management guide → 58 % (L2),
+  1.5 MB manual → 29 % (L5), 3.2 MB image-heavy readme → 16 % (L5) / 8 %
+  (L9), 1.4 MB text manual → 61 % (L1); page renders unchanged at 30 dpi
+  (mean |Δ| ≤ 0.01).
+- **Repair** scans the bytes for `n g obj … endobj` and ignores the xref.
+  Later copies win, and object streams are unpacked in place. Wrong
+  `/Length`s are re-measured against `endstream`, objects cut off by a
+  truncated tail are dropped, and `/Root` comes from the last trailer or
+  xref-stream dict, else from a `/Type /Catalog` scan. lopdf parses that
+  synthetic file. The plain lopdf reading wins only if it yields more
+  pages. Then dangling references are nulled, the page tree is rebuilt,
+  and objects are renumbered. Every page is rendered with hayro, and
+  pages that still fail are listed.
+- **PDF/A-2b** (best effort): `%PDF-1.7` + binary comment, trailer `/ID`,
+  an sRGB `GTS_PDFA1` output intent (ICC v2 profile generated in code), and
+  `/DefaultCMYK` (bundled CC0 CGATS profile, `assets/icc/`) when DeviceCMYK
+  is used. XMP (`pdfaid` 2/B, Dublin Core) is kept in sync with Info and
+  stays unfiltered. It removes JavaScript, forbidden actions, `/AA`,
+  embedded files, XFA, `NeedAppearances`, media/3D annotations, image
+  `Interpolate`/`Alternates`/`OPI`, PostScript/reference XObjects,
+  transfer functions, external streams and LZW. Annotations become
+  printable and keep only `/AP /N`. Non-embedded standard-14 fonts, and
+  TrueType Arial/Times New Roman/Courier New stand-ins, get the
+  metric-compatible Foxit CFF fonts that hayro already compiles in
+  (`FontFile3 /Type1C`), with `/Widths` from the program (checked against
+  the AFM metrics in tests), a full FontDescriptor and ToUnicode.
+  A built-in verifier (`pdfa::verify`) runs on the result, and remaining
+  violations are listed. It checks header, ID, encryption, XMP + Info
+  consistency, output intent/ICC header, device colours vs. intent, font
+  embedding (+ CIDToGIDMap), width consistency of embedded Type 1/CFF
+  programs for the codes the pages show, actions, annotations,
+  forms, embedded files, LZW/external streams, image/XObject/ExtGState
+  rules, optional content and name/string limits. It does not check
+  content-stream operators, glyph presence, CIDSet/CharSet, TrueType cmap
+  tables or XMP extension schemas, so use veraPDF for a formal check.
+  Can't fix: other non-embedded fonts (Calibri, CID fonts…), annotations
+  without appearance streams, widths that already disagree with an
+  embedded font.
+- **Sign with certificate**: `.p12`/`.pfx` (legacy 3DES/RC2 or AES PBES2)
+  or PEM (certificate plus `PRIVATE KEY` / `ENCRYPTED PRIVATE KEY` / `RSA
+  PRIVATE KEY` / `EC PRIVATE KEY`, in one file or with a separate key
+  file). Keys: RSA (PKCS#1 v1.5, SHA-256), ECDSA P-256 (SHA-256), P-384
+  (SHA-384). The signature is written as an **incremental update**, so
+  earlier signatures stay valid. It adds a merged `/FT /Sig` field +
+  widget, either invisible or visible (signer/date/reason/location box at
+  a chosen page and corner). The signature dict carries
+  `/SubFilter /ETSI.CAdES.detached`, `/ByteRange` and a fixed-width
+  `/Contents` reserve. The CMS SignedData is detached, with content-type,
+  message-digest and signing-certificate-v2 attributes, and embeds the
+  signer certificate and chain. Per PAdES, the signing time goes in `/M`,
+  not in a CMS attribute. There is no timestamp (B-T needs a TSA).
+  Verified by the built-in validator, and in an `#[ignore]` test by
+  poppler `pdfsig` and `openssl cms -verify`.
+- **Validate signatures**: for each signature it checks byte-range sanity,
+  that the gap is exactly `/Contents`, the digest against
+  message-digest, content-type, and the CMS signature (RSA PKCS#1 v1.5 /
+  PSS, ECDSA P-256/P-384; SHA-1/256/384/512). It also checks
+  `adbe.pkcs7.sha1` content, whether the signature covers the whole
+  file (or how many bytes were appended), and signer/issuer, validity at
+  signing time. It reports whether the certificate is self-signed and
+  walks the embedded chain, verifying each link's signature. An RFC 3161
+  timestamp is checked too (its own CMS signature plus the message
+  imprint). Trust isn't evaluated, because there is no certificate store.
+  `adbe.x509.rsa_sha1` is reported as unsupported.
 
 **Server endpoints** (paths and fields taken from upstream `app/core` only,
 listed in `tools/server.rs`): `/api/v1/misc/{compress-pdf, repair}`,

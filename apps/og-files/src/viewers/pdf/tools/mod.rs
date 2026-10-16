@@ -32,15 +32,20 @@
 //!   * [`server`]    optional Stirling-PDF REST backend for OCR, compress,
 //!                   office conversion, PDF/A, certificate signing
 
+pub mod compress;
 pub mod convert;
 pub mod extract;
 pub mod layout;
 pub mod ocr;
 pub mod pages;
+pub mod pdfa;
 pub mod qrsplit;
 pub mod raster;
+pub mod repair;
 pub mod scans;
+#[allow(dead_code)]
 pub mod server;
+pub mod sign;
 pub mod structure;
 pub mod topdf;
 

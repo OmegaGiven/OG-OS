@@ -6,7 +6,8 @@
 //! tool's form is just a list of `field(...)` calls — no per-tool state.
 
 use super::tools::{
-    self, convert, layout, pages, raster, server, structure, Anchor, Output, Paper,
+    self, compress, convert, layout, pages, pdfa, raster, repair, server, sign, structure, Anchor,
+    Output, Paper,
 };
 use crate::theme;
 use iced::mouse;
@@ -217,7 +218,7 @@ impl Tool {
             Compare => "Compare with another PDF",
             AutoRename => "Auto-rename from content",
             CompressLossless => "Compress (lossless)",
-            CompressServer => "Compress (strong)",
+            CompressServer => "Compress (images)",
             Repair => "Repair",
             Ocr => "OCR (make text searchable)",
             PdfA => "Convert to PDF/A",
@@ -266,8 +267,8 @@ impl Tool {
             UnlockForms => "Makes read-only form fields editable.",
             RemoveSignatures => "Removes digital signatures.",
             ShowJavaScript => "Lists all scripts in the document.",
-            CertSign => "Signs with a .p12/.pfx certificate (server).",
-            ValidateSignature => "Checks digital signatures (server).",
+            CertSign => "PAdES signature with a .p12/.pfx or PEM certificate.",
+            ValidateSignature => "Checks every digital signature in the file.",
             ToImages => "Writes each page as an image next to the PDF.",
             ExtractImages => "Saves embedded images next to the PDF.",
             ExtractScans => "Several photos scanned on one page → separate, straightened images.",
@@ -277,10 +278,10 @@ impl Tool {
             Compare => "Text differences, page by page.",
             AutoRename => "Renames the file from its title or first line.",
             CompressLossless => "Smaller file without touching image quality.",
-            CompressServer => "Stronger compression incl. images (server).",
+            CompressServer => "Downsamples and re-encodes images, levels 1–9.",
             Repair => "Rebuilds a damaged file.",
             Ocr => "Adds an invisible, searchable text layer to scans (offline, Latin script).",
-            PdfA => "Archival PDF/A-2b (server).",
+            PdfA => "Archival PDF/A-2b (best effort) with a verifier report.",
             AutoSplit => "Splits at separator pages carrying a QR code; drops those pages.",
             Grayscale => "Converts to greyscale (pages become images).",
             Invert => "Dark pages, light text (pages become images).",
@@ -290,10 +291,7 @@ impl Tool {
     }
 
     pub fn needs_server(self) -> bool {
-        matches!(
-            self,
-            CertSign | ValidateSignature | CompressServer | PdfA
-        )
+        matches!(self, InsertUrl) && false
     }
 }
 
@@ -309,6 +307,9 @@ pub enum JobOut {
     Select(Vec<usize>),
     /// prefill form fields (metadata, bookmarks)
     Prefill(Vec<(&'static str, String)>),
+    /// a new document version plus a report for the panel (compress,
+    /// repair, PDF/A)
+    PdfReport(Vec<u8>, String),
 }
 
 // ---------------------------------------------------------------- form ----
@@ -886,23 +887,40 @@ pub fn job(tool: Tool, form: &Form, input: JobInput) -> Result<Job, String> {
             structure::javascript_report(&pdf).map(|r| JobOut::Out(Output::Report(r)))
         }),
         CertSign => {
-            let (cfg, cert, pw) = (srv()?, form.t("cert", ""), form.t("cert_pw", ""));
-            let (reason, loc, vis) = (
-                form.t("reason", ""),
-                form.t("location", ""),
-                form.f("visible", false),
-            );
+            let (cert, key, pw) = (form.t("cert", ""), form.t("key", ""), form.t("cert_pw", ""));
+            if cert.trim().is_empty() {
+                return Err("choose a certificate file (.p12, .pfx or .pem)".into());
+            }
+            let visible = if form.f("visible", false) {
+                let page = form.num("sig_page", (input.current + 1) as f32)? as usize;
+                if page == 0 || page > n {
+                    return Err(format!("page {page} is outside 1–{n}"));
+                }
+                Some(sign::Visible {
+                    page: page - 1,
+                    anchor: form.anchor(Anchor::BottomRight),
+                })
+            } else {
+                None
+            };
+            let req = sign::Request {
+                reason: form.t("reason", ""),
+                location: form.t("location", ""),
+                contact: form.t("contact", ""),
+                visible,
+            };
             Box::new(move |pdf: Arc<Vec<u8>>| {
-                server::cert_sign(&cfg, &pdf, &read(&cert)?, &pw, &reason, &loc, vis)
-                    .map(|r| reply_out(r, "signed"))
+                let key = if key.trim().is_empty() {
+                    None
+                } else {
+                    Some(read(&key)?)
+                };
+                out(sign::sign(&pdf, &read(&cert)?, key.as_deref(), &pw, &req))
             })
         }
-        ValidateSignature => {
-            let cfg = srv()?;
-            Box::new(move |pdf: Arc<Vec<u8>>| {
-                server::validate_signature(&cfg, &pdf).map(|r| JobOut::Out(Output::Report(r)))
-            })
-        }
+        ValidateSignature => Box::new(move |pdf: Arc<Vec<u8>>| {
+            sign::validate(&pdf).map(|r| JobOut::Out(Output::Report(r)))
+        }),
         ToImages => {
             let (p, dpi) = (range("pages")?, form.num("dpi", 150.0)?);
             let fmt = if form.f("jpeg", false) {
@@ -975,19 +993,17 @@ pub fn job(tool: Tool, form: &Form, input: JobInput) -> Result<Job, String> {
             Box::new(move |pdf: Arc<Vec<u8>>| out(structure::compress_lossless(&pdf)))
         }
         CompressServer => {
-            let (cfg, level) = (srv()?, form.num("level", 5.0)?.clamp(1.0, 9.0) as u8);
+            let opts = compress::Options {
+                level: form.num("level", 5.0)?.clamp(1.0, 9.0) as u8,
+                grayscale: form.f("gray", false),
+            };
             Box::new(move |pdf: Arc<Vec<u8>>| {
-                server::compress(&cfg, &pdf, level).map(|r| reply_out(r, "compressed"))
+                compress::compress(&pdf, opts).map(|c| JobOut::PdfReport(c.pdf, c.report))
             })
         }
-        Repair => {
-            let use_server = form.f("server", false);
-            let cfg = if use_server { Some(srv()?) } else { None };
-            Box::new(move |pdf: Arc<Vec<u8>>| match cfg {
-                Some(c) => server::repair(&c, &pdf).map(|r| reply_out(r, "repaired")),
-                None => out(structure::repair(&pdf)),
-            })
-        }
+        Repair => Box::new(move |pdf: Arc<Vec<u8>>| {
+            repair::repair(&pdf).map(|r| JobOut::PdfReport(r.pdf, r.report))
+        }),
         Ocr => {
             let langs: Vec<String> = form
                 .t("langs", "eng")
@@ -1004,12 +1020,9 @@ pub fn job(tool: Tool, form: &Form, input: JobInput) -> Result<Job, String> {
             };
             Box::new(move |pdf: Arc<Vec<u8>>| out(tools::ocr::ocr_pdf(&pdf, &p, mode)))
         }
-        PdfA => {
-            let cfg = srv()?;
-            Box::new(move |pdf: Arc<Vec<u8>>| {
-                server::to_pdfa(&cfg, &pdf).map(|r| reply_out(r, "pdfa"))
-            })
-        }
+        PdfA => Box::new(move |pdf: Arc<Vec<u8>>| {
+            pdfa::convert(&pdf).map(|c| JobOut::PdfReport(c.pdf, c.report))
+        }),
         AutoSplit => {
             let opts = tools::qrsplit::Options {
                 any_qr: form.f("any_qr", false),
@@ -1373,15 +1386,26 @@ pub fn view_form<'a, M: Clone + 'a>(
             field("Quality (dpi)", "dpi", "200"),
         ],
         FlattenAll => vec![pages_f(), field("Quality (dpi)", "dpi", "200")],
-        CertSign => vec![
-            field("Certificate (.p12 / .pfx)", "cert", "~/certs/me.p12"),
-            secret("Certificate password", "cert_pw"),
-            row2(
-                field("Reason", "reason", ""),
-                field("Location", "location", ""),
-            ),
-            flag("Visible signature", "visible", false),
-        ],
+        CertSign => {
+            let mut v = vec![
+                field("Certificate (.p12 / .pfx / .pem)", "cert", "~/certs/me.p12"),
+                field("Private key (PEM only, if separate)", "key", ""),
+                secret("Password", "cert_pw"),
+                row2(
+                    field("Reason", "reason", ""),
+                    field("Location", "location", ""),
+                ),
+                field("Contact (optional)", "contact", ""),
+                flag("Visible signature", "visible", false),
+            ];
+            if form.f("visible", false) {
+                v.push(row2(
+                    field("Page", "sig_page", "current"),
+                    anchor(Anchor::BottomRight),
+                ));
+            }
+            v
+        }
         ToImages => vec![
             pages_f(),
             field("Resolution (dpi)", "dpi", "150"),
@@ -1396,12 +1420,10 @@ pub fn view_form<'a, M: Clone + 'a>(
             on_form,
         )],
         Compare => vec![field("Other PDF", "other", "/path/to/other.pdf")],
-        CompressServer => vec![field("Level 1 (light) – 9 (strong)", "level", "5")],
-        Repair => vec![flag(
-            "Use the server (Ghostscript/qpdf) instead",
-            "server",
-            false,
-        )],
+        CompressServer => vec![
+            field("Level 1 (lossless) – 9 (strongest)", "level", "5"),
+            flag("Greyscale", "gray", false),
+        ],
         Ocr => vec![
             pages_f(),
             field(
@@ -1693,7 +1715,10 @@ mod tests {
             (Compare, vec![("other", other.as_str())]),
             (AutoRename, vec![]),
             (CompressLossless, vec![]),
+            (CompressServer, vec![("level", "9")]),
             (Repair, vec![]),
+            (PdfA, vec![]),
+            (ValidateSignature, vec![]),
             (Grayscale, vec![("dpi", "50")]),
             (Invert, vec![("dpi", "50")]),
             (AdjustColors, vec![("bright", "10"), ("dpi", "50")]),
