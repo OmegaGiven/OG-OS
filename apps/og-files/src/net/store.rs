@@ -56,6 +56,7 @@ pub(crate) fn write_atomic(path: &Path, data: &[u8]) -> std::io::Result<()> {
         let mut f = o.open(&tmp)?;
         f.write_all(data)?;
         f.sync_all()?;
+        drop(f); // Windows can't rename a file that's still open
         std::fs::rename(&tmp, path)
     })();
     if res.is_err() {

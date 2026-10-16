@@ -359,15 +359,23 @@ pub(crate) mod testdir {
         pub fn new(tag: &str) -> Self {
             use std::sync::atomic::{AtomicU32, Ordering};
             static N: AtomicU32 = AtomicU32::new(0);
-            let dir = crate::config::home()
-                .join(".cache/ogx-net-tests")
+            let dir = dirs::cache_dir()
+                .unwrap_or_else(std::env::temp_dir)
+                .join("ogx-net-tests")
                 .join(format!(
                     "{tag}-{}-{}",
                     std::process::id(),
                     N.fetch_add(1, Ordering::Relaxed)
                 ));
             let _ = std::fs::remove_dir_all(&dir);
-            std::fs::create_dir_all(&dir).unwrap();
+            // Windows can briefly deny access (antivirus scans, pending
+            // deletes) — retry before failing the test
+            let mut tries = 0;
+            while let Err(e) = std::fs::create_dir_all(&dir) {
+                tries += 1;
+                assert!(tries < 20, "create {}: {e}", dir.display());
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
             TestDir(dir)
         }
 
