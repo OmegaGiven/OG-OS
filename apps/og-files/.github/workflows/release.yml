@@ -22,98 +22,114 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { arch: x86_64, os: ubuntu-22.04 }
-          - { arch: aarch64, os: ubuntu-22.04-arm }
+          - { arch: x86_64, os: ubuntu-24.04 }
+          - { arch: aarch64, os: ubuntu-24.04-arm }
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: |
+      - name: Build dependencies (+ libmpv to bundle)
+        run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            pkg-config libxkbcommon-dev libwayland-dev libasound2-dev libvulkan-dev
+            pkg-config libxkbcommon-dev libwayland-dev libasound2-dev libvulkan-dev \
+            libmpv-dev libfuse2t64 file
       - run: cargo build --locked --release
-      - name: Package (.tar.gz + .deb)
+      - name: AppImage (libmpv bundled)
         shell: bash
         run: |
           set -euo pipefail
           V=$(cargo pkgid | sed 's/.*[#@]//')
-          N=og-files-$V-linux-${{ matrix.arch }}
-          mkdir -p dist/$N
-          cp target/release/og-files README.md dist/$N/ 2>/dev/null || cp target/release/og-files dist/$N/
-          cp packaging/linux/og-files.desktop packaging/icons/og-files.png dist/$N/
-          cat > dist/$N/install.sh <<'SH'
-          #!/bin/sh
-          # Installs OG Files for the current user (~/.local).
-          set -e
-          cd "$(dirname "$0")"
-          install -Dm755 og-files "$HOME/.local/bin/og-files"
-          install -Dm644 og-files.desktop "$HOME/.local/share/applications/og-files.desktop"
-          install -Dm644 og-files.png "$HOME/.local/share/icons/hicolor/512x512/apps/og-files.png"
-          echo "Installed to ~/.local/bin/og-files"
-          SH
-          chmod +x dist/$N/install.sh
-          tar -C dist -czf dist/$N.tar.gz $N
-          # Debian/Ubuntu package
-          D=dist/deb
+          A=${{ matrix.arch }}
+          curl -fsSLo linuxdeploy https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-$A.AppImage
+          chmod +x linuxdeploy
+          LIBMPV=$(ldconfig -p | awk '/libmpv\.so\.2 /{print $NF; exit}')
+          mkdir -p dist
+          # linuxdeploy copies libmpv and its whole dependency tree into the
+          # AppImage; the AppRun puts usr/lib on the library path so
+          # og-files' runtime dlopen("libmpv.so.2") finds the bundled copy
+          APPIMAGE_EXTRACT_AND_RUN=1 LDAI_OUTPUT=dist/OG_Files-$V-$A.AppImage ./linuxdeploy \
+            --appdir AppDir -e target/release/og-files \
+            -d packaging/linux/og-files.desktop -i packaging/icons/og-files.png \
+            --library "$LIBMPV" --output appimage
+          ls -la dist
+      - name: Debian package (uses the system libmpv)
+        shell: bash
+        run: |
+          set -euo pipefail
+          V=$(cargo pkgid | sed 's/.*[#@]//')
+          ARCH=$([ "${{ matrix.arch }}" = x86_64 ] && echo amd64 || echo arm64)
+          D=deb
           install -Dm755 target/release/og-files $D/usr/bin/og-files
           install -Dm644 packaging/linux/og-files.desktop $D/usr/share/applications/og-files.desktop
           install -Dm644 packaging/icons/og-files.png $D/usr/share/icons/hicolor/512x512/apps/og-files.png
-          ARCH=$([ "${{ matrix.arch }}" = x86_64 ] && echo amd64 || echo arm64)
+          install -Dm644 LICENSE $D/usr/share/doc/og-files/copyright
           mkdir -p $D/DEBIAN
-          cat > $D/DEBIAN/control <<CTL
-          Package: og-files
-          Version: $V
-          Architecture: $ARCH
-          Maintainer: OmegaGiven
-          Depends: libc6, libasound2 | libasound2t64, libxkbcommon0, libvulkan1
-          Recommends: libmpv2 | libmpv1, udisks2, rclone, fuse3
-          Section: utils
-          Priority: optional
-          Description: OG Files — file manager with built-in viewers and editors
-          CTL
-          sed -i 's/^          //' $D/DEBIAN/control
+          printf '%s\n' \
+            "Package: og-files" "Version: $V" "Architecture: $ARCH" \
+            "Maintainer: OmegaGiven <https://github.com/OmegaGiven/og-files>" \
+            "Depends: libc6, libasound2t64 | libasound2, libxkbcommon0, libvulkan1, libmpv2" \
+            "Recommends: udisks2, rclone, fuse3" \
+            "Section: utils" "Priority: optional" \
+            "Homepage: https://github.com/OmegaGiven/og-files" \
+            "Description: file manager with built-in viewers and editors" \
+            " OG Files browses, previews and edits documents, PDFs, images," \
+            " video, audio, archives and more in one app." > $D/DEBIAN/control
           dpkg-deb --root-owner-group --build $D dist/og-files_${V}_$ARCH.deb
           ls -la dist
       - uses: actions/upload-artifact@v4
         with:
           name: linux-${{ matrix.arch }}
           path: |
-            dist/*.tar.gz
+            dist/*.AppImage
             dist/*.deb
 
   macos:
-    name: macOS (universal)
-    runs-on: macos-14
+    name: macOS ${{ matrix.arch }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: arm64, os: macos-14 }
+          - { arch: x86_64, os: macos-15-intel }
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-apple-darwin,x86_64-apple-darwin
       - uses: Swatinem/rust-cache@v2
-      - run: cargo build --locked --release --target aarch64-apple-darwin
-      - run: cargo build --locked --release --target x86_64-apple-darwin
-      - name: Package (.app in .dmg + .zip)
+      - name: libmpv to bundle
+        run: brew install mpv dylibbundler
+      - run: cargo build --locked --release
+      - name: Package (.app with libmpv in .dmg + .zip)
         run: |
           set -euo pipefail
           V=$(cargo pkgid | sed 's/.*[#@]//')
           APP="dist/OG Files.app"
-          mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$APP/Contents/Frameworks"
-          lipo -create -output "$APP/Contents/MacOS/og-files" \
-            target/aarch64-apple-darwin/release/og-files target/x86_64-apple-darwin/release/og-files
+          FW="$APP/Contents/Frameworks"
+          mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$FW"
+          cp target/release/og-files "$APP/Contents/MacOS/og-files"
           sed "s/@VERSION@/$V/g" packaging/macos/Info.plist > "$APP/Contents/Info.plist"
           /usr/libexec/PlistBuddy -c "Add :CFBundleIconFile string og-files" "$APP/Contents/Info.plist"
           cp packaging/icons/og-files.icns "$APP/Contents/Resources/"
-          # ad-hoc signature (no Apple developer account): lets the app run
-          # after the user approves it once (right-click → Open)
+          cp LICENSE "$APP/Contents/Resources/"
+          # libmpv + every Homebrew dylib it needs, rewritten to load from
+          # the bundle (og-files dlopens Contents/Frameworks/libmpv.2.dylib)
+          cp "$(brew --prefix mpv)/lib/libmpv.2.dylib" "$FW/"
+          chmod u+w "$FW/libmpv.2.dylib"
+          install_name_tool -id @rpath/libmpv.2.dylib "$FW/libmpv.2.dylib"
+          dylibbundler -of -b -cd -x "$FW/libmpv.2.dylib" -d "$FW/" -p @loader_path/
+          # ad-hoc signature (no Apple developer account): users approve
+          # the app once (right-click → Open)
+          find "$FW" -name '*.dylib' -exec codesign --force --sign - {} \;
           codesign --force --deep --sign - "$APP"
-          ditto -c -k --keepParent "$APP" "dist/og-files-$V-macos-universal.zip"
+          N=og-files-$V-macos-${{ matrix.arch }}
+          ditto -c -k --keepParent "$APP" "dist/$N.zip"
           mkdir -p dmg && cp -R "$APP" dmg/ && ln -s /Applications dmg/Applications
-          hdiutil create -volname "OG Files" -srcfolder dmg -ov -format UDZO "dist/og-files-$V-macos-universal.dmg"
-          ls -la dist
+          hdiutil create -volname "OG Files" -srcfolder dmg -ov -format UDZO "dist/$N.dmg"
+          ls -la dist "$FW"
       - uses: actions/upload-artifact@v4
         with:
-          name: macos-universal
+          name: macos-${{ matrix.arch }}
           path: |
             dist/*.dmg
             dist/*.zip
@@ -126,6 +142,17 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --locked --release
+      - name: libmpv to bundle (mpv-winbuild)
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # prebuilt libmpv (GPL, all codecs linked in) from the widely used
+          # zhongfly/mpv-winbuild CI; the release tag is recorded in the zip
+          $tag = gh release view --repo zhongfly/mpv-winbuild --json tagName -q .tagName
+          gh release download $tag --repo zhongfly/mpv-winbuild --pattern 'mpv-dev-x86_64-2*.7z' --dir mpvdev
+          7z x (Get-ChildItem mpvdev/*.7z | Select-Object -First 1).FullName -ompvdev/x
+          "mpv-winbuild $tag" | Out-File mpv-version.txt
       - name: Package (.zip)
         shell: pwsh
         run: |
@@ -133,10 +160,11 @@ jobs:
           $N = "og-files-$V-windows-x86_64"
           New-Item -ItemType Directory -Force "dist/$N" | Out-Null
           Copy-Item target/release/og-files.exe "dist/$N/"
-          Copy-Item packaging/icons/og-files.ico "dist/$N/"
+          Copy-Item (Get-ChildItem mpvdev/x -Recurse -Filter libmpv-2.dll | Select-Object -First 1).FullName "dist/$N/"
+          Copy-Item packaging/icons/og-files.ico, LICENSE, mpv-version.txt "dist/$N/"
           if (Test-Path README.md) { Copy-Item README.md "dist/$N/" }
           Compress-Archive -Path "dist/$N/*" -DestinationPath "dist/$N.zip"
-          Get-ChildItem dist
+          Get-ChildItem "dist/$N"
       - uses: actions/upload-artifact@v4
         with:
           name: windows-x86_64
@@ -160,4 +188,4 @@ jobs:
         run: |
           gh release create "${{ github.ref_name }}" dist/* \
             --repo "${{ github.repository }}" --title "OG Files ${{ github.ref_name }}" \
-            --notes "Downloads: Linux (.tar.gz with install.sh, or .deb), macOS (.dmg, universal — first launch: right-click → Open), Windows (.zip, run og-files.exe). Optional: install mpv for video playback."
+            --notes "Downloads — Linux: .AppImage (everything bundled; chmod +x and run) or .deb (Ubuntu 24.04+/Debian 13+). macOS: .dmg for Apple Silicon (arm64) or Intel (x86_64); first launch: right-click the app → Open. Windows: .zip, unzip and run og-files.exe. Video playback (libmpv) is built into the AppImage, macOS and Windows downloads. Licensed GPL-3.0-or-later."
