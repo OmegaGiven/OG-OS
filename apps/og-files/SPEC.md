@@ -248,6 +248,7 @@ translated.
 | Render | `hayro` 0.7 (pure Rust, MIT/Apache, CPU) | One worker thread per open PDF that keeps its parse and font cache (`viewers/pdf/engine.rs`). Panics are caught per page. Bitmaps are capped at 40 MP. Limits: no blending/knockout groups yet, and password-protected files fail to open. |
 | Edit | `lopdf` 0.45 (pure Rust, MIT) | `compose::build(sources, plan)` turns a plan of (source, page, rotation) into a new PDF. That single primitive covers reorder, delete, rotate, duplicate, merge/insert, extract and split. Inherited page attributes are pushed down, and unused objects are pruned. |
 | Vision | `ocrs` 0.13 on `rten` 0.26 (OCR), `rqrr` 0.11 (QR), `imageproc` 0.27 (photo segmentation); all pure Rust | Offline and in-process. The OCR detection and recognition models (CC BY-SA 4.0, 12.2 MB) are compiled in from `assets/ocr/`; source, sha256 and license are in its README. Pages are rendered with hayro. |
+| Convert from PDF | `tools/extract.rs` + `tools/convert/` (pure Rust, in-process) | hayro interprets each page into a recording device (glyphs with Unicode, font, size, colour; images; rules), then a layout pass builds lines, columns, paragraphs, headings, lists and tables that eleven writers turn into files. See *Convert from PDF* below. |
 | Heavy tools | Stirling REST API on a self-hosted server (optional) | For jobs that need Tesseract, Ghostscript, qpdf or LibreOffice. The app uploads the file and saves the result next to the original. Config goes in `$XDG_CONFIG_HOME/og-files/stirling.json` (`{ "url": "https://stirling.example.ts.net:8081", "api_key": "…" }`, sent as `X-API-KEY`). Without it those tools are just hidden, so the app stays standalone. |
 
 **Model.** The same rules as every other viewer apply: view mode is
@@ -284,17 +285,90 @@ in-process Rust; "server" means the Stirling REST API.
 | Security | AES-256 password + permissions, remove password, sanitize (JS, files, XMP, info, links, fonts), redact text, **redact areas** (drag boxes on the page, true removal by rasterizing), remove annotations / images, flatten forms, flatten to images, unlock forms, remove signatures, show JavaScript | native |
 | Security | sign with certificate (PKCS#12), validate signatures | server |
 | Convert & extract | pages → PNG/JPEG, extract images, extract attachments, document info, compare (text diff), auto-rename | native |
-| Convert & extract | PDF → Word/ODT/Excel/PowerPoint/HTML/Markdown/text/RTF/XML/CSV/EPUB; Office/HTML/MD/EML/e-book/image → PDF | server |
+| Convert & extract | PDF → Word/ODT/Excel/PowerPoint/HTML/Markdown/text/RTF/XML/CSV/EPUB | native |
+| Convert & extract | Office/HTML/MD/EML/e-book/image → PDF | server |
 | Optimize & colour | lossless compress, repair, greyscale, invert, adjust colours, fake scan | native |
 | Optimize & colour | strong compress (Ghostscript/qpdf), repair via server, PDF/A-2b | server |
 
+**Convert from PDF** (Tools → *Convert PDF to…*, `tools/convert`). No
+server, no external programs. Files are written next to the PDF as
+`<name>-converted.<ext>`.
+
+How the text is found (`tools/extract.rs`):
+- **Capture.** hayro's interpreter drives a recording `Device`. Text
+  decoding is hayro's: ToUnicode CMaps, simple-font encodings with
+  Differences, the standard encodings, and Identity-H CID fonts. Ligatures
+  are split (ﬁ → fi). Fonts are matched to their resource dictionaries by
+  hayro's cache key, which gives the family name (cleaned, e.g.
+  `ABCDEF+TimesNewRomanPS-BoldMT` → Times New Roman) and bold, italic and
+  monospace from the name, descriptor flags, weight and italic angle.
+  Invisible (OCR) text is kept and flagged. Fill+stroke and overprinted
+  duplicates are removed.
+- **Images.** Plain DeviceRGB/Gray JPEGs are passed through unchanged.
+  Everything else is decoded by hayro and saved as PNG (alpha kept).
+  The same image drawn twice is stored once.
+- **Layout.** Baselines are clustered into lines (superscripts and
+  subscripts join their line). Words come from spaces or gaps over 0.15 em.
+  Lines split into segments at large gaps. *Ruled tables* come from grids
+  of drawn rules (merged cells too). *Unruled tables* come from runs of
+  lines whose segments fall into consistent column bands. Prose columns
+  are excluded, except a long description column on the right. The
+  reading order is a recursive XY-cut that compares the widest gutter with
+  the widest horizontal gap, so two-column pages read column by column.
+  Then come paragraphs (spacing, indent, size or weight change, short last
+  line, TOC leader lines, code lines kept apart), alignment, headings
+  (size ≥ 1.15 × the body size, levels by size, or short bold lines) and
+  lists (bullets, `1.` `a)` `(iv)`, nesting by indent).
+
+What each format gets:
+- **Word / ODT / RTF:** Heading 1–3 styles, runs with bold, italic, size,
+  colour and font, alignment, native numbered and bulleted lists (each
+  ordered list restarts at the PDF's number), tables (borders when the
+  PDF had them, merged cells), images, a page break per PDF page, and the
+  PDF's page size and margins.
+- **PowerPoint:** one slide per page. The slide picture is the page
+  rendered *without its text* (text operators are stripped with lopdf).
+  The text goes on top as editable text boxes in place, one per paragraph
+  or table cell, keeping its line breaks. OCR text stays transparent. If
+  the file can't be rewritten (encrypted), the full render is used with
+  transparent text boxes.
+- **HTML:** one self-contained semantic file (h1–h3, p, nested ul/ol,
+  table with th, inline images).
+- **EPUB:** EPUB 3 with an NCX. Chapters start at level-1 headings, or
+  one per page.
+- **Markdown:** GFM tables. Images are written as separate
+  `<name>-converted-img-NN.*` files and linked.
+- **Text:** reading order, tables tab-separated, a form feed between
+  pages.
+- **Excel:** one sheet per table (numbers stored as numbers, bold header
+  row frozen, merged cells). With no tables, one sheet per page with one
+  row per line.
+- **CSV:** one file per table (`<name>-page02-table1.csv`). With no tables,
+  every line as (page, text).
+- **XML:** document → page → heading / paragraph / list-item / table /
+  image → line → span, with positions (pt, top-left origin), fonts,
+  sizes, colours and flags.
+
+On scanned pages with an OCR layer, the reflowed formats show the OCR
+text and drop the page-sized scan. A PDF with no text at all is refused
+("run OCR first"), except for PowerPoint.
+
+Limits: right-to-left and vertical scripts come out in visual order.
+Rotated text becomes separate lines. Type3 glyph widths are estimated.
+Text that is clipped or hidden under an image is still extracted.
+Running headers and footers are kept as paragraphs. Unruled-table
+detection is heuristic: a numbered code listing can come out as a
+two-column table, and a sparse table can come out as text. Equations come
+out as plain text.
+
 **Server endpoints** (paths and fields taken from upstream `app/core` only,
 listed in `tools/server.rs`): `/api/v1/misc/{compress-pdf, repair}`,
-`/api/v1/convert/{pdf/pdfa, pdf/word, pdf/presentation, pdf/text, pdf/xlsx,
-pdf/csv, pdf/html, pdf/markdown, pdf/xml, pdf/epub, file/pdf, html/pdf,
+`/api/v1/convert/{pdf/pdfa, file/pdf, html/pdf,
 markdown/pdf, eml/pdf, img/pdf, svg/pdf, ebook/pdf, url/pdf}`,
 `/api/v1/security/{cert-sign, validate-signature}`, and
-`/api/v1/info/status` for **Test connection**. The URL and API key are
+`/api/v1/info/status` for **Test connection**. (`server::convert_from_pdf`
+and its `pdf/word … pdf/epub` endpoints are no longer called: PDF → other
+formats is native.) The URL and API key are
 entered in Tools → Server settings and saved to `stirling.json` (mode 600).
 
 **Known limits.** Each module's doc comments list them per function. The
@@ -335,6 +409,16 @@ open: phase 3.
 **Tests (62).** `cargo test -p og-files` covers:
 - compose, pages, and every public function of structure, layout, raster
   and server (server tests use a local mock HTTP server, no network);
+- the converters (`tools/convert/tests.rs`): a generated three-page PDF
+  (standard-14 and CID/ToUnicode text, two columns, a heading, a list, a
+  ruled and an unruled table, an image) checks the reading order, the
+  headings and the tables found, and that every output parses. That
+  means zip structure, well-formed XML parts, xlsx read back with
+  calamine, docx reopened by the app's docx parser, and docx/odt/rtf/epub
+  read by the app's document viewer. The ignored `soffice_opens_outputs`
+  test converts the office outputs with LibreOffice when it is installed.
+  `OGX_PDF=… OGX_DEMO_DIR=… cargo test -p og-files convert_real_file --
+  --ignored` writes every format for a real file;
 - `every_native_tool_runs_end_to_end`, which drives all native tools
   through the UI path (form → job → output) and checks that each result
   parses.

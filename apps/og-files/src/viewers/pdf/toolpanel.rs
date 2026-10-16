@@ -5,7 +5,9 @@
 //! Form values live in two small string/bool maps keyed by field name, so a
 //! tool's form is just a list of `field(...)` calls — no per-tool state.
 
-use super::tools::{self, layout, pages, raster, server, structure, Anchor, Output, Paper};
+use super::tools::{
+    self, convert, layout, pages, raster, server, structure, Anchor, Output, Paper,
+};
 use crate::theme;
 use iced::mouse;
 use iced::widget::canvas::{self, Canvas, Frame, Geometry, Path, Stroke};
@@ -270,7 +272,7 @@ impl Tool {
             ExtractImages => "Saves embedded images next to the PDF.",
             ExtractScans => "Several photos scanned on one page → separate, straightened images.",
             ExtractAttachments => "Saves embedded files next to the PDF.",
-            ConvertTo => "Word, Excel, PowerPoint, HTML, Markdown and more (server).",
+            ConvertTo => "Word, Excel, PowerPoint, HTML, Markdown and more.",
             Info => "Pages, fonts, images, security, metadata.",
             Compare => "Text differences, page by page.",
             AutoRename => "Renames the file from its title or first line.",
@@ -293,7 +295,6 @@ impl Tool {
             InsertUrl
                 | CertSign
                 | ValidateSignature
-                | ConvertTo
                 | CompressServer
                 | PdfA
         )
@@ -952,14 +953,17 @@ pub fn job(tool: Tool, form: &Form, input: JobInput) -> Result<Job, String> {
             )))
         }),
         ConvertTo => {
-            let cfg = srv()?;
-            let t = form.t("target", &server::Target::Docx.to_string());
-            let target = server::Target::ALL
+            let t = form.t("target", &convert::Target::Docx.to_string());
+            let target = convert::Target::ALL
                 .into_iter()
                 .find(|x| x.to_string() == t)
-                .unwrap_or(server::Target::Docx);
+                .unwrap_or(convert::Target::Docx);
+            let stem = std::path::Path::new(&input.file_name)
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "document".into());
             Box::new(move |pdf: Arc<Vec<u8>>| {
-                server::convert_from_pdf(&cfg, &pdf, target).map(|r| reply_out(r, "converted"))
+                convert::convert(&pdf, target, &stem).map(|f| JobOut::Out(Output::Files(f)))
             })
         }
         Info => Box::new(move |pdf: Arc<Vec<u8>>| {
@@ -1397,8 +1401,8 @@ pub fn view_form<'a, M: Clone + 'a>(
         ConvertTo => vec![pick(
             "Format",
             "target",
-            server::Target::ALL.to_vec(),
-            form.t("target", &server::Target::Docx.to_string()),
+            convert::Target::ALL.to_vec(),
+            form.t("target", &convert::Target::Docx.to_string()),
             on_form,
         )],
         Compare => vec![field("Other PDF", "other", "/path/to/other.pdf")],
@@ -1692,6 +1696,9 @@ mod tests {
             (RemoveSignatures, vec![]),
             (ShowJavaScript, vec![]),
             (ToImages, vec![("pages", "1-2"), ("dpi", "50")]),
+            (ConvertTo, vec![]),
+            (ConvertTo, vec![("target", "Excel (.xlsx)")]),
+            (ConvertTo, vec![("target", "PowerPoint (.pptx)")]),
             (Info, vec![]),
             (Compare, vec![("other", other.as_str())]),
             (AutoRename, vec![]),

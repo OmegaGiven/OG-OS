@@ -21,9 +21,16 @@
 //!   * [`ocr`]       offline OCR (ocrs) → invisible text layer
 //!   * [`qrsplit`]   auto-split at QR separator pages (rqrr)
 //!   * [`scans`]     split several photos scanned on one sheet (imageproc)
+//!   * [`extract`]   layout-aware text extraction (hayro glyph capture →
+//!                   lines, columns, paragraphs, headings, lists, tables,
+//!                   images)
+//!   * [`convert`]   PDF → docx/odt/pptx/xlsx/csv/html/md/txt/rtf/xml/epub
+//!                   writers over the extracted layout
 //!   * [`server`]    optional Stirling-PDF REST backend for OCR, compress,
 //!                   office conversion, PDF/A, certificate signing
 
+pub mod convert;
+pub mod extract;
 pub mod layout;
 pub mod ocr;
 pub mod pages;

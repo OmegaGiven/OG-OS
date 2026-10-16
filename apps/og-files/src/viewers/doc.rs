@@ -101,6 +101,13 @@ pub async fn open(path: PathBuf) -> Result<Opened, String> {
     Ok(Opened { path, doc })
 }
 
+/// Parsed document as a debug string (tests of the PDF converters check
+/// that this viewer reads what they write).
+#[cfg(test)]
+pub(crate) fn debug_load(path: &Path) -> Result<String, String> {
+    load(path).map(|d| format!("{d:?}"))
+}
+
 fn load(path: &Path) -> Result<Doc, String> {
     let file = || std::fs::File::open(path).map_err(|e| e.to_string());
     match ext(path).as_str() {

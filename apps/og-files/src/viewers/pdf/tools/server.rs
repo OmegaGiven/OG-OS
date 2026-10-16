@@ -80,6 +80,8 @@ pub enum OcrMode {
 }
 
 /// Targets for PDF → other formats.
+// Superseded by the native `tools::convert`; kept until server.rs goes.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Target {
     Docx,
@@ -95,6 +97,7 @@ pub enum Target {
     Epub,
 }
 
+#[allow(dead_code)]
 impl Target {
     pub const ALL: [Target; 11] = [
         Target::Docx,
@@ -203,6 +206,8 @@ pub fn to_pdfa(cfg: &ServerConfig, pdf: &[u8]) -> Result<Reply, String> {
     post(cfg, "/api/v1/convert/pdf/pdfa", form, "pdf")
 }
 
+// Superseded by the native `tools::convert`; kept until server.rs goes.
+#[allow(dead_code)]
 pub fn convert_from_pdf(cfg: &ServerConfig, pdf: &[u8], target: Target) -> Result<Reply, String> {
     let mut form = Form::new();
     form.pdf(pdf);
@@ -713,6 +718,7 @@ impl Form {
     }
 
     /// Add a text field and pass `ret` through (keeps match arms compact).
+    #[allow(dead_code)]
     fn with<'a>(&mut self, name: &str, value: &str, ret: &'a str) -> &'a str {
         self.text(name, value);
         ret
