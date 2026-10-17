@@ -208,6 +208,7 @@ pub struct App {
     drag: Option<Drag>,
     /// drag-and-drop with other apps (og-suite builds on Wayland)
     dnd: Option<crate::extdnd::Dnd>,
+    win_size: iced::Size,
     /// files from another app are hovering over the window
     ext_hover: bool,
     /// pane under the pointer / pane that receives plain keys
@@ -288,6 +289,8 @@ pub enum Message {
     DndReady(Result<crate::extdnd::Dnd, String>),
     ExtDrop(crate::extdnd::DropEvent),
     CursorLeft,
+    /// window size (logical), for spotting a drag that reaches the edge
+    WinResized(iced::Size),
     AppsLoaded(Arc<openwith::Registry>),
     /// registry, files, MIME type of the first file
     OpenWithReady(Arc<openwith::Registry>, Vec<PathBuf>, String),
@@ -351,6 +354,7 @@ impl App {
             watcher: None,
             drag: None,
             dnd: None,
+            win_size: iced::Size::ZERO,
             ext_hover: false,
             hover_pane: None,
             focus_pane: PaneKind::Files,
@@ -1734,6 +1738,17 @@ impl App {
                         self.sidebar.sel.dragging = true;
                     }
                 }
+                // While the button is held, Wayland keeps the pointer grabbed
+                // by our window: there is no CursorLeft until release, but
+                // motion keeps coming with positions at/past the edge. That's
+                // where an in-app drag becomes a drag to other apps.
+                if self.drag.as_ref().is_some_and(|d| d.active) && at_edge(p, self.win_size) {
+                    self.drag_out();
+                }
+                Task::none()
+            }
+            Message::WinResized(size) => {
+                self.win_size = size;
                 Task::none()
             }
             Message::MouseUp => {
@@ -1923,16 +1938,8 @@ impl App {
                 }
             }
             Message::CursorLeft => {
-                // an in-app drag leaving the window becomes a drag to other apps
-                if let (Some(d), Some(dnd)) = (self.drag.as_ref().filter(|d| d.active), &self.dnd) {
-                    let paths = d.paths.clone();
-                    if let Err(e) = crate::extdnd::start_drag(dnd, paths) {
-                        self.details.record(format!("Drag out: {e}"));
-                    }
-                    // the compositor takes the drag; iced won't see the release
-                    self.drag = None;
-                    self.sidebar.mouse_up(true);
-                }
+                // X11 and others do report leaving during a drag
+                self.drag_out();
                 Task::none()
             }
             Message::NetLoaded(conns, backend, ssh_hosts) => {
@@ -2227,6 +2234,9 @@ impl App {
                     iced::mouse::Button::Left,
                 )) => Some(Message::MouseUp),
                 iced::Event::Mouse(iced::mouse::Event::CursorLeft) => Some(Message::CursorLeft),
+                iced::Event::Window(
+                    iced::window::Event::Resized(size) | iced::window::Event::Opened { size, .. },
+                ) => Some(Message::WinResized(size)),
                 iced::Event::Mouse(iced::mouse::Event::ButtonPressed(_)) => {
                     Some(Message::MouseDown)
                 }
@@ -2395,6 +2405,21 @@ impl App {
         }))
         .spacing(6)
         .into()
+    }
+
+    /// Hand an active in-app drag over to the compositor as a drag to
+    /// other apps (browser upload areas, other file managers, …).
+    fn drag_out(&mut self) {
+        let (Some(d), Some(dnd)) = (self.drag.as_ref().filter(|d| d.active), &self.dnd) else {
+            return;
+        };
+        let paths = d.paths.clone();
+        if let Err(e) = crate::extdnd::start_drag(dnd, paths) {
+            self.details.record(format!("Drag out: {e}"));
+        }
+        // the compositor takes the drag; iced won't see the release
+        self.drag = None;
+        self.sidebar.mouse_up(true);
     }
 
     fn menu_view<'a>(&'a self, at: Point, t: &'a Target) -> Element<'a, Message> {
@@ -3035,4 +3060,23 @@ fn with_ext(name: &str, ext: &str) -> String {
     } else {
         format!("{name}{ext}")
     }
+}
+
+/// Is `p` at (within 2 px of) or past the window's edge? Unknown size → no.
+fn at_edge(p: Point, size: iced::Size) -> bool {
+    const M: f32 = 2.0;
+    size.width > 0.0
+        && size.height > 0.0
+        && (p.x <= M || p.y <= M || p.x >= size.width - M || p.y >= size.height - M)
+}
+
+#[cfg(test)]
+#[test]
+fn drag_out_edge_detection() {
+    let s = iced::Size::new(800.0, 600.0);
+    assert!(!at_edge(Point::new(400.0, 300.0), s));
+    assert!(at_edge(Point::new(-5.0, 300.0), s));
+    assert!(at_edge(Point::new(400.0, 601.0), s));
+    assert!(at_edge(Point::new(799.0, 10.0), s));
+    assert!(!at_edge(Point::new(-5.0, 300.0), iced::Size::ZERO));
 }
