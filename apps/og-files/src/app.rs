@@ -1,1807 +1,3082 @@
-use iced::{
-    widget::{button, column, container, image, mouse_area, row, scrollable, text, text_input, Space},
-    Background, Border, Color, Element, Length, Point, Size, Subscription, Task,
-};
-use iced::futures::SinkExt;
-use std::collections::HashSet;
-use std::path::PathBuf;
+//! App shell: four panes in a pane_grid (files | viewer+inspector / details),
+//! keyboard shortcuts, the context menu, modal dialogs, file jobs (with
+//! undo), the internal clipboard, drives and the folder watcher.
+//!
+//! Rule: `update` never blocks and `view` never touches the filesystem —
+//! the two things that made og-files feel laggy. See SPEC.md §4.
 
-use crate::desktop::{default_app_for_file, load_app_registry, mime_for_file, set_default_app, AppEntry};
-use crate::devices::Device;
-use crate::filesystem::{self, home_dir, DriveInfo, FileDetails};
-use crate::jobs::{self, JobEvent, JobHandle, JobKind, Resolution, UndoOp};
-use crate::panes::{filelist, jobs_panel, sidebar, tabstrip, toolbar};
-use crate::tab::{SortBy, Tab, ViewMode, ZOOM_STEPS};
+use crate::archops::{self, ArchiveJob};
+use crate::details::{self, Details};
+use crate::devices::{self, Drive};
+use crate::filetype::Kind;
+use crate::inspector::{self, Inspector};
+use crate::net::{self as netb, Conn, Discovered, LanEvent};
+use crate::netui;
+use crate::openwith;
+use crate::ops::{self, JobControl, JobEvent, JobId, JobKind, JobSpec, Resolution, UndoOp};
+use crate::sidebar::{self, Sidebar, Target};
+use crate::tabs::{self, Tabs};
 use crate::theme;
+use crate::viewers::archive::{self, Format};
+use iced::keyboard::{self, key, Key, Modifiers};
+use iced::widget::pane_grid::{self, Axis, Configuration, PaneGrid};
+use iced::widget::{
+    button, center, checkbox, column, container, mouse_area, opaque, progress_bar, row, stack,
+    text, text_input, Space,
+};
+use iced::{task, Element, Length, Point, Subscription, Task, Theme};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
-const SEARCH_RESULT_CAP: usize = 500;
-const SIDEBAR_WIDTH_RANGE: std::ops::RangeInclusive<f32> = 140.0..=400.0;
-const PREVIEW_WIDTH_RANGE: std::ops::RangeInclusive<f32> = 180.0..=500.0;
-const DIVIDER_WIDTH: f32 = 5.0;
-const FILE_DRAG_THRESHOLD: f32 = 6.0;
-const ICON_FONT: iced::Font = iced::Font::with_name("Symbols Nerd Font");
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PaneKind {
+    Files,
+    Viewer,
+    Inspector,
+    Details,
+}
+
+/// Width of the files pane: normal (user-resizable), hidden, or "focus"
+/// (fills most of the window for pure browsing/searching).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LeftSize {
+    Normal,
+    Collapsed,
+    Focus,
+}
+
+const LEFT_RATIO: f32 = 0.28;
+const FOCUS_RATIO: f32 = 0.85;
+const INSPECTOR_RATIO: f32 = 0.76;
+const DIALOG_INPUT: &str = "dialog-input";
+const MENU_W: f32 = 230.0;
+
+/// Files being dragged inside the app.
+struct Drag {
+    paths: Vec<PathBuf>,
+    origin: Point,
+    active: bool,
+}
+
+/// pointer travel before a press becomes a drag
+const DRAG_START: f32 = 6.0;
+
+struct JobUi {
+    id: JobId,
+    label: String,
+    total_items: usize,
+    total_bytes: u64,
+    done_items: usize,
+    done_bytes: u64,
+    current: String,
+    control: JobControl,
+    spec: JobSpec,
+    /// archive extract / compress (runs outside `ops`)
+    arch: Option<ArchiveJob>,
+}
+
+/// State of the "Open with…" dialog (plain data copied from the registry).
+#[derive(Debug, Clone)]
+struct OpenWithDlg {
+    files: Vec<PathBuf>,
+    mime: String,
+    /// (id, name), the default first
+    recommended: Vec<(String, String)>,
+    default: Option<String>,
+    /// every listed app (id, name), and the indices matching `query`
+    all: Vec<(String, String)>,
+    filtered: Vec<usize>,
+    query: String,
+    show_all: bool,
+    selected: Option<String>,
+    set_default: bool,
+}
 
 #[derive(Debug, Clone)]
-pub enum ClipboardOp {
-    Copy(Vec<PathBuf>),
-    Cut(Vec<PathBuf>),
+enum Dialog {
+    Rename {
+        path: PathBuf,
+        name: String,
+    },
+    NewFolder {
+        dir: PathBuf,
+        name: String,
+    },
+    NewFile {
+        dir: PathBuf,
+        name: String,
+        /// extension added when the typed name has none ("" = as typed)
+        ext: &'static str,
+    },
+    ConfirmDelete {
+        paths: Vec<PathBuf>,
+    },
+    ConfirmEmptyTrash,
+    CloseTab {
+        id: u64,
+        title: String,
+    },
+    Conflict {
+        job: JobId,
+        src: PathBuf,
+        dst: PathBuf,
+        all: bool,
+    },
+    Connect(Box<netui::Form>),
+    OpenWith(Box<OpenWithDlg>),
+    Compress {
+        sources: Vec<PathBuf>,
+        dir: PathBuf,
+        name: String,
+        format: Format,
+    },
+    ExtractTo {
+        archive: PathBuf,
+        name: String,
+    },
+    ArchivePassword {
+        job: ArchiveJob,
+        pw: String,
+    },
+    NetPassword {
+        conn: Conn,
+        pw: String,
+        remember: bool,
+    },
 }
 
-#[derive(Debug, Clone)]
-pub enum ContextMenuKind {
-    Entry { path: PathBuf, is_dir: bool },
-    Background,
-}
-
-#[derive(Debug, Clone)]
-pub struct ContextMenu {
-    pub kind: ContextMenuKind,
-    pub renaming: bool,
-    pub rename_text: String,
-}
-
-#[derive(Debug, Clone)]
-pub struct OpenWithDialog {
-    pub path: PathBuf,
-    pub mime: String,
-    pub search: String,
-}
-
-#[derive(Debug, Clone)]
-pub enum PendingAction {
-    DeletePermanently(Vec<PathBuf>),
-    EmptyTrash,
-}
-
-#[derive(Debug, Clone)]
-pub struct ConfirmDialog {
-    pub message: String,
-    pub action: PendingAction,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum PaneDrag {
-    Sidebar,
-    Preview,
-}
-
-// ── Job UI state (jobs.rs runs the actual work on a thread; this is what
-// the progress toasts and conflict dialog render from) ─────────────────────
-pub struct ConflictUi {
-    pub dst: PathBuf,
-    pub dst_is_dir: bool,
-}
-
-pub struct JobUi {
-    pub handle: JobHandle,
-    pub kind: JobKind,
-    pub current: String,
-    pub done_bytes: u64,
-    pub total_bytes: u64,
-    pub done_items: u64,
-    pub total_items: u64,
-    pub conflict: Option<ConflictUi>,
-    pub apply_all: bool,
-    pub done: bool,
-    pub cancelled: bool,
-    pub error: Option<String>,
-}
-
-// ── Messages ─────────────────────────────────────────────────────────────
-#[derive(Debug, Clone)]
-pub enum Message {
-    Navigate(PathBuf),
-    NavigateBack,
-    NavigateForward,
-    NavigateUp,
-    NavigateHome,
-    TabLoaded(u64, u64, Vec<filesystem::FileEntry>),
-
-    TabNew,
-    TabClose(usize),
-    TabActivate(usize),
-
-    EntryPressed(usize),
-    EntryReleased(usize),
-    EntryDoubleClicked(PathBuf),
-    EntryHoverEnter(PathBuf),
-    EntryHoverExit(PathBuf),
-    BackgroundClicked,
-    SelectAll,
-
-    SearchChanged(String),
-    SearchSubmit,
-    SearchBatch(u64, Vec<filesystem::FileEntry>),
-    SearchDone(u64),
-
-    ViewModeToggle,
-    SortChanged(SortBy),
-    ToggleGroupFolders,
-    ShowHiddenToggle,
-    ZoomIn,
-    ZoomOut,
-
-    PathBarEdit(String),
-    PathBarSubmit,
-
-    NewFolder,
-    NewFile,
-
-    ContextMenuClose,
-    ContextMenuOpenEntry(usize),
-    ContextMenuOpenBackground,
-    OpenDefault(PathBuf),
-    OpenWith(PathBuf, String),
-    OpenWithBrowse(PathBuf),
-    OpenWithSearch(String),
-    OpenWithSetDefault(String, String),
-    OpenWithClose,
-    OpenTerminalHere(PathBuf),
-    OpenInTerminalWithPath(PathBuf),
-    CopyPath(PathBuf),
-    CopyName(PathBuf),
-    Compress,
-    CompressZip,
-    Extract(PathBuf),
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MenuAction {
+    Open,
     Copy,
     Cut,
     Paste,
-    Delete,
-    DeletePermanently,
-    RestoreFromTrash(PathBuf),
-    EmptyTrash,
-    ConfirmYes,
-    ConfirmNo,
     Duplicate,
-    ToggleBookmark(PathBuf),
-    RenameStart,
-    RenameText(String),
-    RenameSubmit,
-    Refresh,
-    Undo,
-
-    CursorMoved(Point),
-    PaneDragStart(PaneDrag),
-    PaneDragEnd,
-    WindowResized(Size),
-    ModifiersChanged(iced::keyboard::Modifiers),
-    KeyPressed(iced::keyboard::Key),
-    Noop,
-
-    WindowIdReady(Option<iced::window::Id>),
-    WaylandDisplayReady(Option<usize>),
-    DropTick,
-
-    WatcherBatch(Vec<PathBuf>),
-    ThumbnailTick,
-    /// (absolute y offset, visible viewport height) — drives the file
-    /// list's virtualization, see `panes::filelist`.
-    Scrolled(f32, f32),
-
-    DevicesRefreshed(Vec<Device>, Vec<DriveInfo>, Vec<DriveInfo>),
-    DeviceMount(String),
-    DeviceMounted(String, Result<PathBuf, String>),
-    DeviceUnmount(String),
-    DeviceEject(String),
-
-    JobEvent(JobEvent),
-    JobCancel(u64),
-    JobDismiss(u64),
-    JobConflictResolve(u64, Resolution),
-    JobConflictApplyAll(u64, bool),
+    Rename,
+    Trash,
+    Delete,
+    Restore,
+    NewFolder,
+    NewFile,
+    NewText,
+    NewMarkdown,
+    Bookmark,
+    CopyPath,
+    Mount,
+    Unmount,
+    Eject,
+    EmptyTrash,
+    MakePdf,
+    ConvertPdf,
+    Compress,
+    DiskUsage,
+    OpenDefault,
+    OpenWith,
+    OpenTerminal,
+    ExtractHere,
+    ExtractTo,
+    NetConnect,
+    NetDisconnect,
+    NetEdit,
+    NetRemove,
+    NetCopyUrl,
+    NetForgetPassword,
 }
 
-// ── App ──────────────────────────────────────────────────────────────────
 pub struct App {
-    pub tabs: Vec<Tab>,
-    pub active: usize,
+    panes: pane_grid::State<PaneKind>,
+    left_split: Option<pane_grid::Split>,
+    // viewer | inspector split; focus mode hides the inspector so it isn't
+    // squeezed into a sliver next to the shrunken viewer
+    inspector_split: Option<pane_grid::Split>,
+    inspector_ratio: f32,
+    left_ratio: f32,
+    left_size: LeftSize,
+    sidebar: Sidebar,
+    tabs: Tabs,
+    inspector: Inspector,
+    details: Details,
+    cursor: Point,
+    menu: Option<(Point, Target)>,
+    dialog: Option<Dialog>,
+    jobs: Vec<JobUi>,
+    undo: Vec<UndoOp>,
+    /// (paths, cut)
+    clipboard: Option<(Vec<PathBuf>, bool)>,
+    watched: Vec<PathBuf>,
+    watcher: Option<task::Handle>,
+    drag: Option<Drag>,
+    /// drag-and-drop with other apps (og-suite builds on Wayland)
+    dnd: Option<crate::extdnd::Dnd>,
+    win_size: iced::Size,
+    /// files from another app are hovering over the window
+    ext_hover: bool,
+    /// pane under the pointer / pane that receives plain keys
+    hover_pane: Option<PaneKind>,
+    focus_pane: PaneKind,
+    fullscreen: bool,
+    net_saved: Vec<Conn>,
+    net_mounted: Vec<(String, PathBuf)>,
+    net_tailnet: Vec<Discovered>,
+    net_lan: Vec<Discovered>,
+    net_ssh: Vec<Discovered>,
+    /// Err = rclone/fuse missing (shown in the connect dialog)
+    net_backend: Result<(), String>,
+    /// installed apps / MIME associations (loaded off the UI thread)
+    apps: Option<Arc<openwith::Registry>>,
+    /// "Open in <default app>" label for the open context menu
+    menu_open_label: String,
+}
 
-    pub clipboard: Option<ClipboardOp>,
-    pub app_registry: Vec<AppEntry>,
-    pub status_message: String,
-
-    pub fixed_devices: Vec<DriveInfo>,
-    pub network_drives: Vec<DriveInfo>,
-    pub removable: Vec<Device>,
-    pub recent: Vec<PathBuf>,
-    pub bookmarks: Vec<PathBuf>,
-
-    pub context_menu: Option<ContextMenu>,
-    pub open_with: Option<OpenWithDialog>,
-    pub confirm: Option<ConfirmDialog>,
-
-    pub cursor_pos: Point,
-    pub context_menu_pos: Point,
-    pub sidebar_width: f32,
-    pub preview_width: f32,
-    pub pane_drag: Option<PaneDrag>,
-    pub drag_preview_x: f32,
-    pub window_size: Size,
-
-    pub press_origin: Option<(usize, Point)>,
-    pub file_drag: Option<Vec<PathBuf>>,
-    pub drop_hover: Option<PathBuf>,
-    pub external_drag_over: bool,
-
-    pub modifiers: iced::keyboard::Modifiers,
-    pub items_per_row: std::rc::Rc<std::cell::Cell<usize>>,
-
-    pub drag_tx: Option<calloop::channel::Sender<og_wayland::DragRequest>>,
-    pub drop_rx: Option<std::sync::Arc<std::sync::Mutex<std::sync::mpsc::Receiver<og_wayland::DropEvent>>>>,
-
-    pub jobs: Vec<JobUi>,
-    pub undo_stack: Vec<UndoOp>,
-
-    /// Cached details for the current single-selection, refreshed once per
-    /// `update()` call (see `refresh_preview`) — the preview panel borrows
-    /// this rather than recomputing (and thus owning-then-dangling) a fresh
-    /// `FileDetails` inside `view()` itself.
-    pub preview: Option<FileDetails>,
+#[derive(Debug, Clone)]
+pub enum Message {
+    Sidebar(sidebar::Msg),
+    Tabs(tabs::Msg),
+    Inspector(inspector::Msg),
+    Details(details::Msg),
+    PaneResized(pane_grid::ResizeEvent),
+    ToggleLeft,
+    ToggleFocus,
+    Search,
+    EditPath,
+    Save,
+    ToggleEdit,
+    CloseTab,
+    Modifiers(Modifiers),
+    Cursor(Point),
+    Key(sidebar::Key),
+    Menu(MenuAction),
+    MenuClose,
+    BackgroundMenu,
+    DialogInput(String),
+    DialogFlag(bool),
+    DialogOk,
+    DialogResolve(Resolution),
+    DialogCancel,
+    Shortcut(MenuAction),
+    Undo,
+    Job(JobEvent),
+    JobCancel(JobId),
+    OpDone(Result<String, String>, Vec<PathBuf>),
+    /// "New file" finished: refresh the folder, open the file to edit
+    FileCreated(Result<PathBuf, String>, PathBuf),
+    Drives(Result<Vec<Drive>, String>),
+    DrivesChanged,
+    DriveDone(Result<String, String>),
+    DirsChanged(Vec<PathBuf>),
+    Copied,
+    MouseUp,
+    /// the suite config changed (og-suite builds): re-read the palette
+    ThemeChanged,
+    NetLoaded(Vec<Conn>, Result<(), String>, Vec<Discovered>),
+    NetMountedNow(Vec<(String, PathBuf)>),
+    NetTailnet(Result<Vec<Discovered>, String>),
+    NetLan(LanEvent),
+    NetRefresh,
+    NetNeedPassword(Conn, bool, bool),
+    NetMountDone(Conn, Result<PathBuf, String>, bool),
+    NetUnmountDone(Conn, Result<(), String>, bool),
+    ConnForm(netui::FormMsg),
+    ConnTest,
+    ConnTested(Result<String, String>),
+    ConnSave,
+    ConnSaved(Result<Vec<Conn>, String>, Vec<String>, Option<String>, bool),
+    /// a key without Ctrl: goes to the focused pane (viewer first, then files)
+    RawKey(Key, Modifiers),
+    /// pointer entered (true) / left (false) a pane
+    PaneHover(PaneKind, bool),
+    MouseDown,
+    DndReady(Result<crate::extdnd::Dnd, String>),
+    ExtDrop(crate::extdnd::DropEvent),
+    CursorLeft,
+    /// window size (logical), for spotting a drag that reaches the edge
+    WinResized(iced::Size),
+    AppsLoaded(Arc<openwith::Registry>),
+    /// registry, files, MIME type of the first file
+    OpenWithReady(Arc<openwith::Registry>, Vec<PathBuf>, String),
+    OpenWithPick(String),
+    OpenWithShowAll,
+    CompressFormat(Format),
 }
 
 impl App {
     pub fn new() -> (Self, Task<Message>) {
-        let start = home_dir();
-        let app_registry = load_app_registry();
-        let recent = filesystem::load_recent();
-        let bookmarks = filesystem::load_bookmarks();
-        let (fixed_devices, network_drives) = filesystem::list_drives();
-        let removable = crate::devices::list();
-
-        let tab = Tab::new(start.clone(), false, ViewMode::Grid);
-        let tab_id = tab.id;
-        let gen = tab.load_gen;
-
-        let app = App {
-            tabs: vec![tab],
-            active: 0,
-            clipboard: None,
-            app_registry,
-            status_message: String::new(),
-            fixed_devices,
-            network_drives,
-            removable,
-            recent,
-            bookmarks,
-            context_menu: None,
-            open_with: None,
-            confirm: None,
-            cursor_pos: Point::ORIGIN,
-            context_menu_pos: Point::ORIGIN,
-            sidebar_width: 200.0,
-            preview_width: 260.0,
-            pane_drag: None,
-            drag_preview_x: 0.0,
-            window_size: Size::new(1200.0, 800.0),
-            press_origin: None,
-            file_drag: None,
-            drop_hover: None,
-            external_drag_over: false,
-            modifiers: iced::keyboard::Modifiers::default(),
-            items_per_row: std::rc::Rc::new(std::cell::Cell::new(1)),
-            drag_tx: None,
-            drop_rx: None,
-            jobs: Vec::new(),
-            undo_stack: Vec::new(),
-            preview: None,
+        let pane = |k| Box::new(Configuration::Pane(k));
+        let panes = pane_grid::State::with_configuration(Configuration::Split {
+            axis: Axis::Vertical,
+            ratio: LEFT_RATIO,
+            a: pane(PaneKind::Files),
+            b: Box::new(Configuration::Split {
+                axis: Axis::Horizontal,
+                ratio: 0.74,
+                a: Box::new(Configuration::Split {
+                    axis: Axis::Vertical,
+                    ratio: INSPECTOR_RATIO,
+                    a: pane(PaneKind::Viewer),
+                    b: pane(PaneKind::Inspector),
+                }),
+                b: pane(PaneKind::Details),
+            }),
+        });
+        let (left_split, inspector_split) = match panes.layout() {
+            pane_grid::Node::Split { id, b, .. } => {
+                let inner = match b.as_ref() {
+                    pane_grid::Node::Split { a, .. } => match a.as_ref() {
+                        pane_grid::Node::Split { id, .. } => Some(*id),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                (Some(*id), inner)
+            }
+            _ => (None, None),
         };
-
-        let load = load_task(tab_id, start, gen, false);
-        (app, Task::batch([load, iced::window::get_latest().map(Message::WindowIdReady)]))
+        let (sidebar, sidebar_task) = Sidebar::new();
+        let details = Details::default();
+        let mut app = Self {
+            panes,
+            left_split,
+            inspector_split,
+            inspector_ratio: INSPECTOR_RATIO,
+            left_ratio: LEFT_RATIO,
+            left_size: LeftSize::Normal,
+            sidebar,
+            tabs: Tabs::default(),
+            inspector: Inspector::default(),
+            details,
+            cursor: Point::ORIGIN,
+            menu: None,
+            dialog: None,
+            jobs: Vec::new(),
+            undo: Vec::new(),
+            clipboard: None,
+            watched: Vec::new(),
+            watcher: None,
+            drag: None,
+            dnd: None,
+            win_size: iced::Size::ZERO,
+            ext_hover: false,
+            hover_pane: None,
+            focus_pane: PaneKind::Files,
+            fullscreen: false,
+            net_saved: Vec::new(),
+            net_mounted: Vec::new(),
+            net_tailnet: Vec::new(),
+            net_lan: Vec::new(),
+            net_ssh: Vec::new(),
+            net_backend: Ok(()),
+            apps: None,
+            menu_open_label: String::new(),
+        };
+        // og-files [--view tree|list|grid] [--search TEXT] [--focus] [--usage DIR] [PATH]
+        // a folder PATH opens in the files pane, a file PATH in a tab
+        let mut tasks = Vec::new();
+        let mut args = std::env::args_os().skip(1).filter(|_| !cfg!(test));
+        while let Some(a) = args.next() {
+            match a.to_str() {
+                Some("--view") => {
+                    let mode = match args.next().as_ref().and_then(|v| v.to_str()) {
+                        Some("list") => sidebar::Mode::List,
+                        Some("grid") => sidebar::Mode::Grid,
+                        _ => sidebar::Mode::Tree,
+                    };
+                    tasks.push(app.update(Message::Sidebar(sidebar::Msg::Mode(mode))));
+                }
+                Some("--search") => {
+                    let q = args
+                        .next()
+                        .map(|q| q.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                    tasks.push(app.sidebar.open_search().map(Message::Sidebar));
+                    tasks.push(app.update(Message::Sidebar(sidebar::Msg::SearchInput(q))));
+                }
+                Some("--focus") => tasks.push(app.set_left(LeftSize::Focus)),
+                // og-files --usage DIR: open the disk usage analyzer
+                Some("--usage") => {
+                    let d = args
+                        .next()
+                        .map(PathBuf::from)
+                        .unwrap_or_else(crate::config::home);
+                    let d = std::fs::canonicalize(&d).unwrap_or(d);
+                    tasks.push(app.open_disk_usage(d));
+                }
+                _ => {
+                    let p = PathBuf::from(a);
+                    let p = std::fs::canonicalize(&p).unwrap_or(p);
+                    let kind = Kind::of(&p, p.is_dir());
+                    tasks.push(app.open(p, kind, true));
+                }
+            }
+        }
+        // debug-build screenshot hook: OGX_SHOW=menu|rename|delete|conflict|close
+        #[cfg(debug_assertions)]
+        if let Ok(show) = std::env::var("OGX_SHOW") {
+            let p = crate::config::home().join("Documents");
+            let t = Target {
+                net: None,
+                items: vec![(p.clone(), Kind::Folder)],
+                dir: crate::config::home(),
+                drive: None,
+                in_trash: false,
+                bookmarked: true,
+            };
+            match show.as_str() {
+                "menu" => app.menu = Some((Point::new(120.0, 260.0), t)),
+                "rename" => {
+                    app.dialog = Some(Dialog::Rename {
+                        path: p.clone(),
+                        name: "Documents".into(),
+                    })
+                }
+                "delete" => {
+                    app.dialog = Some(Dialog::ConfirmDelete {
+                        paths: vec![p.clone(), p.join("x")],
+                    })
+                }
+                "conflict" => {
+                    app.dialog = Some(Dialog::Conflict {
+                        job: 0,
+                        src: p.join("report.pdf"),
+                        dst: crate::config::home().join("report.pdf"),
+                        all: false,
+                    })
+                }
+                "connect" => app.dialog = Some(Dialog::Connect(Box::new(netui::Form::new()))),
+                "close" => {
+                    app.dialog = Some(Dialog::CloseTab {
+                        id: 0,
+                        title: "notes.md".into(),
+                    })
+                }
+                // menu / dialogs for the file OGX_SHOW_PATH
+                "menu-file" | "openwith" | "compress" | "extract-to" | "password" => {
+                    let f = std::env::var_os("OGX_SHOW_PATH")
+                        .map(PathBuf::from)
+                        .unwrap_or(p.clone());
+                    let t = Target {
+                        net: None,
+                        items: vec![(f.clone(), Kind::of(&f, f.is_dir()))],
+                        dir: f.parent().map(Path::to_path_buf).unwrap_or_default(),
+                        drive: None,
+                        in_trash: false,
+                        bookmarked: false,
+                    };
+                    app.apps = Some(Arc::new(openwith::Registry::load(
+                        &openwith::Env::from_env(),
+                    )));
+                    app.cursor = Point::new(120.0, 200.0);
+                    match show.as_str() {
+                        "menu-file" => app.show_menu(t),
+                        "password" => {
+                            app.dialog = Some(Dialog::ArchivePassword {
+                                job: ArchiveJob::ExtractHere {
+                                    archive: f,
+                                    parent: PathBuf::new(),
+                                    password: None,
+                                },
+                                pw: String::new(),
+                            })
+                        }
+                        s => {
+                            app.menu = Some((app.cursor, t));
+                            let a = match s {
+                                "openwith" => MenuAction::OpenWith,
+                                "compress" => MenuAction::Compress,
+                                _ => MenuAction::ExtractTo,
+                            };
+                            tasks.push(app.update(Message::Menu(a)));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        let boot = Task::batch([
+            sidebar_task.map(Message::Sidebar),
+            details::load().map(Message::Details),
+            Task::perform(devices::list(), Message::Drives),
+            crate::extdnd::connect().map(Message::DndReady),
+            Task::perform(
+                async {
+                    tokio::task::spawn_blocking(|| {
+                        (
+                            netb::load_saved(),
+                            netb::backend_available(),
+                            netb::ssh_config_hosts(),
+                        )
+                    })
+                    .await
+                    .unwrap_or_else(|_| (Vec::new(), Err("failed".into()), Vec::new()))
+                },
+                |(c, b, ssh)| Message::NetLoaded(c, b, ssh),
+            ),
+            Task::perform(netb::discover_tailnet(), Message::NetTailnet),
+            Self::load_apps(),
+            Task::batch(tasks),
+        ]);
+        (app, boot)
     }
 
-    fn active(&self) -> &Tab {
-        &self.tabs[self.active]
+    pub fn theme(&self) -> Theme {
+        theme::theme()
     }
 
-    fn active_mut(&mut self) -> &mut Tab {
-        &mut self.tabs[self.active]
-    }
-
-    fn watched_dirs(&self) -> Vec<PathBuf> {
-        self.tabs.iter().map(|t| t.path.clone()).collect()
-    }
-
-    fn resync_watcher(&self) {
-        crate::watcher::set_watched(self.watched_dirs());
-    }
-
-    fn navigate(&mut self, path: PathBuf) -> Task<Message> {
-        let tab = self.active_mut();
-        tab.go(path.clone());
-        self.resync_watcher();
-        let id = self.active().id;
-        let gen = self.active().load_gen;
-        // Tab::go already zeroed tab.scroll_offset (the value the
-        // virtualization math uses), but the scrollable widget itself
-        // remembers its own on-screen position by Id across navigations —
-        // without this it'd stay scrolled halfway down a long folder
-        // after jumping into a short one, showing nothing but the bottom
-        // overscan's blank space until the user manually scrolled up.
-        let reset_scroll = scrollable::snap_to(scrollable::Id::new("filelist"), scrollable::RelativeOffset::START);
-        Task::batch([load_task(id, path, gen, self.active().show_hidden), reset_scroll])
-    }
-
-    fn reload_current(&mut self) -> Task<Message> {
-        let tab = self.active_mut();
-        tab.load_gen += 1;
-        let (id, gen, path, hidden) = (tab.id, tab.load_gen, tab.path.clone(), tab.show_hidden);
-        load_task(id, path, gen, hidden)
-    }
-
-    fn selected_details(&self) -> Option<FileDetails> {
-        let tab = self.active();
-        if tab.selected.len() == 1 {
-            tab.selected.iter().next().and_then(|p| filesystem::get_file_details(p))
+    fn open(&mut self, path: PathBuf, kind: Kind, pin: bool) -> Task<Message> {
+        if kind == Kind::Folder {
+            return self.sidebar.reveal(path).map(Message::Sidebar);
+        }
+        if pin {
+            self.details
+                .record_for(format!("Opened {}", path.display()), Some(&path));
+        }
+        // opening a file from focus mode brings the viewer back into view
+        let unfocus = if self.left_size == LeftSize::Focus && pin {
+            self.set_left(LeftSize::Normal)
         } else {
-            None
+            Task::none()
+        };
+        let (task, ev) = self.tabs.open(path, kind, pin);
+        Task::batch([unfocus, task.map(Message::Tabs), self.on_tabs_event(ev)])
+    }
+
+    fn push_network(&mut self) {
+        let mut found = self.net_tailnet.clone();
+        found.extend(self.net_lan.iter().cloned());
+        found.extend(self.net_ssh.iter().cloned());
+        self.sidebar
+            .set_network(self.net_saved.clone(), self.net_mounted.clone(), found);
+    }
+
+    fn refresh_mounted() -> Task<Message> {
+        Task::perform(
+            async {
+                tokio::task::spawn_blocking(netb::mounted)
+                    .await
+                    .unwrap_or_default()
+            },
+            Message::NetMountedNow,
+        )
+    }
+
+    fn is_mounted(&self, c: &Conn) -> bool {
+        self.net_mounted.iter().any(|(id, _)| *id == c.id)
+    }
+
+    /// Mount `c`; asks for a password first if one is needed and none is
+    /// remembered. `interactive` = show the folder afterwards.
+    fn start_mount(&mut self, c: Conn, interactive: bool) -> Task<Message> {
+        if let Err(e) = &self.net_backend {
+            self.details.record(e.clone());
+            return Task::none();
+        }
+        if c.auth == netb::Auth::Password {
+            let c2 = c.clone();
+            return Task::perform(netb::has_saved_password(c), move |has| {
+                Message::NetNeedPassword(c2.clone(), !has, interactive)
+            });
+        }
+        self.details.record(format!("Connecting to {}…", c.name));
+        let c2 = c.clone();
+        Task::perform(netb::mount(c, None, false), move |r| {
+            Message::NetMountDone(c2.clone(), r, interactive)
+        })
+    }
+
+    fn open_disk_usage(&mut self, root: PathBuf) -> Task<Message> {
+        self.details.record_for(
+            format!("Analyzing disk usage of {}", root.display()),
+            Some(&root),
+        );
+        let unfocus = if self.left_size == LeftSize::Focus {
+            self.set_left(LeftSize::Normal)
+        } else {
+            Task::none()
+        };
+        let (t, ev) = self.tabs.open_disk_usage(root);
+        Task::batch([unfocus, t.map(Message::Tabs), self.on_tabs_event(ev)])
+    }
+
+    fn set_left(&mut self, size: LeftSize) -> Task<Message> {
+        self.left_size = size;
+        self.sidebar.focused = size == LeftSize::Focus;
+        if let Some(split) = self.left_split {
+            let ratio = match size {
+                LeftSize::Normal => self.left_ratio,
+                LeftSize::Collapsed => 0.0,
+                LeftSize::Focus => FOCUS_RATIO,
+            };
+            self.panes.resize(split, ratio);
+        }
+        if let Some(split) = self.inspector_split {
+            let ratio = if size == LeftSize::Focus {
+                1.0
+            } else {
+                self.inspector_ratio
+            };
+            self.panes.resize(split, ratio);
+        }
+        Task::none()
+    }
+
+    fn on_tabs_event(&mut self, ev: tabs::Event) -> Task<Message> {
+        match ev {
+            tabs::Event::Status(s) => {
+                self.details.record(s);
+                Task::none()
+            }
+            tabs::Event::OpenFile(p) => {
+                let k = Kind::of(&p, false);
+                self.open(p, k, true)
+            }
+            tabs::Event::Reveal(p) => self.sidebar.reveal_path(p).map(Message::Sidebar),
+            tabs::Event::Trash(paths) => self.start_job(JobSpec {
+                kind: JobKind::Trash,
+                sources: paths,
+                dest: None,
+            }),
+            tabs::Event::Delete(paths) => {
+                if !paths.is_empty() {
+                    self.dialog = Some(Dialog::ConfirmDelete { paths });
+                }
+                Task::none()
+            }
+            tabs::Event::ConfirmClose(id, title) => {
+                self.dialog = Some(Dialog::CloseTab { id, title });
+                Task::none()
+            }
+            tabs::Event::Focus(target) => {
+                self.details.focus = target.as_ref().map(|(p, _)| p.clone());
+                self.inspector.focus(target).map(Message::Inspector)
+            }
         }
     }
 
-    fn start_job(&mut self, spec: jobs::JobSpec) {
-        let kind = spec.kind;
-        let handle = jobs::start(spec);
+    // ------------------------------------------------------------ file ops
+
+    fn start_job(&mut self, spec: JobSpec) -> Task<Message> {
+        if spec.sources.is_empty() {
+            return Task::none();
+        }
+        let (control, stream) = ops::start(spec.clone());
         self.jobs.push(JobUi {
-            handle,
-            kind,
-            current: String::new(),
-            done_bytes: 0,
+            id: control.id,
+            label: "Starting…".into(),
+            total_items: 0,
             total_bytes: 0,
             done_items: 0,
+            done_bytes: 0,
+            current: String::new(),
+            control,
+            spec,
+            arch: None,
+        });
+        Task::run(stream, Message::Job)
+    }
+
+    /// Archive extract / compress as a job in the Details list.
+    fn start_archive(&mut self, job: ArchiveJob) -> Task<Message> {
+        let sources = match &job {
+            ArchiveJob::Compress { sources, .. } => sources.clone(),
+            _ => vec![job.archive().to_path_buf()],
+        };
+        let spec = JobSpec {
+            kind: JobKind::Copy,
+            sources,
+            dest: Some(job.out_dir()),
+        };
+        let (control, stream) = archops::start(job.clone());
+        self.jobs.push(JobUi {
+            id: control.id,
+            label: job.label(),
             total_items: 0,
-            conflict: None,
-            apply_all: false,
-            done: false,
-            cancelled: false,
-            error: None,
+            total_bytes: 0,
+            done_items: 0,
+            done_bytes: 0,
+            current: String::new(),
+            control,
+            spec,
+            arch: Some(job),
         });
+        Task::run(stream, Message::Job)
     }
 
-    fn job_by_id_mut(&mut self, id: u64) -> Option<&mut JobUi> {
-        self.jobs.iter_mut().find(|j| j.handle.id == id)
+    /// Installed apps + associations, read on a worker.
+    fn load_apps() -> Task<Message> {
+        Task::perform(
+            async {
+                tokio::task::spawn_blocking(|| {
+                    Arc::new(openwith::Registry::load(&openwith::Env::from_env()))
+                })
+                .await
+                .unwrap_or_default()
+            },
+            Message::AppsLoaded,
+        )
     }
 
-    fn touch_dirs(&mut self, dirs: &[PathBuf]) {
-        let mut affected: Vec<usize> = Vec::new();
-        for (i, t) in self.tabs.iter().enumerate() {
-            if dirs.iter().any(|d| d == &t.path) {
-                affected.push(i);
-            }
-        }
-        for i in affected {
-            let tab = &mut self.tabs[i];
-            tab.load_gen += 1;
-            let (id, gen, path, hidden) = (tab.id, tab.load_gen, tab.path.clone(), tab.show_hidden);
-            // Fire-and-forget: these are cheap dir reads, no need to route
-            // the resulting Task back through update() by hand here — the
-            // caller batches whichever Task variant it needs (see call
-            // sites); simple synchronous refresh is fine for the common
-            // "operation just finished in *this* tab" case.
-            let entries = filesystem::read_dir_entries(&path, hidden);
-            let _ = (id, gen);
-            self.tabs[i].apply_listing(entries);
-        }
-        self.refresh_drives_if_needed(dirs);
-    }
-
-    fn refresh_drives_if_needed(&mut self, dirs: &[PathBuf]) {
-        if dirs.iter().any(|d| d.starts_with("/run/media") || d.starts_with("/media") || d == std::path::Path::new("/")) {
-            let (fixed, net) = filesystem::list_drives();
-            self.fixed_devices = fixed;
-            self.network_drives = net;
-        }
-    }
-
-    pub fn update(&mut self, msg: Message) -> Task<Message> {
-        let task = self.update_inner(msg);
-        self.refresh_preview();
-        task
-    }
-
-    fn refresh_preview(&mut self) {
-        self.preview = self.selected_details();
-    }
-
-    fn update_inner(&mut self, msg: Message) -> Task<Message> {
-        match msg {
-            Message::Navigate(path) => return self.navigate(path),
-            Message::NavigateBack => {
-                let moved = self.active_mut().back();
-                if moved {
-                    self.resync_watcher();
-                    let tab = self.active();
-                    return load_task(tab.id, tab.path.clone(), tab.load_gen, tab.show_hidden);
-                }
-            }
-            Message::NavigateForward => {
-                let moved = self.active_mut().forward();
-                if moved {
-                    self.resync_watcher();
-                    let tab = self.active();
-                    return load_task(tab.id, tab.path.clone(), tab.load_gen, tab.show_hidden);
-                }
-            }
-            Message::NavigateUp => {
-                if let Some(parent) = self.active().path.parent().map(|p| p.to_path_buf()) {
-                    return self.navigate(parent);
-                }
-            }
-            Message::NavigateHome => return self.navigate(home_dir()),
-            Message::TabLoaded(tab_id, gen, entries) => {
-                if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == tab_id) {
-                    if tab.load_gen == gen {
-                        tab.apply_listing(entries);
-                        self.status_message = format!("{} items", tab.entries.len());
-                    }
-                }
-            }
-
-            Message::TabNew => {
-                let path = self.active().path.clone();
-                let hidden = self.active().show_hidden;
-                let tab = Tab::new(path.clone(), hidden, ViewMode::Grid);
-                let (id, gen) = (tab.id, tab.load_gen);
-                self.tabs.push(tab);
-                self.active = self.tabs.len() - 1;
-                return load_task(id, path, gen, hidden);
-            }
-            Message::TabClose(idx) => {
-                if self.tabs.len() > 1 && idx < self.tabs.len() {
-                    self.tabs.remove(idx);
-                    if self.active >= self.tabs.len() {
-                        self.active = self.tabs.len() - 1;
-                    } else if self.active > idx {
-                        self.active -= 1;
-                    }
-                    self.resync_watcher();
-                }
-            }
-            Message::TabActivate(idx) => {
-                if idx < self.tabs.len() {
-                    self.active = idx;
-                }
-            }
-
-            Message::EntryPressed(idx) => {
-                self.press_origin = Some((idx, self.cursor_pos));
-            }
-            Message::EntryReleased(released_idx) => {
-                let Some((pressed_idx, _)) = self.press_origin.take() else { return Task::none() };
-                if let Some(dragged) = self.file_drag.take() {
-                    self.drop_hover = None;
-                    let target_dir = self.active().displayed().get(released_idx).filter(|e| e.is_dir).map(|e| e.path.clone());
-                    if let Some(dir) = target_dir {
-                        if !dragged.contains(&dir) {
-                            self.move_or_copy_into(dragged, dir, self.modifiers.control());
-                        }
-                    }
-                } else {
-                    let ctrl = self.modifiers.control();
-                    let shift = self.modifiers.shift();
-                    let is_double = self.active_mut().click(pressed_idx, ctrl, shift);
-                    if is_double {
-                        if let Some(entry) = self.active().displayed().get(pressed_idx).cloned() {
-                            if entry.is_dir {
-                                return self.navigate(entry.path);
-                            } else {
-                                filesystem::open_default(&entry.path);
-                            }
-                        }
-                    } else {
-                        self.status_message = self.selection_status();
-                    }
-                }
-            }
-            Message::EntryHoverEnter(path) => self.drop_hover = Some(path),
-            Message::EntryHoverExit(path) => {
-                if self.drop_hover.as_ref() == Some(&path) {
-                    self.drop_hover = None;
-                }
-            }
-            Message::EntryDoubleClicked(_) => {} // handled via EntryReleased's is_double
-            Message::BackgroundClicked => {
-                if self.file_drag.is_none() {
-                    self.active_mut().clear_selection();
-                    self.status_message = self.selection_status();
-                }
-            }
-            Message::SelectAll => {
-                self.active_mut().select_all();
-                self.status_message = self.selection_status();
-            }
-
-            Message::SearchChanged(q) => return self.start_search(q),
-            Message::SearchSubmit => {}
-            Message::SearchBatch(gen, mut batch) => {
-                let tab = self.active_mut();
-                if gen == tab.search_gen {
-                    tab.search_results.append(&mut batch);
-                    self.status_message = format!("{} results (searching subfolders...)", self.active().search_results.len());
-                }
-            }
-            Message::SearchDone(gen) => {
-                let tab = self.active_mut();
-                if gen == tab.search_gen {
-                    tab.searching = false;
-                    self.status_message = format!("{} results", tab.search_results.len());
-                }
-            }
-
-            Message::ViewModeToggle => {
-                let tab = self.active_mut();
-                tab.view_mode = match tab.view_mode {
-                    ViewMode::Grid => ViewMode::List,
-                    ViewMode::List => ViewMode::Grid,
-                };
-            }
-            Message::SortChanged(by) => {
-                let tab = self.active_mut();
-                if tab.sort_by == by {
-                    tab.sort_asc = !tab.sort_asc;
-                } else {
-                    tab.sort_by = by;
-                    tab.sort_asc = true;
-                }
-                tab.sort();
-                self.context_menu = None;
-            }
-            Message::ToggleGroupFolders => {
-                let tab = self.active_mut();
-                tab.group_folders = !tab.group_folders;
-                tab.sort();
-                self.context_menu = None;
-            }
-            Message::ShowHiddenToggle => {
-                let tab = self.active_mut();
-                tab.show_hidden = !tab.show_hidden;
-                self.context_menu = None;
-                return self.reload_current();
-            }
-            Message::ZoomIn => self.active_mut().zoom_in(),
-            Message::ZoomOut => self.active_mut().zoom_out(),
-
-            Message::PathBarEdit(s) => self.active_mut().path_edit = Some(s),
-            Message::PathBarSubmit => {
-                let text = self.active().path_edit.clone().unwrap_or_default();
-                let path = PathBuf::from(shellexpand_home(&text));
-                self.active_mut().path_edit = None;
-                if path.is_dir() {
-                    return self.navigate(path);
-                } else {
-                    self.status_message = "Path not found".to_string();
-                }
-            }
-
-            Message::NewFolder => {
-                let dest = filesystem::unique_name(&self.active().path, "New Folder");
-                match filesystem::create_dir(&dest) {
-                    Ok(_) => {
-                        self.undo_stack.push(UndoOp::Created(dest.clone()));
-                        let t1 = self.reload_current();
-                        self.select_and_rename(dest, true);
-                        return t1;
-                    }
-                    Err(e) => self.status_message = format!("Error: {}", e),
-                }
-            }
-            Message::NewFile => {
-                let dest = filesystem::unique_name(&self.active().path, "New File.txt");
-                match filesystem::create_file(&dest) {
-                    Ok(_) => {
-                        self.undo_stack.push(UndoOp::Created(dest.clone()));
-                        let t1 = self.reload_current();
-                        self.select_and_rename(dest, false);
-                        return t1;
-                    }
-                    Err(e) => self.status_message = format!("Error: {}", e),
-                }
-            }
-
-            Message::ContextMenuClose => self.context_menu = None,
-            Message::ContextMenuOpenEntry(idx) => {
-                if let Some(entry) = self.active().displayed().get(idx).cloned() {
-                    if !self.active().selected.contains(&entry.path) {
-                        self.active_mut().select_only(idx);
-                        self.status_message = self.selection_status();
-                    }
-                    self.context_menu_pos = self.cursor_pos;
-                    self.context_menu = Some(ContextMenu {
-                        kind: ContextMenuKind::Entry { path: entry.path, is_dir: entry.is_dir },
-                        renaming: false,
-                        rename_text: String::new(),
+    /// The loaded registry, or load it now (on the worker running `f`).
+    fn with_apps<T: Send + 'static>(
+        &self,
+        f: impl FnOnce(Arc<openwith::Registry>) -> T + Send + 'static,
+        done: impl Fn(T) -> Message + Send + 'static,
+    ) -> Task<Message> {
+        let have = self.apps.clone();
+        Task::perform(
+            async move {
+                tokio::task::spawn_blocking(move || {
+                    let reg = have.unwrap_or_else(|| {
+                        Arc::new(openwith::Registry::load(&openwith::Env::from_env()))
                     });
-                }
-            }
-            Message::ContextMenuOpenBackground => {
-                self.context_menu_pos = self.cursor_pos;
-                self.context_menu = Some(ContextMenu { kind: ContextMenuKind::Background, renaming: false, rename_text: String::new() });
-            }
-            Message::OpenDefault(path) => {
-                filesystem::open_default(&path);
-                self.context_menu = None;
-            }
-            Message::OpenWith(path, exec) => {
-                filesystem::open_with(&path, &exec);
-                self.context_menu = None;
-                self.open_with = None;
-            }
-            Message::OpenWithBrowse(path) => {
-                let mime = mime_for_file(&path);
-                self.context_menu = None;
-                self.open_with = Some(OpenWithDialog { path, mime, search: String::new() });
-            }
-            Message::OpenWithSearch(q) => {
-                if let Some(dlg) = &mut self.open_with {
-                    dlg.search = q;
-                }
-            }
-            Message::OpenWithSetDefault(mime, id) => {
-                set_default_app(&mime, &id);
-                self.status_message = "Default app updated".to_string();
-            }
-            Message::OpenWithClose => self.open_with = None,
-            Message::OpenTerminalHere(path) => {
-                filesystem::open_terminal_here(&path);
-                self.context_menu = None;
-            }
-            Message::OpenInTerminalWithPath(path) => {
-                let dir = path.parent().unwrap_or(&path).to_path_buf();
-                filesystem::open_terminal_with_prefill(&dir, &path.to_string_lossy());
-                self.context_menu = None;
-            }
-            Message::CopyPath(path) => {
-                self.context_menu = None;
-                self.status_message = "Path copied to clipboard".to_string();
-                return iced::clipboard::write::<Message>(path.to_string_lossy().to_string());
-            }
-            Message::CopyName(path) => {
-                self.context_menu = None;
-                let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-                self.status_message = "Name copied to clipboard".to_string();
-                return iced::clipboard::write::<Message>(name);
-            }
-            Message::Compress => {
-                let paths = self.active().selected_paths();
-                if !paths.is_empty() {
-                    let dest = self.active().path.clone();
-                    if let Err(e) = filesystem::compress_paths(&paths, &dest) {
-                        self.status_message = format!("Error: {}", e);
-                    } else {
-                        self.status_message = "Compressed".to_string();
-                    }
-                }
-                self.context_menu = None;
-                return self.reload_current();
-            }
-            Message::CompressZip => {
-                let paths = self.active().selected_paths();
-                if !paths.is_empty() {
-                    let dest = self.active().path.clone();
-                    if let Err(e) = filesystem::compress_paths_zip(&paths, &dest) {
-                        self.status_message = format!("Error: {}", e);
-                    } else {
-                        self.status_message = "Compressed to .zip".to_string();
-                    }
-                }
-                self.context_menu = None;
-                return self.reload_current();
-            }
-            Message::Duplicate => {
-                let paths = self.active().selected_paths();
-                let mut count = 0;
-                for src in &paths {
-                    let dst = jobs::keep_both_name(src);
-                    if filesystem::copy_file(src, &dst).is_ok() {
-                        count += 1;
-                    }
-                }
-                self.status_message = format!("Duplicated {} item(s)", count);
-                self.context_menu = None;
-                return self.reload_current();
-            }
-            Message::Extract(path) => {
-                let dest = self.active().path.clone();
-                match filesystem::extract_archive(&path, &dest) {
-                    Ok(_) => self.status_message = "Extracted".to_string(),
-                    Err(e) => self.status_message = format!("Error: {}", e),
-                }
-                self.context_menu = None;
-                return self.reload_current();
-            }
-
-            Message::Copy => {
-                let paths = self.active().selected_paths();
-                if !paths.is_empty() {
-                    self.clipboard = Some(ClipboardOp::Copy(paths));
-                    self.status_message = "Copied to clipboard".to_string();
-                }
-                self.context_menu = None;
-            }
-            Message::Cut => {
-                let paths = self.active().selected_paths();
-                if !paths.is_empty() {
-                    self.clipboard = Some(ClipboardOp::Cut(paths));
-                    self.status_message = "Cut to clipboard".to_string();
-                }
-                self.context_menu = None;
-            }
-            Message::Paste => {
-                if let Some(op) = self.clipboard.clone() {
-                    let dest = self.active().path.clone();
-                    match op {
-                        ClipboardOp::Copy(paths) => self.start_job(jobs::JobSpec { kind: JobKind::Copy, sources: paths, dest_dir: Some(dest) }),
-                        ClipboardOp::Cut(paths) => {
-                            self.start_job(jobs::JobSpec { kind: JobKind::Move, sources: paths, dest_dir: Some(dest) });
-                            self.clipboard = None;
-                        }
-                    }
-                }
-                self.context_menu = None;
-            }
-            Message::Delete => {
-                let paths = self.active().selected_paths();
-                if !paths.is_empty() {
-                    self.start_job(jobs::JobSpec { kind: JobKind::Trash, sources: paths, dest_dir: None });
-                }
-                self.context_menu = None;
-            }
-            Message::DeletePermanently => {
-                let paths = self.active().selected_paths();
-                self.context_menu = None;
-                if !paths.is_empty() {
-                    let noun = if paths.len() == 1 { "item".to_string() } else { format!("{} items", paths.len()) };
-                    self.confirm = Some(ConfirmDialog {
-                        message: format!("Permanently delete {}? This cannot be undone.", noun),
-                        action: PendingAction::DeletePermanently(paths),
-                    });
-                }
-            }
-            Message::RestoreFromTrash(path) => {
-                self.context_menu = None;
-                self.start_job(jobs::JobSpec { kind: JobKind::Restore, sources: vec![path], dest_dir: None });
-            }
-            Message::EmptyTrash => {
-                self.context_menu = None;
-                self.confirm = Some(ConfirmDialog { message: "Permanently delete everything in Trash? This cannot be undone.".to_string(), action: PendingAction::EmptyTrash });
-            }
-            Message::ConfirmYes => {
-                if let Some(dlg) = self.confirm.take() {
-                    match dlg.action {
-                        PendingAction::DeletePermanently(paths) => self.start_job(jobs::JobSpec { kind: JobKind::Delete, sources: paths, dest_dir: None }),
-                        PendingAction::EmptyTrash => {
-                            match filesystem::empty_trash() {
-                                Ok(_) => self.status_message = "Trash emptied".to_string(),
-                                Err(e) => self.status_message = format!("Error: {}", e),
-                            }
-                            return self.reload_current();
-                        }
-                    }
-                }
-            }
-            Message::ConfirmNo => self.confirm = None,
-            Message::ToggleBookmark(path) => {
-                if let Some(pos) = self.bookmarks.iter().position(|p| p == &path) {
-                    self.bookmarks.remove(pos);
-                } else {
-                    self.bookmarks.push(path);
-                }
-                filesystem::save_bookmarks(&self.bookmarks);
-                self.context_menu = None;
-            }
-            Message::RenameStart => {
-                if let Some(cm) = &mut self.context_menu {
-                    if let ContextMenuKind::Entry { path, .. } = &cm.kind {
-                        cm.rename_text = path.file_name().unwrap_or_default().to_string_lossy().to_string();
-                        cm.renaming = true;
-                    }
-                }
-            }
-            Message::RenameText(s) => {
-                if let Some(cm) = &mut self.context_menu {
-                    cm.rename_text = s;
-                }
-            }
-            Message::RenameSubmit => {
-                if let Some(cm) = self.context_menu.take() {
-                    if let ContextMenuKind::Entry { path, .. } = cm.kind {
-                        let new_path = path.parent().map(|p| p.join(&cm.rename_text)).unwrap_or_default();
-                        match filesystem::rename_entry(&path, &new_path) {
-                            Ok(_) => {
-                                self.undo_stack.push(UndoOp::Renamed { from: path, to: new_path.clone() });
-                                self.status_message = format!("Renamed to {}", cm.rename_text);
-                                self.active_mut().selected = HashSet::from([new_path]);
-                            }
-                            Err(e) => self.status_message = format!("Error: {}", e),
-                        }
-                        return self.reload_current();
-                    }
-                }
-            }
-            Message::Refresh => {
-                let (fixed, net) = filesystem::list_drives();
-                self.fixed_devices = fixed;
-                self.network_drives = net;
-                self.removable = crate::devices::list();
-                return self.reload_current();
-            }
-            Message::Undo => return self.undo(),
-
-            Message::CursorMoved(pos) => {
-                self.cursor_pos = pos;
-                if self.pane_drag.is_some() {
-                    self.drag_preview_x = pos.x;
-                }
-                if self.file_drag.is_none() {
-                    if let Some((pressed_idx, press_pos)) = self.press_origin {
-                        let dx = pos.x - press_pos.x;
-                        let dy = pos.y - press_pos.y;
-                        if dx * dx + dy * dy > FILE_DRAG_THRESHOLD * FILE_DRAG_THRESHOLD {
-                            let tab = self.active();
-                            if let Some(entry) = tab.displayed().get(pressed_idx) {
-                                let dragged: Vec<PathBuf> = if tab.selected.contains(&entry.path) {
-                                    tab.selected_paths()
-                                } else {
-                                    vec![entry.path.clone()]
-                                };
-                                if let Some(tx) = &self.drag_tx {
-                                    let _ = tx.send(og_wayland::DragRequest { paths: dragged.clone() });
-                                }
-                                self.file_drag = Some(dragged);
-                            }
-                        }
-                    }
-                }
-            }
-            Message::PaneDragStart(target) => {
-                self.pane_drag = Some(target);
-                self.drag_preview_x = match target {
-                    PaneDrag::Sidebar => self.sidebar_width,
-                    PaneDrag::Preview => self.window_size.width - self.preview_width,
-                };
-            }
-            Message::PaneDragEnd => {
-                if let Some(target) = self.pane_drag.take() {
-                    match target {
-                        PaneDrag::Sidebar => self.sidebar_width = self.drag_preview_x.clamp(*SIDEBAR_WIDTH_RANGE.start(), *SIDEBAR_WIDTH_RANGE.end()),
-                        PaneDrag::Preview => {
-                            let width = self.window_size.width - self.drag_preview_x;
-                            self.preview_width = width.clamp(*PREVIEW_WIDTH_RANGE.start(), *PREVIEW_WIDTH_RANGE.end());
-                        }
-                    }
-                }
-                self.press_origin = None;
-                self.file_drag = None;
-                self.drop_hover = None;
-            }
-            Message::WindowResized(size) => self.window_size = size,
-            Message::ModifiersChanged(m) => self.modifiers = m,
-            Message::KeyPressed(key) => return self.handle_key(key),
-            Message::Noop => {}
-
-            Message::WindowIdReady(Some(id)) => {
-                return iced::window::run_with_handle(id, |handle| og_wayland::display_ptr_from_window_handle(handle)).map(Message::WaylandDisplayReady);
-            }
-            Message::WindowIdReady(None) => {}
-            Message::WaylandDisplayReady(Some(display_ptr)) => {
-                let (tx, rx) = og_wayland::spawn_with_drops(display_ptr);
-                self.drag_tx = Some(tx);
-                self.drop_rx = Some(std::sync::Arc::new(std::sync::Mutex::new(rx)));
-            }
-            Message::WaylandDisplayReady(None) => {
-                self.status_message = "Cross-app drag-and-drop unavailable (non-Wayland session?)".to_string();
-            }
-            Message::DropTick => {
-                if let Some(rx) = self.drop_rx.clone() {
-                    if let Ok(guard) = rx.try_lock() {
-                        while let Ok(ev) = guard.try_recv() {
-                            match ev {
-                                og_wayland::DropEvent::Enter { .. } | og_wayland::DropEvent::Motion { .. } => {
-                                    self.external_drag_over = true;
-                                }
-                                og_wayland::DropEvent::Leave => {
-                                    self.external_drag_over = false;
-                                }
-                                og_wayland::DropEvent::Dropped { paths, .. } => {
-                                    self.external_drag_over = false;
-                                    if !paths.is_empty() {
-                                        let dest = self.active().path.clone();
-                                        self.start_job(jobs::JobSpec { kind: JobKind::Copy, sources: paths, dest_dir: Some(dest) });
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            Message::WatcherBatch(dirs) => self.touch_dirs(&dirs),
-            Message::ThumbnailTick => {} // view() re-reads the thumbs cache on the next frame; nothing to store
-            Message::Scrolled(offset_y, viewport_height) => {
-                let tab = self.active_mut();
-                tab.scroll_offset = offset_y;
-                tab.viewport_height = viewport_height;
-            }
-
-            Message::DevicesRefreshed(rem, fixed, net) => {
-                self.removable = rem;
-                self.fixed_devices = fixed;
-                self.network_drives = net;
-            }
-            Message::DeviceMount(dev) => {
-                let dev2 = dev.clone();
-                return Task::perform(
-                    async move { tokio::task::spawn_blocking(move || crate::devices::mount(&dev2)).await.unwrap_or_else(|_| Err("mount task failed".into())) },
-                    move |result| Message::DeviceMounted(dev.clone(), result),
-                );
-            }
-            Message::DeviceMounted(_dev, result) => match result {
-                Ok(path) => {
-                    self.status_message = format!("Mounted at {}", path.display());
-                    self.removable = crate::devices::list();
-                    return self.navigate(path);
-                }
-                Err(e) => self.status_message = format!("Mount failed: {}", e),
+                    f(reg)
+                })
+                .await
             },
-            Message::DeviceUnmount(dev) => match crate::devices::unmount(&dev) {
-                Ok(_) => {
-                    self.status_message = "Unmounted".to_string();
-                    self.removable = crate::devices::list();
-                }
-                Err(e) => self.status_message = format!("Unmount failed: {}", e),
+            move |r| match r {
+                Ok(v) => done(v),
+                Err(e) => Message::OpDone(Err(e.to_string()), vec![]),
             },
-            Message::DeviceEject(dev) => match crate::devices::eject(&dev) {
-                Ok(_) => {
-                    self.status_message = "Safe to unplug".to_string();
-                    self.removable = crate::devices::list();
-                }
-                Err(e) => self.status_message = format!("Eject failed: {}", e),
-            },
+        )
+    }
 
-            Message::JobEvent(ev) => self.apply_job_event(ev),
-            Message::JobCancel(id) => {
-                if let Some(job) = self.jobs.iter().find(|j| j.handle.id == id) {
-                    job.handle.cancel();
-                }
-            }
-            Message::JobDismiss(id) => self.jobs.retain(|j| j.handle.id != id),
-            Message::JobConflictResolve(id, res) => {
-                let apply_all = self.job_by_id_mut(id).map(|j| j.apply_all).unwrap_or(false);
-                if let Some(job) = self.jobs.iter().find(|j| j.handle.id == id) {
-                    job.handle.reply_conflict(res, apply_all);
-                }
-                if let Some(j) = self.job_by_id_mut(id) {
-                    j.conflict = None;
-                }
-            }
-            Message::JobConflictApplyAll(id, v) => {
-                if let Some(j) = self.job_by_id_mut(id) {
-                    j.apply_all = v;
+    /// Show the context menu for `t` at the pointer; works out the label of
+    /// "Open in <app>" from the file names (no disk access).
+    fn show_menu(&mut self, t: Target) {
+        self.menu_open_label = "Open in default app".into();
+        if let Some(reg) = &self.apps {
+            let mut names = t.items.iter().map(|(p, _)| {
+                reg.mime_by_name(p)
+                    .and_then(|m| reg.default_for(&m))
+                    .map(|a| a.name.clone())
+            });
+            if let Some(Some(first)) = names.next() {
+                if names.all(|n| n.as_deref() == Some(first.as_str())) {
+                    self.menu_open_label = format!("Open in {first}");
                 }
             }
         }
-        Task::none()
+        self.menu = Some((self.cursor, t));
     }
 
-    fn select_and_rename(&mut self, path: PathBuf, is_dir: bool) {
-        self.active_mut().selected = HashSet::from([path.clone()]);
-        self.context_menu = Some(ContextMenu {
-            kind: ContextMenuKind::Entry { path: path.clone(), is_dir },
-            renaming: true,
-            rename_text: path.file_name().unwrap_or_default().to_string_lossy().to_string(),
-        });
+    /// Folders whose listing a job touched.
+    fn affected(spec: &JobSpec) -> Vec<PathBuf> {
+        let mut d: Vec<PathBuf> = spec
+            .sources
+            .iter()
+            .filter_map(|p| p.parent().map(Path::to_path_buf))
+            .collect();
+        d.extend(spec.dest.clone());
+        d.sort();
+        d.dedup();
+        d
     }
 
-    fn selection_status(&self) -> String {
-        let tab = self.active();
-        let n = tab.selected.len();
-        if n == 0 {
-            format!("{} items", tab.displayed().len())
-        } else if n == 1 {
-            format!("{} items  |  1 selected  ({})", tab.displayed().len(), filesystem::format_size(tab.selected_size()))
+    fn on_job(&mut self, ev: JobEvent) -> Task<Message> {
+        match ev {
+            JobEvent::Started {
+                id,
+                label,
+                total_items,
+                total_bytes,
+            } => {
+                if let Some(j) = self.jobs.iter_mut().find(|j| j.id == id) {
+                    j.label = label;
+                    j.total_items = total_items;
+                    j.total_bytes = total_bytes;
+                }
+                Task::none()
+            }
+            JobEvent::Progress {
+                id,
+                done_items,
+                done_bytes,
+                current,
+            } => {
+                if let Some(j) = self.jobs.iter_mut().find(|j| j.id == id) {
+                    j.done_items = done_items;
+                    j.done_bytes = done_bytes;
+                    j.current = current
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                }
+                Task::none()
+            }
+            JobEvent::Conflict { id, src, dst } => {
+                self.dialog = Some(Dialog::Conflict {
+                    job: id,
+                    src,
+                    dst,
+                    all: false,
+                });
+                Task::none()
+            }
+            JobEvent::Finished { id, result, undo } => {
+                let Some(i) = self.jobs.iter().position(|j| j.id == id) else {
+                    return Task::none();
+                };
+                let job = self.jobs.remove(i);
+                if matches!(&self.dialog, Some(Dialog::Conflict { job: j, .. }) if *j == id) {
+                    self.dialog = None;
+                }
+                let mut focus = Task::none();
+                match (result, job.arch.clone()) {
+                    (Ok(s), Some(_)) => {
+                        let out = archops::output_of(&undo).map(Path::to_path_buf);
+                        let mut msg = match &out {
+                            Some(o) => format!("{} → {}", job.label, o.display()),
+                            None => format!("{} — done", job.label),
+                        };
+                        if let Some(e) = s.errors.first() {
+                            msg += &format!(
+                                " (skipped {} unsafe/unsupported, first: {e})",
+                                s.errors.len()
+                            );
+                        }
+                        self.details.record_for(msg, out.as_deref());
+                        if let Some(u) = undo {
+                            self.undo.push(u);
+                        }
+                    }
+                    (Err(e), Some(a)) if a.is_extract() && archive::is_password_error(&e) => {
+                        self.details.record(format!("{}: {e}", job.label));
+                        if self.dialog.is_none() {
+                            self.dialog = Some(Dialog::ArchivePassword {
+                                job: a,
+                                pw: String::new(),
+                            });
+                            focus = text_input::focus(text_input::Id::new(DIALOG_INPUT));
+                        }
+                    }
+                    (result, _) => match result {
+                        Ok(s) => {
+                            let mut msg = format!("{} — {} done", job.label, s.items_done);
+                            if s.items_skipped > 0 {
+                                msg += &format!(", {} skipped", s.items_skipped);
+                            }
+                            if let Some(e) = s.errors.first() {
+                                msg += &format!(", {} failed (first: {e})", s.errors.len());
+                            }
+                            if job.spec.kind == ops::JobKind::Trash && !ops::TRASH_UNDO {
+                                msg +=
+                                    " (can't be undone here: restore it from the Finder's Trash)";
+                            }
+                            let first = job.spec.sources.first().cloned();
+                            self.details.record_for(msg, first.as_deref());
+                            if let Some(u) = undo {
+                                self.undo.push(u);
+                            }
+                        }
+                        Err(e) => self.details.record(format!("{} failed: {e}", job.label)),
+                    },
+                }
+                let dirs = Self::affected(&job.spec);
+                // disk-usage tabs drop/rescan what the job removed or moved
+                let mut changed = job.spec.sources.clone();
+                changed.extend(dirs.iter().cloned());
+                Task::batch([
+                    focus,
+                    self.sidebar.refresh(&dirs).map(Message::Sidebar),
+                    self.tabs.fs_changed(&changed).map(Message::Tabs),
+                ])
+            }
+        }
+    }
+
+    fn targets(&self) -> Vec<PathBuf> {
+        match &self.menu {
+            Some((_, t)) => t.items.iter().map(|(p, _)| p.clone()).collect(),
+            None => self
+                .sidebar
+                .sel
+                .paths()
+                .into_iter()
+                .filter(|p| p.as_os_str() != crate::tree::TRASH)
+                .collect(),
+        }
+    }
+
+    fn context_dir(&self) -> PathBuf {
+        match &self.menu {
+            Some((_, t)) => t.dir.clone(),
+            None => self.sidebar.current_dir(),
+        }
+    }
+
+    fn action(&mut self, a: MenuAction) -> Task<Message> {
+        let items = self.targets();
+        let dir = self.context_dir();
+        let target = self.menu.take().map(|(_, t)| t);
+        match a {
+            MenuAction::Open => {
+                let tasks: Vec<_> = items
+                    .into_iter()
+                    .map(|p| {
+                        let k = Kind::of(&p, p.is_dir());
+                        self.open(p, k, true)
+                    })
+                    .collect();
+                Task::batch(tasks)
+            }
+            MenuAction::Copy | MenuAction::Cut => {
+                if items.is_empty() {
+                    return Task::none();
+                }
+                let cut = a == MenuAction::Cut;
+                self.details.record(format!(
+                    "{} {} item(s)",
+                    if cut { "Cut" } else { "Copied" },
+                    items.len()
+                ));
+                self.clipboard = Some((items, cut));
+                Task::none()
+            }
+            MenuAction::Paste => match self.clipboard.clone() {
+                Some((paths, cut)) => {
+                    if cut {
+                        self.clipboard = None;
+                    }
+                    self.start_job(JobSpec {
+                        kind: if cut { JobKind::Move } else { JobKind::Copy },
+                        sources: paths,
+                        dest: Some(dir),
+                    })
+                }
+                None => Task::none(),
+            },
+            MenuAction::Duplicate => {
+                let groups: Vec<_> = items
+                    .iter()
+                    .filter_map(|p| p.parent().map(|d| (d.to_path_buf(), p.clone())))
+                    .collect();
+                let tasks: Vec<_> = groups
+                    .into_iter()
+                    .map(|(d, p)| {
+                        self.start_job(JobSpec {
+                            kind: JobKind::Copy,
+                            sources: vec![p],
+                            dest: Some(d),
+                        })
+                    })
+                    .collect();
+                Task::batch(tasks)
+            }
+            MenuAction::Rename => match items.as_slice() {
+                [p] => {
+                    let name = p
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                    self.dialog = Some(Dialog::Rename {
+                        path: p.clone(),
+                        name,
+                    });
+                    text_input::focus(text_input::Id::new(DIALOG_INPUT))
+                }
+                _ => Task::none(),
+            },
+            MenuAction::Trash => {
+                if self.sidebar_in_trash(&target) {
+                    return self.action(MenuAction::Delete);
+                }
+                self.start_job(JobSpec {
+                    kind: JobKind::Trash,
+                    sources: items,
+                    dest: None,
+                })
+            }
+            MenuAction::Delete => {
+                if !items.is_empty() {
+                    self.dialog = Some(Dialog::ConfirmDelete { paths: items });
+                }
+                Task::none()
+            }
+            MenuAction::Restore => {
+                let infos: Vec<PathBuf> = items
+                    .iter()
+                    .filter_map(|p| self.sidebar.trash_entry(p))
+                    .map(|e| e.info)
+                    .collect();
+                self.start_job(JobSpec {
+                    kind: JobKind::Restore,
+                    sources: infos,
+                    dest: None,
+                })
+            }
+            MenuAction::NewFolder => {
+                self.dialog = Some(Dialog::NewFolder {
+                    dir,
+                    name: "New folder".into(),
+                });
+                Task::batch([
+                    text_input::focus(text_input::Id::new(DIALOG_INPUT)),
+                    text_input::select_all(text_input::Id::new(DIALOG_INPUT)),
+                ])
+            }
+            MenuAction::NewFile | MenuAction::NewText | MenuAction::NewMarkdown => {
+                let (name, ext) = match a {
+                    MenuAction::NewText => ("Untitled", ".txt"),
+                    MenuAction::NewMarkdown => ("Untitled", ".md"),
+                    _ => ("untitled.txt", ""),
+                };
+                self.dialog = Some(Dialog::NewFile {
+                    dir,
+                    name: name.into(),
+                    ext,
+                });
+                Task::batch([
+                    text_input::focus(text_input::Id::new(DIALOG_INPUT)),
+                    text_input::select_all(text_input::Id::new(DIALOG_INPUT)),
+                ])
+            }
+            MenuAction::Bookmark => match items.as_slice() {
+                [p] => self
+                    .sidebar
+                    .toggle_bookmark(p.clone(), p.is_dir())
+                    .map(Message::Sidebar),
+                _ => Task::none(),
+            },
+            MenuAction::CopyPath => {
+                let s = items
+                    .iter()
+                    .map(|p| p.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                iced::clipboard::write(s).map(|_: ()| Message::Copied)
+            }
+            MenuAction::Mount | MenuAction::Unmount | MenuAction::Eject => {
+                let Some(d) = target.and_then(|t| t.drive) else {
+                    return Task::none();
+                };
+                let id = d.id.clone();
+                let label = d.label.clone();
+                match a {
+                    MenuAction::Mount => Task::perform(
+                        async move {
+                            devices::mount(&id)
+                                .await
+                                .map(|p| format!("Mounted {label} at {}", p.display()))
+                        },
+                        Message::DriveDone,
+                    ),
+                    MenuAction::Unmount => Task::perform(
+                        async move {
+                            devices::unmount(&id)
+                                .await
+                                .map(|_| format!("Unmounted {label}"))
+                        },
+                        Message::DriveDone,
+                    ),
+                    _ => Task::perform(
+                        async move {
+                            devices::eject(&id)
+                                .await
+                                .map(|_| format!("{label} can be removed safely"))
+                        },
+                        Message::DriveDone,
+                    ),
+                }
+            }
+            MenuAction::EmptyTrash => {
+                self.dialog = Some(Dialog::ConfirmEmptyTrash);
+                Task::none()
+            }
+            MenuAction::NetConnect
+            | MenuAction::NetDisconnect
+            | MenuAction::NetEdit
+            | MenuAction::NetRemove
+            | MenuAction::NetCopyUrl
+            | MenuAction::NetForgetPassword => {
+                let Some(c) = target.and_then(|t| t.net) else {
+                    return Task::none();
+                };
+                match a {
+                    MenuAction::NetConnect => self.start_mount(c, true),
+                    MenuAction::NetDisconnect => {
+                        let c2 = c.clone();
+                        Task::perform(netb::unmount(c), move |r| {
+                            Message::NetUnmountDone(c2.clone(), r, false)
+                        })
+                    }
+                    MenuAction::NetEdit => {
+                        let id = c.id.clone();
+                        self.dialog = Some(Dialog::Connect(Box::new(netui::Form::from_conn(
+                            &c,
+                            Some(id),
+                        ))));
+                        Task::none()
+                    }
+                    MenuAction::NetRemove => {
+                        if self.is_mounted(&c) {
+                            let c2 = c.clone();
+                            Task::perform(netb::unmount(c), move |r| {
+                                Message::NetUnmountDone(c2.clone(), r, true)
+                            })
+                        } else {
+                            self.update_inner(Message::NetUnmountDone(c, Ok(()), true))
+                        }
+                    }
+                    MenuAction::NetForgetPassword => {
+                        let name = c.name.clone();
+                        Task::perform(netb::forget_password(c), move |r| {
+                            Message::OpDone(
+                                r.map(|_| format!("Forgot the saved password for {name}")),
+                                vec![],
+                            )
+                        })
+                    }
+                    _ => iced::clipboard::write(netb::to_url(&c)).map(|_: ()| Message::Copied),
+                }
+            }
+            MenuAction::DiskUsage => {
+                let root = match items.as_slice() {
+                    [p] if p.is_dir() => p.clone(),
+                    _ => dir,
+                };
+                self.open_disk_usage(root)
+            }
+            MenuAction::Compress => {
+                if items.is_empty() {
+                    return Task::none();
+                }
+                let name = archops::default_name(&items);
+                self.dialog = Some(Dialog::Compress {
+                    sources: items,
+                    dir,
+                    name,
+                    format: Format::Zip,
+                });
+                Task::batch([
+                    text_input::focus(text_input::Id::new(DIALOG_INPUT)),
+                    text_input::select_all(text_input::Id::new(DIALOG_INPUT)),
+                ])
+            }
+            MenuAction::ExtractHere => {
+                let tasks: Vec<_> = items
+                    .into_iter()
+                    .filter(|p| archive::supported(p))
+                    .filter_map(|p| {
+                        let parent = p.parent()?.to_path_buf();
+                        Some(self.start_archive(ArchiveJob::ExtractHere {
+                            archive: p,
+                            parent,
+                            password: None,
+                        }))
+                    })
+                    .collect();
+                Task::batch(tasks)
+            }
+            MenuAction::ExtractTo => match items.as_slice() {
+                [p] if archive::supported(p) => {
+                    self.dialog = Some(Dialog::ExtractTo {
+                        archive: p.clone(),
+                        name: archive::base_name(p),
+                    });
+                    Task::batch([
+                        text_input::focus(text_input::Id::new(DIALOG_INPUT)),
+                        text_input::select_all(text_input::Id::new(DIALOG_INPUT)),
+                    ])
+                }
+                _ => Task::none(),
+            },
+            MenuAction::OpenTerminal => {
+                let at = match items.as_slice() {
+                    [p] if p.is_dir() => p.clone(),
+                    _ => dir,
+                };
+                Task::perform(
+                    async move {
+                        tokio::task::spawn_blocking(move || {
+                            crate::terminal::open_here(&at)
+                                .map(|(t, _)| format!("Opened {t} in {}", at.display()))
+                        })
+                        .await
+                        .map_err(|e| e.to_string())?
+                    },
+                    |r| Message::OpDone(r, vec![]),
+                )
+            }
+            MenuAction::OpenDefault => {
+                let files: Vec<PathBuf> = items.into_iter().filter(|p| !p.is_dir()).collect();
+                if files.is_empty() {
+                    return Task::none();
+                }
+                self.with_apps(
+                    move |reg| openwith::open_default(&reg, &files).map(|l| l.join("; ")),
+                    |r| Message::OpDone(r, vec![]),
+                )
+            }
+            MenuAction::OpenWith => {
+                let files: Vec<PathBuf> = items.into_iter().filter(|p| !p.is_dir()).collect();
+                let Some(first) = files.first().cloned() else {
+                    return Task::none();
+                };
+                if openwith::SYSTEM_OPEN_WITH {
+                    // Windows: the system "Open with" dialog, one per file
+                    return Task::perform(
+                        async move {
+                            tokio::task::spawn_blocking(move || {
+                                for f in &files {
+                                    openwith::open_with_dialog(f)?;
+                                }
+                                Ok(format!("Open with… {}", openwith::describe(&files)))
+                            })
+                            .await
+                            .map_err(|e| e.to_string())?
+                        },
+                        |r| Message::OpDone(r, vec![]),
+                    );
+                }
+                self.with_apps(
+                    move |reg| {
+                        let mime = reg.mime_of(&first);
+                        (reg, files, mime)
+                    },
+                    |(reg, files, mime)| Message::OpenWithReady(reg, files, mime),
+                )
+            }
+            MenuAction::ConvertPdf => {
+                let files: Vec<PathBuf> = items
+                    .into_iter()
+                    .filter(|p| crate::viewers::pdf::tools::topdf::supported(p))
+                    .collect();
+                if files.is_empty() {
+                    return Task::none();
+                }
+                Task::perform(
+                    async move {
+                        let mut last = None;
+                        for p in &files {
+                            let out = crate::viewers::convert::to_pdf(p.clone())
+                                .await
+                                .map_err(|e| format!("{}: {e}", p.display()))?;
+                            last = Some(out);
+                        }
+                        Ok(match (files.len(), last) {
+                            (1, Some(out)) => format!("Converted to {}", out.display()),
+                            (n, _) => format!("Converted {n} files to PDF"),
+                        })
+                    },
+                    move |r| Message::OpDone(r, vec![dir.clone()]),
+                )
+            }
+            MenuAction::MakePdf => {
+                let imgs: Vec<PathBuf> = items
+                    .into_iter()
+                    .filter(|p| Kind::of(p, false) == Kind::Image)
+                    .collect();
+                if imgs.is_empty() {
+                    return Task::none();
+                }
+                let out_dir = dir.clone();
+                Task::perform(
+                    async move {
+                        let mut data = Vec::new();
+                        for p in &imgs {
+                            data.push(
+                                tokio::fs::read(p)
+                                    .await
+                                    .map_err(|e| format!("{}: {e}", p.display()))?,
+                            );
+                        }
+                        let pdf = tokio::task::spawn_blocking(move || {
+                            crate::viewers::pdf::tools::layout::images_to_pdf(&data, None, 0.0)
+                        })
+                        .await
+                        .map_err(|e| e.to_string())??;
+                        let out = tokio::task::spawn_blocking(move || {
+                            ops::unique_name(&out_dir, "images.pdf")
+                        })
+                        .await
+                        .map_err(|e| e.to_string())?;
+                        crate::fsops::write_bytes(out.clone(), pdf).await?;
+                        Ok(format!("Made {}", out.display()))
+                    },
+                    move |r| Message::OpDone(r, vec![dir.clone()]),
+                )
+            }
+        }
+    }
+
+    /// Dropped `paths` on folder `target`: move (Ctrl = copy), or trash when
+    /// dropped on the Trash.
+    fn drop_on(&mut self, paths: Vec<PathBuf>, target: PathBuf) -> Task<Message> {
+        if target.as_os_str() == crate::tree::TRASH {
+            return self.start_job(JobSpec {
+                kind: JobKind::Trash,
+                sources: paths,
+                dest: None,
+            });
+        }
+        if self.sidebar.is_unmounted_drive(&target) {
+            self.details.record("Mount the drive first");
+            return Task::none();
+        }
+        // nothing into itself / its own subfolder / where it already is
+        let paths: Vec<PathBuf> = paths
+            .into_iter()
+            .filter(|p| !target.starts_with(p) && p.parent() != Some(target.as_path()))
+            .collect();
+        if paths.is_empty() {
+            return Task::none();
+        }
+        let kind = if self.sidebar.mods.command() {
+            JobKind::Copy
         } else {
-            format!("{} items  |  {} selected  ({})", tab.displayed().len(), n, filesystem::format_size(tab.selected_size()))
+            JobKind::Move
+        };
+        self.start_job(JobSpec {
+            kind,
+            sources: paths,
+            dest: Some(target),
+        })
+    }
+
+    /// Follow the active viewer's fullscreen wish: maximize the viewer pane
+    /// and switch the window mode.
+    fn sync_fullscreen(&mut self) -> Task<Message> {
+        let want = self.tabs.active_fullscreen();
+        if want == self.fullscreen {
+            return Task::none();
+        }
+        self.fullscreen = want;
+        let viewer = self
+            .panes
+            .iter()
+            .find(|(_, k)| **k == PaneKind::Viewer)
+            .map(|(p, _)| *p);
+        if let Some(p) = viewer {
+            if want {
+                self.panes.maximize(p);
+            } else {
+                self.panes.restore();
+            }
+        }
+        let mode = if want {
+            iced::window::Mode::Fullscreen
+        } else {
+            iced::window::Mode::Windowed
+        };
+        iced::window::get_oldest().and_then(move |id| iced::window::change_mode(id, mode))
+    }
+
+    fn sidebar_in_trash(&self, t: &Option<Target>) -> bool {
+        t.as_ref().is_some_and(|t| t.in_trash)
+    }
+
+    fn dialog_ok(&mut self) -> Task<Message> {
+        let Some(d) = self.dialog.take() else {
+            return Task::none();
+        };
+        match d {
+            Dialog::Rename { path, name } => {
+                let dir = path.parent().map(Path::to_path_buf).unwrap_or_default();
+                Task::perform(
+                    async move {
+                        tokio::task::spawn_blocking(move || {
+                            ops::rename(&path, name.trim())
+                                .map(|p| format!("Renamed to {}", p.display()))
+                        })
+                        .await
+                        .map_err(|e| e.to_string())?
+                    },
+                    move |r| Message::OpDone(r, vec![dir.clone()]),
+                )
+            }
+            Dialog::NewFolder { name, .. } | Dialog::NewFile { name, .. }
+                if name.trim().is_empty() =>
+            {
+                Task::none()
+            }
+            Dialog::NewFolder { dir, name } => {
+                let d2 = dir.clone();
+                Task::perform(
+                    async move {
+                        tokio::task::spawn_blocking(move || {
+                            ops::new_folder(&dir, name.trim())
+                                .map(|p| format!("Created {}", p.display()))
+                        })
+                        .await
+                        .map_err(|e| e.to_string())?
+                    },
+                    move |r| Message::OpDone(r, vec![d2.clone()]),
+                )
+            }
+            Dialog::NewFile { dir, name, ext } => {
+                let name = with_ext(name.trim(), ext);
+                // a new Markdown file starts with its name as the title
+                let body = if name.ends_with(".md") {
+                    let stem = name.trim_end_matches(".md");
+                    format!("# {stem}\n\n")
+                } else {
+                    String::new()
+                };
+                let d2 = dir.clone();
+                Task::perform(
+                    async move {
+                        tokio::task::spawn_blocking(move || ops::new_file_with(&dir, &name, &body))
+                            .await
+                            .map_err(|e| e.to_string())?
+                    },
+                    move |r| Message::FileCreated(r, d2.clone()),
+                )
+            }
+            Dialog::ConfirmDelete { paths } => self.start_job(JobSpec {
+                kind: JobKind::Delete,
+                sources: paths,
+                dest: None,
+            }),
+            Dialog::ConfirmEmptyTrash => Task::perform(
+                async {
+                    tokio::task::spawn_blocking(ops::empty_trash)
+                        .await
+                        .map_err(|e| e.to_string())?
+                        .map(|n| format!("Emptied trash ({n} items)"))
+                },
+                |r| Message::OpDone(r, vec![PathBuf::from(crate::tree::TRASH)]),
+            ),
+            Dialog::CloseTab { id, .. } => match self.tabs.force_close(id) {
+                Some(ev) => self.on_tabs_event(ev),
+                None => Task::none(),
+            },
+            Dialog::Conflict { .. } => Task::none(),
+            Dialog::Compress {
+                sources,
+                dir,
+                name,
+                format,
+            } => {
+                let name = name.trim();
+                if name.is_empty() || name.contains('/') {
+                    self.dialog = Some(Dialog::Compress {
+                        sources,
+                        dir,
+                        name: name.to_string(),
+                        format,
+                    });
+                    return Task::none();
+                }
+                // "x.zip" typed with zip picked: don't double the suffix
+                let base = format.strip(name).unwrap_or_else(|| name.to_string());
+                let dest = dir.join(format!("{base}{}", format.ext()));
+                self.start_archive(ArchiveJob::Compress {
+                    sources,
+                    dest,
+                    format,
+                })
+            }
+            Dialog::ExtractTo { archive, name } => {
+                let name = name.trim().to_string();
+                let parent = archive.parent().map(Path::to_path_buf);
+                match parent {
+                    Some(parent) if !name.is_empty() && !name.contains('/') => {
+                        self.start_archive(ArchiveJob::ExtractTo {
+                            dest: parent.join(name),
+                            archive,
+                            password: None,
+                        })
+                    }
+                    _ => {
+                        self.dialog = Some(Dialog::ExtractTo { archive, name });
+                        Task::none()
+                    }
+                }
+            }
+            Dialog::ArchivePassword { job, pw } => self.start_archive(job.with_password(pw)),
+            Dialog::OpenWith(d) => {
+                let (Some(id), Some(reg)) = (d.selected.clone(), self.apps.clone()) else {
+                    self.dialog = Some(Dialog::OpenWith(d));
+                    return Task::none();
+                };
+                let set_default = d.set_default;
+                let reload = if set_default {
+                    Self::load_apps()
+                } else {
+                    Task::none()
+                };
+                let launch = Task::perform(
+                    async move {
+                        tokio::task::spawn_blocking(move || {
+                            let app = reg.get(&id).ok_or("That app is gone")?;
+                            let mut note = String::new();
+                            if set_default {
+                                openwith::set_default(&reg.user_list, &d.mime, &app.id)?;
+                                note = format!(" (now the default for {})", d.mime);
+                            }
+                            openwith::launch(app, &d.files)?;
+                            Ok(format!(
+                                "Opened {} in {}{note}",
+                                openwith::describe(&d.files),
+                                app.name
+                            ))
+                        })
+                        .await
+                        .map_err(|e| e.to_string())?
+                    },
+                    |r| Message::OpDone(r, vec![]),
+                );
+                launch.chain(reload)
+            }
+            Dialog::Connect(f) => {
+                // Enter in the form = Connect / Save
+                self.dialog = Some(Dialog::Connect(f));
+                self.update_inner(Message::ConnSave)
+            }
+            Dialog::NetPassword { conn, pw, remember } => {
+                self.details.record(format!("Connecting to {}…", conn.name));
+                let c2 = conn.clone();
+                Task::perform(netb::mount(conn, Some(pw), remember), move |r| {
+                    Message::NetMountDone(c2.clone(), r, true)
+                })
+            }
         }
     }
 
-    fn move_or_copy_into(&mut self, paths: Vec<PathBuf>, target_dir: PathBuf, force_copy: bool) {
-        let kind = if force_copy { JobKind::Copy } else { JobKind::Move };
-        self.start_job(jobs::JobSpec { kind, sources: paths, dest_dir: Some(target_dir) });
-    }
-
-    fn start_search(&mut self, query: String) -> Task<Message> {
-        let active = self.active;
-        let tab = &mut self.tabs[active];
-        tab.search_query = query;
-        if let Some(h) = tab.search_handle.take() {
+    fn watcher_task(&mut self) -> Task<Message> {
+        let dirs = self.sidebar.watched_dirs();
+        if dirs == self.watched {
+            return Task::none();
+        }
+        if let Some(h) = self.watcher.take() {
             h.abort();
         }
-        tab.searching = false;
-
-        if tab.search_query.is_empty() {
-            tab.search_results.clear();
-            let n = tab.entries.len();
-            self.tabs[active].searching = false;
-            self.status_message = format!("{} items", n);
+        self.watched = dirs.clone();
+        if dirs.is_empty() {
             return Task::none();
         }
-
-        let tab = &mut self.tabs[active];
-        tab.search_results = tab.entries.iter().filter(|e| filesystem::matches_query(&e.name, &tab.search_query)).cloned().collect();
-        let n = tab.search_results.len();
-        tab.searching = true;
-        self.status_message = format!("{} results (searching subfolders...)", n);
-
-        let tab = &mut self.tabs[active];
-        let initial_dirs: std::collections::VecDeque<PathBuf> = tab.entries.iter().filter(|e| e.is_dir).map(|e| e.path.clone()).collect();
-        tab.search_gen += 1;
-        let generation = tab.search_gen;
-        let query = tab.search_query.clone();
-        let show_hidden = tab.show_hidden;
-
-        let stream = iced::stream::channel(16, move |mut sender| async move {
-            let mut queue = initial_dirs;
-            let mut found = 0usize;
-            while let Some(dir) = queue.pop_front() {
-                let query = query.clone();
-                let (matches, subdirs) = tokio::task::spawn_blocking(move || filesystem::scan_dir_search(&dir, &query, show_hidden)).await.unwrap_or_default();
-                queue.extend(subdirs);
-                if !matches.is_empty() {
-                    found += matches.len();
-                    let _ = sender.send(Message::SearchBatch(generation, matches)).await;
-                }
-                if found >= SEARCH_RESULT_CAP {
-                    break;
-                }
-            }
-            let _ = sender.send(Message::SearchDone(generation)).await;
-        });
-
-        let (task, handle) = Task::stream(stream).abortable();
-        self.active_mut().search_handle = Some(handle);
-        task
+        let (t, h) = Task::run(devices::watch_dirs(dirs), Message::DirsChanged).abortable();
+        self.watcher = Some(h);
+        t
     }
 
-    fn apply_job_event(&mut self, ev: JobEvent) {
+    pub fn update(&mut self, message: Message) -> Task<Message> {
+        let t = self.update_inner(message);
+        // after every update: persist new log lines, keep the watcher on the
+        // folders that are actually on screen
+        Task::batch([
+            t,
+            self.details.flush().map(Message::Details),
+            self.watcher_task(),
+        ])
+    }
+
+    fn sidebar_event(&mut self, ev: sidebar::Event) -> Task<Message> {
         match ev {
-            JobEvent::Progress { id, current, done_bytes, total_bytes, done_items, total_items } => {
-                if let Some(j) = self.job_by_id_mut(id) {
-                    j.current = current;
-                    j.done_bytes = done_bytes;
-                    j.total_bytes = total_bytes;
-                    j.done_items = done_items;
-                    j.total_items = total_items;
-                }
+            sidebar::Event::Open(p, k, pin) => self.open(p, k, pin),
+            sidebar::Event::Inspect(p, k) => {
+                self.details.focus = Some(p.clone());
+                self.inspector.focus(Some((p, k))).map(Message::Inspector)
             }
-            JobEvent::Conflict { id, dst, dst_is_dir, .. } => {
-                if let Some(j) = self.job_by_id_mut(id) {
-                    j.conflict = Some(ConflictUi { dst, dst_is_dir });
-                }
+            sidebar::Event::Menu(t) => {
+                self.show_menu(t);
+                Task::none()
             }
-            JobEvent::Finished { id, kind: _, undo, error, cancelled, touched_dirs } => {
-                if let Some(j) = self.job_by_id_mut(id) {
-                    j.done = true;
-                    j.cancelled = cancelled;
-                    j.error = error.clone();
-                    j.conflict = None;
-                }
-                if error.is_none() && !cancelled {
-                    if let Some(op) = undo {
-                        self.undo_stack.push(op);
-                    }
-                }
-                self.touch_dirs(&touched_dirs);
-                if let Some(e) = &error {
-                    self.status_message = format!("Error: {e}");
-                }
+            sidebar::Event::Mount(d) => {
+                let id = d.id.clone();
+                let label = d.label;
+                Task::perform(
+                    async move {
+                        devices::mount(&id)
+                            .await
+                            .map(|p| format!("Mounted {label} at {}", p.display()))
+                    },
+                    Message::DriveDone,
+                )
             }
+            sidebar::Event::DiskUsage(root) => self.open_disk_usage(root),
+            sidebar::Event::Net(act) => match act {
+                crate::tree::NetAct::ConnectNew => {
+                    self.dialog = Some(Dialog::Connect(Box::new(netui::Form::new())));
+                    text_input::focus(text_input::Id::new(netui::URL_ID))
+                }
+                crate::tree::NetAct::Discovered(d) => {
+                    self.dialog = Some(Dialog::Connect(Box::new(netui::Form::from_conn(
+                        &d.to_conn(),
+                        None,
+                    ))));
+                    Task::none()
+                }
+                crate::tree::NetAct::Mount(c) => self.start_mount(c, true),
+            },
+            sidebar::Event::EmptyTrash => {
+                self.dialog = Some(Dialog::ConfirmEmptyTrash);
+                Task::none()
+            }
+            sidebar::Event::Status(s) => {
+                self.details.record(s);
+                Task::none()
+            }
+            sidebar::Event::ToggleFocus => self.update_inner(Message::ToggleFocus),
         }
     }
 
-    fn undo(&mut self) -> Task<Message> {
-        let Some(op) = self.undo_stack.pop() else {
-            self.status_message = "Nothing to undo".to_string();
-            return Task::none();
-        };
-        self.status_message = op.describe();
-        let mut touched = Vec::new();
-        match op {
-            UndoOp::Copied(paths) => {
-                for p in &paths {
-                    if let Some(parent) = p.parent() {
-                        touched.push(parent.to_path_buf());
-                    }
-                    let _ = jobs::remove_any(p);
-                }
-            }
-            UndoOp::Moved(pairs) => {
-                for (from, to) in &pairs {
-                    if let Some(p) = from.parent() {
-                        touched.push(p.to_path_buf());
-                    }
-                    if let Some(p) = to.parent() {
-                        touched.push(p.to_path_buf());
-                    }
-                    let _ = std::fs::rename(to, from);
-                }
-            }
-            UndoOp::Trashed(pairs) => {
-                for (original, trashed) in &pairs {
-                    if let Some(p) = original.parent() {
-                        touched.push(p.to_path_buf());
-                    }
-                    let _ = filesystem::restore_to(trashed, original);
-                }
-            }
-            UndoOp::Renamed { from, to } => {
-                if let Some(p) = to.parent() {
-                    touched.push(p.to_path_buf());
-                }
-                let _ = std::fs::rename(&to, &from);
-            }
-            UndoOp::Created(p) => {
-                if let Some(parent) = p.parent() {
-                    touched.push(parent.to_path_buf());
-                }
-                let _ = jobs::remove_any(&p);
-            }
-        }
-        self.touch_dirs(&touched);
-        Task::none()
-    }
-
-    fn handle_key(&mut self, key: iced::keyboard::Key) -> Task<Message> {
-        use iced::keyboard::key::{Key, Named};
-        let ctrl = self.modifiers.control();
-        let shift = self.modifiers.shift();
-        let renaming = self.context_menu.as_ref().is_some_and(|c| c.renaming);
-        let editing_path = self.active().path_edit.is_some();
-        if renaming || editing_path {
-            return Task::none();
-        }
-
-        match &key {
-            Key::Named(Named::ArrowLeft) if ctrl => return self.update(Message::NavigateBack),
-            Key::Named(Named::ArrowRight) if ctrl => return self.update(Message::NavigateForward),
-            Key::Named(Named::ArrowLeft) => self.active_mut().move_cursor(-1, shift, false),
-            Key::Named(Named::ArrowRight) => self.active_mut().move_cursor(1, shift, false),
-            Key::Named(Named::ArrowUp) => {
-                let stride = self.active().row_stride();
-                self.active_mut().move_cursor(-stride, shift, false);
-            }
-            Key::Named(Named::ArrowDown) => {
-                let stride = self.active().row_stride();
-                self.active_mut().move_cursor(stride, shift, false);
-            }
-            Key::Named(Named::Home) => self.active_mut().cursor_home(shift, false),
-            Key::Named(Named::End) => self.active_mut().cursor_end(shift, false),
-            Key::Named(Named::Enter) => {
-                if let Some(entry) = self.active().cursor_entry().cloned() {
-                    if entry.is_dir {
-                        return self.navigate(entry.path);
-                    } else {
-                        filesystem::open_default(&entry.path);
-                    }
-                }
-            }
-            Key::Named(Named::Backspace) => return self.update(Message::NavigateUp),
-            Key::Named(Named::Delete) if shift => return self.update(Message::DeletePermanently),
-            Key::Named(Named::Delete) => return self.update(Message::Delete),
-            Key::Named(Named::F2) => {
-                if let Some(entry) = self.active().cursor_entry().cloned() {
-                    self.context_menu = Some(ContextMenu {
-                        kind: ContextMenuKind::Entry { path: entry.path.clone(), is_dir: entry.is_dir },
-                        renaming: false,
-                        rename_text: String::new(),
+    fn update_inner(&mut self, message: Message) -> Task<Message> {
+        match message {
+            Message::Sidebar(m) => {
+                let (task, ev) = self.sidebar.update(m);
+                if let Some(paths) = self.sidebar.pressed.take() {
+                    self.drag = Some(Drag {
+                        paths,
+                        origin: self.cursor,
+                        active: false,
                     });
-                    return self.update(Message::RenameStart);
                 }
+                let follow = ev.map(|e| self.sidebar_event(e)).unwrap_or_else(Task::none);
+                Task::batch([task.map(Message::Sidebar), follow])
             }
-            Key::Named(Named::F5) => return self.update(Message::Refresh),
-            Key::Named(Named::Escape) => {
-                self.context_menu = None;
-                self.open_with = None;
-                self.confirm = None;
-            }
-            Key::Character(c) if ctrl && c.as_str() == "a" => return self.update(Message::SelectAll),
-            Key::Character(c) if ctrl && c.as_str() == "c" => return self.update(Message::Copy),
-            Key::Character(c) if ctrl && c.as_str() == "x" => return self.update(Message::Cut),
-            Key::Character(c) if ctrl && c.as_str() == "v" => return self.update(Message::Paste),
-            Key::Character(c) if ctrl && c.as_str() == "z" => return self.update(Message::Undo),
-            Key::Character(c) if ctrl && c.as_str() == "t" => return self.update(Message::TabNew),
-            Key::Character(c) if ctrl && c.as_str() == "w" => return self.update(Message::TabClose(self.active)),
-            Key::Character(c) if ctrl && matches!(c.as_str(), "+" | "=") => self.active_mut().zoom_in(),
-            Key::Character(c) if ctrl && c.as_str() == "-" => self.active_mut().zoom_out(),
-            Key::Character(c) if !ctrl && c.chars().count() == 1 => {
-                let ch = c.chars().next().unwrap();
-                if ch.is_alphanumeric() {
-                    self.active_mut().type_ahead(ch);
+            Message::Key(k) => {
+                if self.dialog.is_some() || self.menu.is_some() {
+                    if k == sidebar::Key::Escape {
+                        self.dialog = None;
+                        self.menu = None;
+                    }
+                    return Task::none();
                 }
+                let (task, ev) = self.sidebar.key(k);
+                let follow = ev.map(|e| self.sidebar_event(e)).unwrap_or_else(Task::none);
+                Task::batch([task.map(Message::Sidebar), follow])
             }
-            _ => {}
-        }
-        Task::none()
-    }
-
-    pub fn view(&self) -> Element<Message> {
-        let tab = self.active();
-        let titles: Vec<String> = self.tabs.iter().map(|t| t.title()).collect();
-        let tab_strip = tabstrip::view(titles, self.active);
-
-        let display_path = tab.path.to_string_lossy().to_string();
-        let tb = toolbar::view(
-            !tab.history.is_empty(),
-            !tab.forward.is_empty(),
-            display_path,
-            tab.path_edit.as_deref(),
-            &tab.search_query,
-            tab.view_mode,
-            tab.show_hidden,
-            tab.searching,
-        );
-
-        let sb = sidebar::view(
-            &tab.path,
-            &self.fixed_devices,
-            &self.network_drives,
-            &self.removable,
-            &self.recent,
-            &self.bookmarks,
-            self.sidebar_width,
-            self.drop_hover.as_ref(),
-        );
-
-        let file_area_width = self.window_size.width - self.sidebar_width - DIVIDER_WIDTH - self.preview_width - DIVIDER_WIDTH;
-        let overlay_open = self.context_menu.is_some() || self.open_with.is_some() || self.confirm.is_some();
-        let file_area = filelist::view(
-            tab.displayed(),
-            &tab.selected,
-            tab.cursor,
-            tab.view_mode,
-            file_area_width,
-            tab.sort_by,
-            tab.sort_asc,
-            overlay_open,
-            if self.file_drag.is_some() { self.drop_hover.as_ref() } else { None },
-            tab.card_size(),
-            &self.items_per_row,
-            tab.scroll_offset,
-            tab.viewport_height,
-        );
-
-        let status_str = self.selection_status();
-        let path_str = tab.path.to_string_lossy().to_string();
-        let status_bar = container(
-            row![
-                text(status_str).size(12).style(theme::muted_text),
-                Space::with_width(Length::Fill),
-                text(path_str).size(12).style(theme::muted_text),
-            ]
-            .spacing(8)
-            .padding([4, 12]),
-        )
-        .width(Length::Fill)
-        .style(theme::panel);
-
-        let mut main_children: Vec<Element<Message>> = vec![sb, pane_divider(PaneDrag::Sidebar), file_area];
-        main_children.push(pane_divider(PaneDrag::Preview));
-        main_children.push(self.preview_panel());
-        let main_content = row(main_children).width(Length::Fill).height(Length::Fill);
-
-        let base = column![tab_strip, tb, main_content, status_bar].width(Length::Fill).height(Length::Fill);
-        let root: Element<Message> = container(base).width(Length::Fill).height(Length::Fill).style(theme::main_bg).into();
-
-        let root = if let Some(cm) = &self.context_menu { self.context_menu_overlay(root, cm) } else { root };
-        let root = if let Some(dlg) = &self.open_with { self.open_with_overlay(root, dlg) } else { root };
-        let root = if let Some(dlg) = &self.confirm { self.confirm_overlay(root, dlg) } else { root };
-
-        let root = if let Some(job) = self.jobs.iter().find(|j| j.conflict.is_some()) {
-            if let Some(dialog) = jobs_panel::conflict_dialog(job) {
-                iced::widget::stack![root, dialog].into()
-            } else {
-                root
+            Message::Tabs(m) => {
+                let (task, ev) = self.tabs.update(m);
+                let follow = ev.map(|e| self.on_tabs_event(e)).unwrap_or_else(Task::none);
+                Task::batch([task.map(Message::Tabs), follow, self.sync_fullscreen()])
             }
-        } else {
-            root
-        };
-
-        let root = if let Some(toasts) = jobs_panel::toasts(&self.jobs) {
-            iced::widget::stack![root, toasts].into()
-        } else {
-            root
-        };
-
-        let root = if let Some(paths) = &self.file_drag {
-            let ghost = drag_ghost_files(paths);
-            og_drag::with_drag_ghost(root, Some(ghost), self.cursor_pos, iced::Vector::new(14.0, 14.0))
-        } else {
-            root
-        };
-
-        let root = if self.external_drag_over {
-            external_drop_overlay(root)
-        } else {
-            root
-        };
-
-        if self.pane_drag.is_some() {
-            drag_ghost_line(root, self.drag_preview_x)
-        } else {
-            root
-        }
-    }
-
-    fn preview_panel(&self) -> Element<Message> {
-        let Some(d) = self.preview.as_ref() else {
-            return container(container(text("No selection").size(13).style(theme::muted_text)).center_x(Length::Fill).center_y(Length::Fill))
-                .width(self.preview_width)
-                .height(Length::Fill)
-                .style(theme::panel)
-                .into();
-        };
-
-        let icon = filesystem::icon_for(&d.mime_type, d.is_dir);
-        let mut col = column![].spacing(10).padding(12).width(Length::Fill);
-
-        let thumb = if !d.is_dir && crate::thumbs::wants_thumbnail(&d.mime_type) {
-            crate::thumbs::get(&d.path, &d.mime_type).flatten()
-        } else {
-            None
-        };
-
-        if let Some(thumb_path) = thumb {
-            col = col.push(container(image(image::Handle::from_path(thumb_path)).width(Length::Fill).content_fit(iced::ContentFit::Contain)).center_x(Length::Fill).max_height(220));
-        } else {
-            col = col.push(container(text(icon).font(ICON_FONT).size(40).style(theme::normal_text)).center_x(Length::Fill));
-        }
-
-        col = col.push(selectable_text(&d.name, 14));
-        col = col.push(context_sep());
-        col = col.push(detail_row("Type", if d.is_dir { "Folder".to_string() } else { d.mime_type.clone() }));
-        if d.is_dir {
-            if let Some(n) = d.item_count {
-                col = col.push(detail_row("Items", n.to_string()));
-            }
-        } else {
-            col = col.push(detail_row("Size", format!("{} ({} bytes)", filesystem::format_size(d.size), d.size)));
-        }
-        if let Some((w, h)) = d.dimensions {
-            col = col.push(detail_row("Dimensions", format!("{} x {}", w, h)));
-        }
-        let fmt_dt = |dt: chrono::DateTime<chrono::Local>| dt.format("%Y-%m-%d %H:%M:%S").to_string();
-        col = col.push(detail_row("Modified", d.modified.map(fmt_dt).unwrap_or_else(|| "-".to_string())));
-        col = col.push(detail_row("Created", d.created.map(fmt_dt).unwrap_or_else(|| "-".to_string())));
-        col = col.push(detail_row("Accessed", d.accessed.map(fmt_dt).unwrap_or_else(|| "-".to_string())));
-        col = col.push(detail_row("Permissions", format!("{} ({})", d.permissions, d.mode_octal)));
-        col = col.push(detail_row("Owner", format!("{} : {}", d.owner, d.group)));
-        if let Some(target) = &d.symlink_target {
-            col = col.push(detail_row("Links To", target.to_string_lossy().to_string()));
-        }
-        col = col.push(detail_row("Path", d.path.to_string_lossy().to_string()));
-
-        if !d.exif.is_empty() {
-            col = col.push(context_sep());
-            col = col.push(text("Metadata").size(11).style(theme::muted_text));
-            for tag in &d.exif {
-                col = col.push(detail_row(&tag.label, tag.value.clone()));
-            }
-        }
-
-        container(iced::widget::scrollable(col)).width(self.preview_width).height(Length::Fill).style(theme::panel).into()
-    }
-
-    fn confirm_overlay<'a>(&'a self, base: Element<'a, Message>, dlg: &'a ConfirmDialog) -> Element<'a, Message> {
-        use iced::widget::stack;
-        let yes_btn = button(text("Delete").size(13)).on_press(Message::ConfirmYes).padding([6, 14]).style(theme::danger_button);
-        let no_btn = button(text("Cancel").size(13)).on_press(Message::ConfirmNo).padding([6, 14]).style(theme::flat_button);
-        let dialog = container(
-            column![text(&dlg.message).size(14).style(theme::normal_text), row![Space::with_width(Length::Fill), no_btn, yes_btn].spacing(8)]
-                .spacing(16)
-                .padding(16)
-                .width(320),
-        )
-        .style(theme::dialog_box);
-        let overlay = container(dialog).width(Length::Fill).height(Length::Fill).center_x(Length::Fill).center_y(Length::Fill).style(theme::scrim);
-        stack![base, overlay].into()
-    }
-
-    fn open_with_overlay<'a>(&'a self, base: Element<'a, Message>, dlg: &'a OpenWithDialog) -> Element<'a, Message> {
-        use iced::widget::stack;
-        let search_lower = dlg.search.to_lowercase();
-        let matches = |app: &AppEntry| search_lower.is_empty() || app.name.to_lowercase().contains(&search_lower);
-
-        let mut matched: Vec<&AppEntry> = crate::desktop::apps_for_file(&dlg.path, &self.app_registry).into_iter().filter(|a| matches(a)).collect();
-        matched.sort_by(|a, b| a.name.cmp(&b.name));
-        let matched_ids: HashSet<&str> = matched.iter().map(|a| a.desktop_id.as_str()).collect();
-        let mut others: Vec<&AppEntry> = self.app_registry.iter().filter(|a| !matched_ids.contains(a.desktop_id.as_str()) && matches(a)).collect();
-        others.sort_by(|a, b| a.name.cmp(&b.name));
-        let default_id = default_app_for_file(&dlg.path);
-
-        let search = text_input("Search apps...", &dlg.search).on_input(Message::OpenWithSearch).size(13).style(theme::input_style);
-
-        let mut list = column![].spacing(2);
-        if matched.is_empty() && others.is_empty() {
-            list = list.push(text("No matching apps").size(13).style(theme::muted_text));
-        }
-        if !matched.is_empty() {
-            list = list.push(text("Recommended").size(11).style(theme::muted_text));
-            for app in &matched {
-                list = list.push(open_with_row(&dlg.path, &dlg.mime, app, default_id.as_deref() == Some(app.desktop_id.as_str())));
-            }
-        }
-        if !others.is_empty() {
-            list = list.push(text("Other Applications").size(11).style(theme::muted_text));
-            for app in &others {
-                list = list.push(open_with_row(&dlg.path, &dlg.mime, app, default_id.as_deref() == Some(app.desktop_id.as_str())));
-            }
-        }
-
-        let dialog = container(
-            column![text("Open With").size(15).style(theme::normal_text), search, iced::widget::scrollable(list).height(Length::Fixed(320.0)), context_btn("Close", Message::OpenWithClose)]
-                .spacing(10)
-                .padding(14)
-                .width(360),
-        )
-        .style(theme::dialog_box);
-        let overlay = container(dialog).width(Length::Fill).height(Length::Fill).center_x(Length::Fill).center_y(Length::Fill).style(theme::scrim);
-        stack![base, overlay].into()
-    }
-
-    fn context_menu_overlay<'a>(&'a self, base: Element<'a, Message>, cm: &'a ContextMenu) -> Element<'a, Message> {
-        use iced::widget::stack;
-        let has_clipboard = self.clipboard.is_some();
-        let multi = self.active().selected.len() > 1;
-        let mut menu_col = column![].spacing(2).padding(6).width(220);
-        let mut item_count = 0usize;
-
-        if cm.renaming {
-            let rename_input = text_input("New name...", &cm.rename_text).on_input(Message::RenameText).on_submit(Message::RenameSubmit).size(13).style(theme::input_style);
-            menu_col = menu_col.push(rename_input);
-            menu_col = menu_col.push(context_btn("Confirm Rename", Message::RenameSubmit));
-            item_count += 2;
-        } else {
-            match &cm.kind {
-                ContextMenuKind::Entry { path, is_dir } => {
-                    if self.active().is_trash() {
-                        menu_col = menu_col.push(context_btn("Restore", Message::RestoreFromTrash(path.clone())));
-                        menu_col = menu_col.push(context_btn("Delete Permanently", Message::DeletePermanently));
-                        item_count += 2;
-                    } else {
-                        menu_col = menu_col.push(context_btn("Open", Message::OpenDefault(path.clone())));
-                        item_count += 1;
-                        if !*is_dir {
-                            menu_col = menu_col.push(context_btn("Open With...", Message::OpenWithBrowse(path.clone())));
-                            menu_col = menu_col.push(context_btn("Open in Terminal", Message::OpenInTerminalWithPath(path.clone())));
-                            item_count += 2;
+            Message::RawKey(key, mods) => {
+                let esc = matches!(key.as_ref(), Key::Named(key::Named::Escape));
+                if self.dialog.is_none() && self.menu.is_none() {
+                    if self.focus_pane == PaneKind::Viewer {
+                        if let Some(t) = self.tabs.key(&key, mods) {
+                            return Task::batch([t.map(Message::Tabs), self.sync_fullscreen()]);
                         }
-                        menu_col = menu_col.push(context_sep());
-                        menu_col = menu_col.push(context_btn(if multi { "Cut (selected)" } else { "Cut" }, Message::Cut));
-                        menu_col = menu_col.push(context_btn(if multi { "Copy (selected)" } else { "Copy" }, Message::Copy));
-                        menu_col = menu_col.push(context_btn(if multi { "Duplicate (selected)" } else { "Duplicate" }, Message::Duplicate));
-                        item_count += 3;
-                        if has_clipboard {
-                            menu_col = menu_col.push(context_btn("Paste Into Folder", Message::Paste));
-                            item_count += 1;
-                        }
-                        if !multi {
-                            menu_col = menu_col.push(context_btn("Rename", Message::RenameStart));
-                            item_count += 1;
-                        }
-                        menu_col = menu_col.push(context_btn("Copy Path", Message::CopyPath(path.clone())));
-                        menu_col = menu_col.push(context_btn("Copy Name", Message::CopyName(path.clone())));
-                        item_count += 2;
-                        if *is_dir {
-                            menu_col = menu_col.push(context_btn("Open Terminal Here", Message::OpenTerminalHere(path.clone())));
-                            let bookmarked = self.bookmarks.contains(path);
-                            menu_col = menu_col.push(context_btn(if bookmarked { "Remove from Sidebar" } else { "Add to Sidebar" }, Message::ToggleBookmark(path.clone())));
-                            item_count += 2;
-                        } else if filesystem::is_archive(path) {
-                            menu_col = menu_col.push(context_btn("Extract Here", Message::Extract(path.clone())));
-                            item_count += 1;
-                        }
-                        menu_col = menu_col.push(context_btn("Compress to .zip", Message::CompressZip));
-                        menu_col = menu_col.push(context_btn("Compress to .tar.gz", Message::Compress));
-                        item_count += 2;
-                        menu_col = menu_col.push(context_sep());
-                        menu_col = menu_col.push(context_btn("Delete (Trash)", Message::Delete));
-                        menu_col = menu_col.push(context_btn("Delete Permanently", Message::DeletePermanently));
-                        item_count += 2;
+                    }
+                    if esc && self.fullscreen {
+                        self.tabs.set_fullscreen(false);
+                        return self.sync_fullscreen();
                     }
                 }
-                ContextMenuKind::Background => {
-                    if self.active().is_trash() {
-                        menu_col = menu_col.push(context_btn("Empty Trash", Message::EmptyTrash));
-                        item_count += 1;
-                    } else {
-                        menu_col = menu_col.push(context_btn("New Folder", Message::NewFolder));
-                        menu_col = menu_col.push(context_btn("New File", Message::NewFile));
-                        item_count += 2;
-                        if has_clipboard {
-                            menu_col = menu_col.push(context_btn("Paste", Message::Paste));
-                            item_count += 1;
-                        }
-                        menu_col = menu_col.push(context_btn("Open Terminal Here", Message::OpenTerminalHere(self.active().path.clone())));
-                        menu_col = menu_col.push(context_btn("Copy Path", Message::CopyPath(self.active().path.clone())));
-                        let bookmarked = self.bookmarks.contains(&self.active().path);
-                        menu_col = menu_col.push(context_btn(if bookmarked { "Remove from Sidebar" } else { "Add to Sidebar" }, Message::ToggleBookmark(self.active().path.clone())));
-                        item_count += 3;
-                    }
-                    menu_col = menu_col.push(context_sep());
-                    menu_col = menu_col.push(context_btn("Select All", Message::SelectAll));
-                    item_count += 2;
-
-                    let sort_label = |label: &str, by: SortBy| {
-                        let t = if self.active().sort_by == by { format!("{}  {}", label, if self.active().sort_asc { "\u{25b2}" } else { "\u{25bc}" }) } else { label.to_string() };
-                        context_btn(&t, Message::SortChanged(by))
-                    };
-                    menu_col = menu_col.push(context_sep());
-                    menu_col = menu_col.push(sort_label("Sort by Name", SortBy::Name));
-                    menu_col = menu_col.push(sort_label("Sort by Size", SortBy::Size));
-                    menu_col = menu_col.push(sort_label("Sort by Modified", SortBy::Modified));
-                    menu_col = menu_col.push(sort_label("Sort by Kind", SortBy::Kind));
-                    let group_label = if self.active().group_folders { "Folders Grouped First \u{2713}" } else { "Folders Mixed With Files" };
-                    menu_col = menu_col.push(context_btn(group_label, Message::ToggleGroupFolders));
-                    item_count += 5;
-
-                    menu_col = menu_col.push(context_sep());
-                    let hidden_label = if self.active().show_hidden { "Hide Hidden Files" } else { "Show Hidden Files" };
-                    menu_col = menu_col.push(context_btn(hidden_label, Message::ShowHiddenToggle));
-                    menu_col = menu_col.push(context_btn("Refresh", Message::Refresh));
-                    item_count += 3;
+                match files_key(key, mods) {
+                    Some(m) => self.update_inner(m),
+                    None => Task::none(),
                 }
             }
-            menu_col = menu_col.push(context_sep());
-            menu_col = menu_col.push(context_btn("Close Menu", Message::ContextMenuClose));
-            item_count += 2;
+            Message::PaneHover(p, entered) => {
+                if entered {
+                    self.hover_pane = Some(p);
+                } else if self.hover_pane == Some(p) {
+                    // a leave can arrive after the next pane's enter
+                    self.hover_pane = None;
+                }
+                Task::none()
+            }
+            Message::MouseDown => {
+                if let Some(p) = self.hover_pane {
+                    self.focus_pane = p;
+                }
+                Task::none()
+            }
+            Message::Inspector(m) => {
+                self.inspector.update(m);
+                Task::none()
+            }
+            Message::Details(m) => self.details.update(m).map(Message::Details),
+            Message::PaneResized(pane_grid::ResizeEvent { split, ratio }) => {
+                self.panes.resize(split, ratio);
+                if Some(split) == self.inspector_split && ratio < 0.97 {
+                    self.inspector_ratio = ratio;
+                }
+                if Some(split) == self.left_split && ratio > 0.05 {
+                    if ratio < 0.7 {
+                        self.left_ratio = ratio;
+                    }
+                    self.left_size = LeftSize::Normal;
+                    self.sidebar.focused = false;
+                }
+                Task::none()
+            }
+            Message::ToggleLeft => {
+                let to = if self.left_size == LeftSize::Collapsed {
+                    LeftSize::Normal
+                } else {
+                    LeftSize::Collapsed
+                };
+                self.set_left(to)
+            }
+            Message::ToggleFocus => {
+                let to = if self.left_size == LeftSize::Focus {
+                    LeftSize::Normal
+                } else {
+                    LeftSize::Focus
+                };
+                self.set_left(to)
+            }
+            Message::Search => {
+                let show = if self.left_size == LeftSize::Collapsed {
+                    self.set_left(LeftSize::Normal)
+                } else {
+                    Task::none()
+                };
+                Task::batch([show, self.sidebar.open_search().map(Message::Sidebar)])
+            }
+            Message::EditPath => self.sidebar.edit_path().map(Message::Sidebar),
+            Message::Save => self.tabs.save_active().map(Message::Tabs),
+            Message::ToggleEdit => self.tabs.toggle_edit_active().map(Message::Tabs),
+            Message::CloseTab => match self.tabs.close_active() {
+                Some(ev) => self.on_tabs_event(ev),
+                None => Task::none(),
+            },
+            Message::Modifiers(m) => {
+                self.sidebar.mods = m;
+                Task::none()
+            }
+            Message::Cursor(p) => {
+                self.cursor = p;
+                if let Some(d) = &mut self.drag {
+                    if !d.active
+                        && (p.x - d.origin.x).hypot(p.y - d.origin.y) > DRAG_START
+                        && !d.paths.is_empty()
+                    {
+                        d.active = true;
+                        self.sidebar.sel.dragging = true;
+                    }
+                }
+                // While the button is held, Wayland keeps the pointer grabbed
+                // by our window: there is no CursorLeft until release, but
+                // motion keeps coming with positions at/past the edge. That's
+                // where an in-app drag becomes a drag to other apps.
+                if self.drag.as_ref().is_some_and(|d| d.active) && at_edge(p, self.win_size) {
+                    self.drag_out();
+                }
+                Task::none()
+            }
+            Message::WinResized(size) => {
+                self.win_size = size;
+                Task::none()
+            }
+            Message::MouseUp => {
+                let drag = self.drag.take();
+                let dragged = drag.as_ref().is_some_and(|d| d.active);
+                let target = self.sidebar.drop_target();
+                self.sidebar.mouse_up(dragged);
+                match (drag, target) {
+                    (Some(d), Some(t)) if d.active => self.drop_on(d.paths, t),
+                    _ => Task::none(),
+                }
+            }
+            Message::Menu(a) => self.action(a),
+            Message::Shortcut(a) => {
+                if self.dialog.is_some() {
+                    return Task::none();
+                }
+                self.menu = None;
+                self.action(a)
+            }
+            Message::MenuClose => {
+                self.menu = None;
+                Task::none()
+            }
+            Message::BackgroundMenu => {
+                self.sidebar.sel.clear();
+                let dir = self.sidebar.current_dir();
+                self.show_menu(Target {
+                    net: None,
+                    items: vec![],
+                    dir,
+                    drive: None,
+                    in_trash: false,
+                    bookmarked: false,
+                });
+                Task::none()
+            }
+            Message::DialogInput(s) => {
+                match &mut self.dialog {
+                    Some(
+                        Dialog::Rename { name, .. }
+                        | Dialog::NewFolder { name, .. }
+                        | Dialog::NewFile { name, .. }
+                        | Dialog::Compress { name, .. }
+                        | Dialog::ExtractTo { name, .. },
+                    ) => *name = s,
+                    Some(Dialog::NetPassword { pw, .. } | Dialog::ArchivePassword { pw, .. }) => {
+                        *pw = s
+                    }
+                    Some(Dialog::OpenWith(d)) => {
+                        let q = s.to_lowercase();
+                        d.filtered = d
+                            .all
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, (id, n))| {
+                                q.is_empty()
+                                    || n.to_lowercase().contains(&q)
+                                    || id.to_lowercase().contains(&q)
+                            })
+                            .map(|(i, _)| i)
+                            .collect();
+                        d.query = s;
+                        d.show_all = true;
+                    }
+                    _ => {}
+                }
+                Task::none()
+            }
+            Message::DialogFlag(b) => {
+                match &mut self.dialog {
+                    Some(Dialog::Conflict { all, .. }) => *all = b,
+                    Some(Dialog::NetPassword { remember, .. }) => *remember = b,
+                    Some(Dialog::OpenWith(d)) => d.set_default = b,
+                    _ => {}
+                }
+                Task::none()
+            }
+            Message::DialogOk => self.dialog_ok(),
+            Message::DialogResolve(r) => {
+                if let Some(Dialog::Conflict { job, all, .. }) = self.dialog.take() {
+                    if let Some(j) = self.jobs.iter().find(|j| j.id == job) {
+                        j.control.resolve(r, all);
+                    }
+                }
+                Task::none()
+            }
+            Message::DialogCancel => {
+                if let Some(Dialog::Conflict { job, .. }) = self.dialog.take() {
+                    if let Some(j) = self.jobs.iter().find(|j| j.id == job) {
+                        j.control.resolve(Resolution::Cancel, false);
+                    }
+                }
+                Task::none()
+            }
+            Message::Undo => match self.undo.pop() {
+                Some(op) => {
+                    self.details.record("Undo");
+                    self.start_job(ops::undo_spec(&op))
+                }
+                None => {
+                    self.details.record("Nothing to undo");
+                    Task::none()
+                }
+            },
+            Message::Job(ev) => self.on_job(ev),
+            Message::JobCancel(id) => {
+                if let Some(j) = self.jobs.iter().find(|j| j.id == id) {
+                    j.control.cancel();
+                }
+                Task::none()
+            }
+            Message::FileCreated(r, dir) => {
+                let refresh = self.sidebar.refresh(&[dir]).map(Message::Sidebar);
+                match r {
+                    Ok(p) => {
+                        self.details
+                            .record_for(format!("Created {}", p.display()), Some(&p));
+                        let k = Kind::of(&p, false);
+                        let (t, ev) = self.tabs.open_to_edit(p, k);
+                        Task::batch([refresh, t.map(Message::Tabs), self.on_tabs_event(ev)])
+                    }
+                    Err(e) => {
+                        self.details.record(format!("Failed: {e}"));
+                        refresh
+                    }
+                }
+            }
+            Message::OpDone(r, dirs) => {
+                match r {
+                    Ok(s) => self.details.record(s),
+                    Err(e) => self.details.record(format!("Failed: {e}")),
+                }
+                self.sidebar.refresh(&dirs).map(Message::Sidebar)
+            }
+            Message::Drives(r) => {
+                match r {
+                    Ok(d) => self.sidebar.set_drives(d),
+                    Err(e) => self.details.record(format!("Drives: {e}")),
+                }
+                Task::none()
+            }
+            Message::DrivesChanged => Task::perform(devices::list(), Message::Drives),
+            Message::DriveDone(r) => {
+                match r {
+                    Ok(s) => self.details.record(s),
+                    Err(e) => self.details.record(format!("Drive: {e}")),
+                }
+                Task::perform(devices::list(), Message::Drives)
+            }
+            Message::DirsChanged(dirs) => self.sidebar.refresh(&dirs).map(Message::Sidebar),
+            Message::DndReady(r) => match r {
+                Ok(d) => {
+                    self.dnd = Some(d.clone());
+                    Task::run(crate::extdnd::drops(d), Message::ExtDrop)
+                }
+                // standalone build / not Wayland: in-app drag and drop only
+                Err(_) => Task::none(),
+            },
+            Message::ExtDrop(ev) => {
+                use crate::extdnd::DropEvent as E;
+                match ev {
+                    E::Enter { .. } | E::Motion { .. } => {
+                        self.ext_hover = true;
+                        Task::none()
+                    }
+                    E::Leave => {
+                        self.ext_hover = false;
+                        Task::none()
+                    }
+                    E::Dropped { paths, .. } => {
+                        self.ext_hover = false;
+                        // the compositor owns the pointer during an external drag,
+                        // so per-folder targeting isn't available: copy into the
+                        // folder being viewed
+                        let dir = self.sidebar.current_dir();
+                        let paths: Vec<PathBuf> = paths
+                            .into_iter()
+                            .filter(|p| p.parent() != Some(dir.as_path()))
+                            .collect();
+                        self.start_job(JobSpec {
+                            kind: JobKind::Copy,
+                            sources: paths,
+                            dest: Some(dir),
+                        })
+                    }
+                }
+            }
+            Message::CursorLeft => {
+                // X11 and others do report leaving during a drag
+                self.drag_out();
+                Task::none()
+            }
+            Message::NetLoaded(conns, backend, ssh_hosts) => {
+                self.net_saved = conns;
+                self.net_backend = backend;
+                self.net_ssh = ssh_hosts;
+                self.push_network();
+                // connect the ones marked "connect when og-files starts"
+                let auto: Vec<Conn> = self
+                    .net_saved
+                    .iter()
+                    .filter(|c| c.auto_mount)
+                    .cloned()
+                    .collect();
+                let mut tasks = vec![Self::refresh_mounted()];
+                if self.net_backend.is_ok() {
+                    for c in auto {
+                        tasks.push(self.start_mount(c, false));
+                    }
+                }
+                Task::batch(tasks)
+            }
+            Message::NetMountedNow(m) => {
+                self.net_mounted = m;
+                self.push_network();
+                Task::none()
+            }
+            Message::NetTailnet(r) => {
+                if let Ok(peers) = r {
+                    self.net_tailnet = peers;
+                    self.push_network();
+                }
+                Task::none()
+            }
+            Message::NetLan(ev) => {
+                match ev {
+                    LanEvent::Found(d) => {
+                        if !self
+                            .net_lan
+                            .iter()
+                            .any(|x| x.name == d.name && x.proto == d.proto)
+                        {
+                            self.net_lan.push(d);
+                        }
+                    }
+                    LanEvent::Lost { name, proto } => self
+                        .net_lan
+                        .retain(|x| !(x.name == name && x.proto == proto)),
+                }
+                self.push_network();
+                Task::none()
+            }
+            Message::NetRefresh => Task::batch([
+                Task::perform(netb::discover_tailnet(), Message::NetTailnet),
+                Self::refresh_mounted(),
+            ]),
+            Message::NetNeedPassword(c, need, interactive) => {
+                if need {
+                    self.dialog = Some(Dialog::NetPassword {
+                        conn: c,
+                        pw: String::new(),
+                        remember: true,
+                    });
+                    text_input::focus(text_input::Id::new(DIALOG_INPUT))
+                } else {
+                    self.details.record(format!("Connecting to {}…", c.name));
+                    let c2 = c.clone();
+                    Task::perform(netb::mount(c, None, false), move |r| {
+                        Message::NetMountDone(c2.clone(), r, interactive)
+                    })
+                }
+            }
+            Message::NetMountDone(c, r, interactive) => {
+                let follow = match r {
+                    Ok(p) => {
+                        self.details.record_for(
+                            format!("Connected {} at {}", c.name, netui::short(&p)),
+                            Some(&p),
+                        );
+                        self.net_mounted.retain(|(id, _)| *id != c.id);
+                        self.net_mounted.push((c.id.clone(), p.clone()));
+                        self.push_network();
+                        if interactive {
+                            self.sidebar.reveal(p).map(Message::Sidebar)
+                        } else {
+                            Task::none()
+                        }
+                    }
+                    Err(e) => {
+                        self.details
+                            .record(format!("Couldn't connect {}: {e}", c.name));
+                        Task::none()
+                    }
+                };
+                Task::batch([follow, Self::refresh_mounted()])
+            }
+            Message::NetUnmountDone(c, r, then_remove) => {
+                match r {
+                    Ok(()) => {
+                        self.details.record(format!("Disconnected {}", c.name));
+                        self.net_mounted.retain(|(id, _)| *id != c.id);
+                    }
+                    Err(e) => self
+                        .details
+                        .record(format!("Couldn't disconnect {}: {e}", c.name)),
+                }
+                let mut tasks = vec![Self::refresh_mounted()];
+                if then_remove {
+                    let rest: Vec<Conn> = self
+                        .net_saved
+                        .iter()
+                        .filter(|x| x.id != c.id)
+                        .cloned()
+                        .collect();
+                    let prev: Vec<String> = self.net_saved.iter().map(|x| x.id.clone()).collect();
+                    tasks.push(Task::perform(
+                        async move {
+                            tokio::task::spawn_blocking(move || netb::save_all(&rest))
+                                .await
+                                .map_err(|e| e.to_string())?
+                        },
+                        move |r| Message::ConnSaved(r, prev.clone(), None, false),
+                    ));
+                }
+                self.push_network();
+                Task::batch(tasks)
+            }
+            Message::ConnForm(m) => {
+                if let Some(Dialog::Connect(f)) = &mut self.dialog {
+                    f.update(m);
+                }
+                Task::none()
+            }
+            Message::ConnTest => {
+                let Some(Dialog::Connect(f)) = &mut self.dialog else {
+                    return Task::none();
+                };
+                match f.conn() {
+                    Ok(c) => {
+                        f.busy = true;
+                        Task::perform(netb::test(c, f.password()), Message::ConnTested)
+                    }
+                    Err(e) => {
+                        f.status = Some(Err(e));
+                        Task::none()
+                    }
+                }
+            }
+            Message::ConnTested(r) => {
+                if let Some(Dialog::Connect(f)) = &mut self.dialog {
+                    f.busy = false;
+                    f.status = Some(r);
+                }
+                Task::none()
+            }
+            Message::ConnSave => {
+                let Some(Dialog::Connect(f)) = &mut self.dialog else {
+                    return Task::none();
+                };
+                let c = match f.conn() {
+                    Ok(c) => c,
+                    Err(e) => {
+                        f.status = Some(Err(e));
+                        return Task::none();
+                    }
+                };
+                let (pw, remember) = (f.password(), f.remember);
+                let mut all = self.net_saved.clone();
+                match all.iter_mut().find(|x| !c.id.is_empty() && x.id == c.id) {
+                    Some(slot) => *slot = c,
+                    None => all.push(c),
+                }
+                let prev: Vec<String> = self.net_saved.iter().map(|x| x.id.clone()).collect();
+                self.dialog = None;
+                Task::perform(
+                    async move {
+                        tokio::task::spawn_blocking(move || netb::save_all(&all))
+                            .await
+                            .map_err(|e| e.to_string())?
+                    },
+                    move |r| Message::ConnSaved(r, prev.clone(), pw.clone(), remember),
+                )
+            }
+            Message::ConnSaved(r, prev, pw, remember) => match r {
+                Ok(conns) => {
+                    self.net_saved = conns;
+                    self.push_network();
+                    // a brand-new connection connects right away
+                    match self
+                        .net_saved
+                        .iter()
+                        .find(|c| !prev.contains(&c.id))
+                        .cloned()
+                    {
+                        Some(new) if pw.is_some() || new.auth != netb::Auth::Password => {
+                            if let Err(e) = &self.net_backend {
+                                self.details.record(e.clone());
+                                return Task::none();
+                            }
+                            self.details.record(format!("Connecting to {}…", new.name));
+                            let c2 = new.clone();
+                            Task::perform(netb::mount(new, pw, remember), move |r| {
+                                Message::NetMountDone(c2.clone(), r, true)
+                            })
+                        }
+                        Some(new) => self.start_mount(new, true),
+                        None => Task::none(),
+                    }
+                }
+                Err(e) => {
+                    self.details
+                        .record(format!("Couldn't save connections: {e}"));
+                    Task::none()
+                }
+            },
+            Message::ThemeChanged => {
+                theme::reload();
+                Task::none()
+            }
+            Message::Copied => {
+                self.details.record("Path copied to clipboard");
+                Task::none()
+            }
+            Message::AppsLoaded(reg) => {
+                self.apps = Some(reg);
+                Task::none()
+            }
+            Message::OpenWithReady(reg, files, mime) => {
+                let c = reg.choices(&mime);
+                let name = |id: &String| reg.get(id).map(|a| (id.clone(), a.name.clone()));
+                let recommended: Vec<(String, String)> = c.apps.iter().filter_map(name).collect();
+                let all: Vec<(String, String)> = reg
+                    .listed()
+                    .map(|a| (a.id.clone(), a.name.clone()))
+                    .collect();
+                let filtered = (0..all.len()).collect();
+                let show_all = recommended.is_empty();
+                self.dialog = Some(Dialog::OpenWith(Box::new(OpenWithDlg {
+                    files,
+                    mime: c.mime,
+                    selected: c.default.clone(),
+                    default: c.default,
+                    recommended,
+                    all,
+                    filtered,
+                    query: String::new(),
+                    show_all,
+                    set_default: false,
+                })));
+                self.apps = Some(reg);
+                Task::none()
+            }
+            Message::OpenWithPick(id) => {
+                if let Some(Dialog::OpenWith(d)) = &mut self.dialog {
+                    if d.selected.as_deref() == Some(id.as_str()) {
+                        // second click on the same app opens it
+                        return self.dialog_ok();
+                    }
+                    d.selected = Some(id);
+                }
+                Task::none()
+            }
+            Message::OpenWithShowAll => {
+                if let Some(Dialog::OpenWith(d)) = &mut self.dialog {
+                    d.show_all = !d.show_all;
+                    if d.show_all {
+                        return text_input::focus(text_input::Id::new(DIALOG_INPUT));
+                    }
+                }
+                Task::none()
+            }
+            Message::CompressFormat(f) => {
+                if let Some(Dialog::Compress { format, .. }) = &mut self.dialog {
+                    *format = f;
+                }
+                Task::none()
+            }
         }
-
-        let menu = container(menu_col).style(theme::dialog_box);
-        let menu_width = 232.0;
-        let menu_height = (item_count as f32) * 30.0 + 16.0;
-        let max_x = (self.window_size.width - menu_width - 10.0).max(0.0);
-        let max_y = (self.window_size.height - menu_height - 10.0).max(0.0);
-        let x = self.context_menu_pos.x.clamp(0.0, max_x);
-        let y = self.context_menu_pos.y.clamp(0.0, max_y);
-
-        let overlay = row![
-            Space::with_width(Length::Fixed(x)),
-            column![Space::with_height(Length::Fixed(y)), menu, Space::with_height(Length::Fill)].width(Length::Shrink),
-            Space::with_width(Length::Fill),
-        ]
-        .height(Length::Fill);
-
-        let dismiss = mouse_area(container(Space::new(Length::Fill, Length::Fill))).on_press(Message::ContextMenuClose);
-        stack![base, dismiss, overlay].into()
     }
 
     pub fn subscription(&self) -> Subscription<Message> {
-        let mut subs = vec![
-            iced::event::listen_with(track_events),
-            watcher_subscription(),
-            thumbs_subscription(),
-            jobs_subscription(),
-            devices_subscription(),
-        ];
-        if let Some(rx) = &self.drop_rx {
-            let _ = rx; // presence check only — the tick below always polls if Some
-            subs.push(iced::time::every(std::time::Duration::from_millis(50)).map(|_| Message::DropTick));
-        }
-        Subscription::batch(subs)
+        Subscription::batch([
+            keyboard::on_key_press(shortcut),
+            iced::event::listen_with(|event, _status, _window| match event {
+                iced::Event::Keyboard(keyboard::Event::ModifiersChanged(m)) => {
+                    Some(Message::Modifiers(m))
+                }
+                iced::Event::Mouse(iced::mouse::Event::CursorMoved { position }) => {
+                    Some(Message::Cursor(position))
+                }
+                iced::Event::Mouse(iced::mouse::Event::ButtonReleased(
+                    iced::mouse::Button::Left,
+                )) => Some(Message::MouseUp),
+                iced::Event::Mouse(iced::mouse::Event::CursorLeft) => Some(Message::CursorLeft),
+                iced::Event::Window(
+                    iced::window::Event::Resized(size) | iced::window::Event::Opened { size, .. },
+                ) => Some(Message::WinResized(size)),
+                iced::Event::Mouse(iced::mouse::Event::ButtonPressed(_)) => {
+                    Some(Message::MouseDown)
+                }
+                _ => None,
+            }),
+            Subscription::run(drive_events),
+            Subscription::run(theme_events),
+            Subscription::run(lan_events),
+            // tailnet peers come and go; mounts can drop (network loss)
+            iced::time::every(std::time::Duration::from_secs(60)).map(|_| Message::NetRefresh),
+        ])
     }
-}
 
-fn watcher_subscription() -> Subscription<Message> {
-    Subscription::run(|| {
-        iced::stream::channel(8, |mut sender| async move {
-            loop {
-                let batch = tokio::task::spawn_blocking(crate::watcher::next_batch).await.unwrap_or_default();
-                if !batch.is_empty() {
-                    let _ = sender.send(Message::WatcherBatch(batch)).await;
-                }
-            }
-        })
-    })
-}
-
-fn thumbs_subscription() -> Subscription<Message> {
-    Subscription::run(|| {
-        iced::stream::channel(8, |mut sender| async move {
-            loop {
-                let ready = tokio::task::spawn_blocking(crate::thumbs::next_ready).await.unwrap_or(None);
-                if ready.is_some() {
-                    let _ = sender.send(Message::ThumbnailTick).await;
-                }
-            }
-        })
-    })
-}
-
-/// Polls for removable drives being plugged/unplugged/mounted elsewhere.
-/// `devices::list()` shells out to `lsblk` each call — cheap, but not
-/// free enough to poll every frame, so this ticks every 2s and only ever
-/// sends a message when the list actually changed (a `udev` event stream
-/// would be the "properly" reactive way to do this; this is the
-/// pragmatic version — same tradeoff as `watcher.rs` polling instead of
-/// something fancier). Fixed/network drives are re-read alongside it —
-/// cheap enough, and it means the same tick also catches a network share
-/// getting mounted/unmounted from outside this app.
-fn devices_subscription() -> Subscription<Message> {
-    Subscription::run(|| {
-        iced::stream::channel(4, |mut sender| async move {
-            let mut last: Option<(Vec<Device>, Vec<DriveInfo>, Vec<DriveInfo>)> = None;
-            loop {
-                let current = tokio::task::spawn_blocking(|| {
-                    let removable = crate::devices::list();
-                    let (fixed, network) = filesystem::list_drives();
-                    (removable, fixed, network)
+    pub fn view(&self) -> Element<'_, Message> {
+        let grid = PaneGrid::new(&self.panes, |_pane, kind, _maximized| {
+            // no title bars: each pane's box carries its own heading
+            let body: Element<'_, Message> = match kind {
+                PaneKind::Files => mouse_area(self.sidebar.view().map(Message::Sidebar))
+                    .on_right_press(Message::BackgroundMenu)
+                    .into(),
+                PaneKind::Viewer => self.tabs.view().map(Message::Tabs),
+                PaneKind::Inspector => self.inspector.view().map(Message::Inspector),
+                PaneKind::Details => self.details.view(self.jobs_view(), Message::Details),
+            };
+            let k = *kind;
+            // the pane that receives plain keys gets an accent border
+            let focused = k == self.focus_pane && matches!(k, PaneKind::Files | PaneKind::Viewer);
+            let body = container(body)
+                .style(move |t: &Theme| {
+                    let mut st = theme::panel(t);
+                    if focused {
+                        st.border.color = t.extended_palette().primary.base.color.scale_alpha(0.6);
+                    }
+                    st
                 })
-                .await
-                .unwrap_or_default();
-
-                if last.as_ref() != Some(&current) {
-                    let (removable, fixed, network) = current.clone();
-                    let _ = sender.send(Message::DevicesRefreshed(removable, fixed, network)).await;
-                    last = Some(current);
-                }
-                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-            }
+                .width(Length::Fill)
+                .height(Length::Fill);
+            // which pane the pointer is over decides where plain keys go after a click
+            let body = mouse_area(body)
+                .on_enter(Message::PaneHover(k, true))
+                .on_exit(Message::PaneHover(k, false));
+            pane_grid::Content::new(body)
         })
-    })
-}
+        .spacing(6)
+        .on_resize(8, Message::PaneResized);
 
-fn jobs_subscription() -> Subscription<Message> {
-    Subscription::run(|| {
-        iced::stream::channel(16, |mut sender| async move {
-            loop {
-                let ev = tokio::task::spawn_blocking(jobs::next_event).await.unwrap_or(None);
-                if let Some(ev) = ev {
-                    let _ = sender.send(Message::JobEvent(ev)).await;
+        let base: Element<'_, Message> = container(grid)
+            .padding(6)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into();
+        let mut layers = vec![base];
+        if let Some(d) = self.drag.as_ref().filter(|d| d.active) {
+            layers.push(self.drag_view(d));
+        }
+        if self.ext_hover {
+            let dir = self.sidebar.current_dir();
+            let hint = container(text(format!("Drop to copy into {}", dir.display())).size(14))
+                .padding([10, 16])
+                .style(|t: &Theme| container::Style {
+                    background: Some(t.extended_palette().primary.strong.color.into()),
+                    text_color: Some(t.extended_palette().primary.strong.text),
+                    border: iced::Border {
+                        radius: 10.0.into(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                });
+            layers.push(
+                container(hint)
+                    .center_x(Length::Fill)
+                    .padding(iced::Padding {
+                        top: 40.0,
+                        ..Default::default()
+                    })
+                    .into(),
+            );
+        }
+        if let Some((at, t)) = &self.menu {
+            layers.push(self.menu_view(*at, t));
+        }
+        if let Some(d) = &self.dialog {
+            layers.push(self.dialog_view(d));
+        }
+        stack(layers).into()
+    }
+
+    fn drag_view(&self, d: &Drag) -> Element<'_, Message> {
+        let what = match d.paths.as_slice() {
+            [p] => format!(
+                "\"{}\"",
+                p.file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default()
+            ),
+            ps => format!("{} items", ps.len()),
+        };
+        let verb = if self.sidebar.mods.command() {
+            "Copy"
+        } else {
+            "Move"
+        };
+        let label = match self.sidebar.drop_target() {
+            Some(t) if t.as_os_str() == crate::tree::TRASH => format!("Trash {what}"),
+            Some(t) => format!(
+                "{verb} {what} → {}",
+                t.file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| t.display().to_string())
+            ),
+            None => format!("{what}  (drop on a folder · Ctrl copies)"),
+        };
+        let chip = container(text(label).size(12))
+            .padding([4, 10])
+            .style(|t: &Theme| container::Style {
+                background: Some(t.extended_palette().primary.strong.color.into()),
+                text_color: Some(t.extended_palette().primary.strong.text),
+                border: iced::Border {
+                    radius: 12.0.into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            });
+        // purely visual: doesn't take the pointer, so hover targets below still work
+        container(chip)
+            .padding(iced::Padding {
+                top: self.cursor.y + 14.0,
+                left: self.cursor.x + 14.0,
+                ..Default::default()
+            })
+            .into()
+    }
+
+    fn jobs_view(&self) -> Element<'_, Message> {
+        if self.jobs.is_empty() {
+            return Space::with_height(0).into();
+        }
+        column(self.jobs.iter().map(|j| {
+            let frac = if j.total_bytes > 0 {
+                j.done_bytes as f32 / j.total_bytes as f32
+            } else if j.total_items > 0 {
+                j.done_items as f32 / j.total_items as f32
+            } else {
+                0.0
+            };
+            column![
+                row![
+                    text(j.label.clone()).size(12),
+                    Space::with_width(Length::Fill),
+                    text(format!(
+                        "{}/{} · {}",
+                        j.done_items, j.total_items, j.current
+                    ))
+                    .size(11)
+                    .color(theme::MUTED),
+                    button(text("Cancel").size(11))
+                        .on_press(Message::JobCancel(j.id))
+                        .style(button::text),
+                ]
+                .spacing(8)
+                .align_y(iced::Alignment::Center),
+                progress_bar(0.0..=1.0, frac.clamp(0.0, 1.0)).height(6),
+            ]
+            .spacing(3)
+            .into()
+        }))
+        .spacing(6)
+        .into()
+    }
+
+    /// Hand an active in-app drag over to the compositor as a drag to
+    /// other apps (browser upload areas, other file managers, …).
+    fn drag_out(&mut self) {
+        let (Some(d), Some(dnd)) = (self.drag.as_ref().filter(|d| d.active), &self.dnd) else {
+            return;
+        };
+        let paths = d.paths.clone();
+        if let Err(e) = crate::extdnd::start_drag(dnd, paths) {
+            self.details.record(format!("Drag out: {e}"));
+        }
+        // the compositor takes the drag; iced won't see the release
+        self.drag = None;
+        self.sidebar.mouse_up(true);
+    }
+
+    fn menu_view<'a>(&'a self, at: Point, t: &'a Target) -> Element<'a, Message> {
+        let mut entries: Vec<(&str, MenuAction, bool)> = Vec::new();
+        let n = t.items.len();
+        let has_clip = self.clipboard.is_some();
+        if t.in_trash {
+            if n > 0 {
+                entries.push(("Restore", MenuAction::Restore, true));
+                entries.push(("Delete permanently…", MenuAction::Delete, true));
+            }
+            entries.push(("Empty trash…", MenuAction::EmptyTrash, true));
+        } else if n == 0 {
+            entries.push(("New folder…", MenuAction::NewFolder, true));
+            entries.push(("New text file…  Ctrl+N", MenuAction::NewText, true));
+            entries.push(("New Markdown file…", MenuAction::NewMarkdown, true));
+            entries.push(("New empty file…", MenuAction::NewFile, true));
+            entries.push(("Paste", MenuAction::Paste, has_clip));
+            entries.push((
+                "Open terminal here  Ctrl+Alt+T",
+                MenuAction::OpenTerminal,
+                true,
+            ));
+            entries.push(("Analyze disk usage here", MenuAction::DiskUsage, true));
+        } else {
+            entries.push(("Open", MenuAction::Open, true));
+            let files_only = t.items.iter().all(|(_, k)| *k != Kind::Folder);
+            if files_only {
+                entries.push((self.menu_open_label.as_str(), MenuAction::OpenDefault, true));
+                entries.push(("Open with…", MenuAction::OpenWith, true));
+            }
+            if n == 1 && t.items[0].1 == Kind::Folder && t.drive.is_none() && t.net.is_none() {
+                entries.push(("Open terminal here", MenuAction::OpenTerminal, true));
+            }
+            if files_only && t.items.iter().all(|(p, _)| archive::supported(p)) {
+                entries.push(("Extract here", MenuAction::ExtractHere, true));
+                if n == 1 {
+                    entries.push(("Extract to folder…", MenuAction::ExtractTo, true));
                 }
             }
-        })
-    })
-}
+            entries.push(("Copy  Ctrl+C", MenuAction::Copy, true));
+            entries.push(("Cut  Ctrl+X", MenuAction::Cut, true));
+            entries.push(("Paste into folder  Ctrl+V", MenuAction::Paste, has_clip));
+            entries.push(("Duplicate", MenuAction::Duplicate, true));
+            entries.push(("Rename…  F2", MenuAction::Rename, n == 1));
+            entries.push(("Copy path", MenuAction::CopyPath, true));
+            entries.push(("Compress…", MenuAction::Compress, true));
+            if n == 1 && t.items[0].1 == Kind::Folder {
+                entries.push(("Analyze disk usage", MenuAction::DiskUsage, true));
+            }
+            if n == 1 {
+                entries.push((
+                    if t.bookmarked {
+                        "Remove bookmark"
+                    } else {
+                        "Add bookmark"
+                    },
+                    MenuAction::Bookmark,
+                    true,
+                ));
+            }
+            if t.items.iter().all(|(_, k)| *k == Kind::Image) {
+                entries.push(("Combine into PDF", MenuAction::MakePdf, true));
+            }
+            if files_only
+                && t.items
+                    .iter()
+                    .all(|(p, _)| crate::viewers::pdf::tools::topdf::supported(p))
+            {
+                entries.push(("Convert to PDF", MenuAction::ConvertPdf, true));
+            }
+            if let Some(c) = &t.net {
+                if self.is_mounted(c) {
+                    entries.push(("Disconnect", MenuAction::NetDisconnect, true));
+                } else {
+                    entries.push(("Connect", MenuAction::NetConnect, true));
+                }
+                entries.push(("Edit connection…", MenuAction::NetEdit, true));
+                entries.push(("Copy address", MenuAction::NetCopyUrl, true));
+                if c.auth == netb::Auth::Password {
+                    entries.push(("Forget saved password", MenuAction::NetForgetPassword, true));
+                }
+                entries.push(("Remove connection", MenuAction::NetRemove, true));
+            }
+            if let Some(d) = &t.drive {
+                if d.mount_point.is_none() {
+                    entries.push(("Mount", MenuAction::Mount, !d.encrypted));
+                } else if !d.system && devices::CAN_UNMOUNT {
+                    entries.push(("Unmount", MenuAction::Unmount, true));
+                }
+                if d.ejectable {
+                    entries.push(("Eject safely", MenuAction::Eject, true));
+                }
+            }
+            entries.push(("Move to trash  Del", MenuAction::Trash, true));
+            entries.push(("Delete permanently…  Shift+Del", MenuAction::Delete, true));
+            entries.push(("New folder here…", MenuAction::NewFolder, true));
+            entries.push(("New text file here…", MenuAction::NewText, true));
+            entries.push(("New Markdown file here…", MenuAction::NewMarkdown, true));
+        }
+        let menu = container(
+            column(entries.into_iter().map(|(label, a, enabled)| {
+                button(text(label).size(13))
+                    .on_press_maybe(enabled.then_some(Message::Menu(a)))
+                    .style(button::text)
+                    .width(Length::Fill)
+                    .padding([4, 10])
+                    .into()
+            }))
+            .spacing(1),
+        )
+        .width(MENU_W)
+        .padding(4)
+        .style(|t: &Theme| container::Style {
+            background: Some(t.extended_palette().background.weak.color.into()),
+            border: iced::Border {
+                radius: 8.0.into(),
+                width: 1.0,
+                color: t.extended_palette().background.strong.color,
+            },
+            shadow: iced::Shadow {
+                color: iced::Color::from_rgba(0.0, 0.0, 0.0, 0.5),
+                offset: iced::Vector::new(0.0, 4.0),
+                blur_radius: 16.0,
+            },
+            ..Default::default()
+        });
+        // click anywhere else closes the menu
+        let backdrop = mouse_area(Space::new(Length::Fill, Length::Fill))
+            .on_press(Message::MenuClose)
+            .on_right_press(Message::MenuClose);
+        let placed = container(opaque(menu)).padding(iced::Padding {
+            top: at.y,
+            left: at.x,
+            ..Default::default()
+        });
+        stack![backdrop, placed].into()
+    }
 
-fn load_task(tab_id: u64, path: PathBuf, gen: u64, show_hidden: bool) -> Task<Message> {
-    Task::perform(
-        async move { tokio::task::spawn_blocking(move || filesystem::read_dir_entries(&path, show_hidden)).await.unwrap_or_default() },
-        move |entries| Message::TabLoaded(tab_id, gen, entries),
-    )
-}
+    fn open_with_view<'a>(&'a self, d: &'a OpenWithDlg) -> Element<'a, Message> {
+        let app_row = |id: &'a String, label: &'a str, is_default: bool| -> Element<'a, Message> {
+            let selected = d.selected.as_deref() == Some(id.as_str());
+            let mut r = row![text(label).size(13)].spacing(8);
+            if is_default {
+                r = r.push(text("default").size(11).color(theme::MUTED));
+            }
+            button(r)
+                .on_press(Message::OpenWithPick(id.clone()))
+                .style(if selected {
+                    button::primary
+                } else {
+                    button::text
+                })
+                .width(Length::Fill)
+                .padding([4, 10])
+                .into()
+        };
+        let what = openwith::describe(&d.files);
+        let mut col = column![
+            text(format!("Open \"{what}\" with")).size(16),
+            text(d.mime.clone()).size(12).color(theme::MUTED),
+        ]
+        .spacing(8);
+        if d.recommended.is_empty() {
+            col = col.push(
+                text("No app is registered for this type.")
+                    .size(13)
+                    .color(theme::MUTED),
+            );
+        } else {
+            col = col.push(
+                iced::widget::scrollable(column(
+                    d.recommended
+                        .iter()
+                        .map(|(id, n)| app_row(id, n, d.default.as_deref() == Some(id.as_str()))),
+                ))
+                .height(Length::Shrink),
+            );
+        }
+        col = col.push(
+            button(
+                text(if d.show_all {
+                    "Other app ▾"
+                } else {
+                    "Other app…"
+                })
+                .size(13),
+            )
+            .on_press(Message::OpenWithShowAll)
+            .style(button::text),
+        );
+        if d.show_all {
+            col = col.push(
+                text_input("Search apps", &d.query)
+                    .id(text_input::Id::new(DIALOG_INPUT))
+                    .on_input(Message::DialogInput)
+                    .on_submit(Message::DialogOk)
+                    .size(13),
+            );
+            col = col.push(
+                iced::widget::scrollable(column(
+                    d.filtered
+                        .iter()
+                        .map(|&i| app_row(&d.all[i].0, &d.all[i].1, false)),
+                ))
+                .height(220),
+            );
+        }
+        let ext = d
+            .files
+            .first()
+            .and_then(|p| p.extension())
+            .map(|e| format!(".{} files", e.to_string_lossy()))
+            .unwrap_or_else(|| "this type".into());
+        if openwith::CAN_SET_DEFAULT {
+            col = col.push(
+                checkbox(
+                    format!("Always open {ext} ({}) with this app", d.mime),
+                    d.set_default,
+                )
+                .on_toggle(Message::DialogFlag)
+                .size(15)
+                .text_size(13),
+            );
+        }
+        col.push(
+            row![
+                Space::with_width(Length::Fill),
+                button(text("Cancel"))
+                    .on_press(Message::DialogCancel)
+                    .style(button::secondary),
+                button(text("Open")).on_press_maybe(d.selected.as_ref().map(|_| Message::DialogOk)),
+            ]
+            .spacing(8),
+        )
+        .into()
+    }
 
-fn shellexpand_home(s: &str) -> String {
-    if let Some(rest) = s.strip_prefix("~/") {
-        home_dir().join(rest).to_string_lossy().to_string()
-    } else if s == "~" {
-        home_dir().to_string_lossy().to_string()
-    } else {
-        s.to_string()
+    fn dialog_view<'a>(&'a self, d: &'a Dialog) -> Element<'a, Message> {
+        let input = |label: &'a str,
+                     value: &'a str,
+                     ok: &'a str,
+                     suffix: &'a str|
+         -> Element<'a, Message> {
+            // `suffix`: extension added on create unless the name has one
+            let suffix = if suffix.is_empty() || value.contains('.') {
+                ""
+            } else {
+                suffix
+            };
+            column![
+                text(label).size(16),
+                row![
+                    text_input("", value)
+                        .id(text_input::Id::new(DIALOG_INPUT))
+                        .on_input(Message::DialogInput)
+                        .on_submit(Message::DialogOk)
+                        .size(14),
+                    text(suffix).size(14).color(theme::MUTED),
+                ]
+                .spacing(6)
+                .align_y(iced::Alignment::Center),
+                row![
+                    Space::with_width(Length::Fill),
+                    button(text("Cancel"))
+                        .on_press(Message::DialogCancel)
+                        .style(button::secondary),
+                    button(text(ok)).on_press(Message::DialogOk),
+                ]
+                .spacing(8),
+            ]
+            .spacing(12)
+            .into()
+        };
+        let confirm =
+            |title: String, body: String, ok: &'a str, danger: bool| -> Element<'a, Message> {
+                column![
+                    text(title).size(16),
+                    text(body).size(13).color(theme::MUTED),
+                    row![
+                        Space::with_width(Length::Fill),
+                        button(text("Cancel"))
+                            .on_press(Message::DialogCancel)
+                            .style(button::secondary),
+                        button(text(ok))
+                            .on_press(Message::DialogOk)
+                            .style(if danger {
+                                button::danger
+                            } else {
+                                button::primary
+                            }),
+                    ]
+                    .spacing(8),
+                ]
+                .spacing(12)
+                .into()
+            };
+        let name = |p: &Path| {
+            p.file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| p.display().to_string())
+        };
+        let body: Element<'a, Message> = match d {
+            Dialog::Rename { name: v, .. } => input("Rename", v, "Rename", ""),
+            Dialog::NewFolder { name: v, .. } => input("New folder", v, "Create", ""),
+            Dialog::NewFile { name: v, ext, .. } => input(
+                match *ext {
+                    ".txt" => "New text file",
+                    ".md" => "New Markdown file",
+                    _ => "New file",
+                },
+                v,
+                "Create",
+                ext,
+            ),
+            Dialog::ConfirmDelete { paths } => confirm(
+                if paths.len() == 1 {
+                    format!("Delete \"{}\" permanently?", name(&paths[0]))
+                } else {
+                    format!("Delete {} items permanently?", paths.len())
+                },
+                "This can't be undone. Use Move to trash to keep a way back.".into(),
+                "Delete",
+                true,
+            ),
+            Dialog::Compress {
+                sources,
+                name: v,
+                format,
+                ..
+            } => {
+                let pills = row(Format::ALL.iter().map(|&f| {
+                    button(text(f.ext()).size(13))
+                        .on_press(Message::CompressFormat(f))
+                        .style(if f == *format {
+                            button::primary
+                        } else {
+                            button::secondary
+                        })
+                        .padding([4, 10])
+                        .into()
+                }))
+                .spacing(6);
+                column![
+                    text(match sources.as_slice() {
+                        [one] => format!("Compress \"{}\"", name(one)),
+                        s => format!("Compress {} items", s.len()),
+                    })
+                    .size(16),
+                    row![
+                        text_input("name", v)
+                            .id(text_input::Id::new(DIALOG_INPUT))
+                            .on_input(Message::DialogInput)
+                            .on_submit(Message::DialogOk)
+                            .size(14),
+                        text(format.ext()).size(14).color(theme::MUTED),
+                    ]
+                    .spacing(6)
+                    .align_y(iced::Alignment::Center),
+                    pills,
+                    row![
+                        Space::with_width(Length::Fill),
+                        button(text("Cancel"))
+                            .on_press(Message::DialogCancel)
+                            .style(button::secondary),
+                        button(text("Create")).on_press(Message::DialogOk),
+                    ]
+                    .spacing(8),
+                ]
+                .spacing(12)
+                .into()
+            }
+            Dialog::ExtractTo { archive, name: v } => column![
+                text(format!("Extract \"{}\" to a new folder", name(archive))).size(16),
+                text(format!(
+                    "in {}",
+                    archive
+                        .parent()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_default()
+                ))
+                .size(12)
+                .color(theme::MUTED),
+                text_input("folder name", v)
+                    .id(text_input::Id::new(DIALOG_INPUT))
+                    .on_input(Message::DialogInput)
+                    .on_submit(Message::DialogOk)
+                    .size(14),
+                row![
+                    Space::with_width(Length::Fill),
+                    button(text("Cancel"))
+                        .on_press(Message::DialogCancel)
+                        .style(button::secondary),
+                    button(text("Extract")).on_press(Message::DialogOk),
+                ]
+                .spacing(8),
+            ]
+            .spacing(12)
+            .into(),
+            Dialog::ArchivePassword { job, pw } => column![
+                text(format!("Password for \"{}\"", name(job.archive()))).size(16),
+                text("The archive is encrypted.")
+                    .size(12)
+                    .color(theme::MUTED),
+                text_input("password", pw)
+                    .id(text_input::Id::new(DIALOG_INPUT))
+                    .secure(true)
+                    .on_input(Message::DialogInput)
+                    .on_submit(Message::DialogOk)
+                    .size(14),
+                row![
+                    Space::with_width(Length::Fill),
+                    button(text("Cancel"))
+                        .on_press(Message::DialogCancel)
+                        .style(button::secondary),
+                    button(text("Extract")).on_press(Message::DialogOk),
+                ]
+                .spacing(8),
+            ]
+            .spacing(12)
+            .into(),
+            Dialog::OpenWith(d) => self.open_with_view(d),
+            Dialog::Connect(f) => f.view(
+                self.net_backend.as_ref().err().map(String::as_str),
+                Message::ConnForm,
+                |a| match a {
+                    netui::Action::Test => Message::ConnTest,
+                    netui::Action::Save => Message::ConnSave,
+                    netui::Action::Cancel => Message::DialogCancel,
+                },
+            ),
+            Dialog::NetPassword { conn, pw, remember } => column![
+                text(format!("Password for {}", conn.name)).size(16),
+                text(netb::to_url(conn)).size(12).color(theme::MUTED),
+                text_input("password", pw)
+                    .id(text_input::Id::new(DIALOG_INPUT))
+                    .secure(true)
+                    .on_input(Message::DialogInput)
+                    .on_submit(Message::DialogOk)
+                    .size(14),
+                checkbox("Remember in the keyring", *remember)
+                    .on_toggle(Message::DialogFlag)
+                    .size(15)
+                    .text_size(13),
+                row![
+                    Space::with_width(Length::Fill),
+                    button(text("Cancel"))
+                        .on_press(Message::DialogCancel)
+                        .style(button::secondary),
+                    button(text("Connect")).on_press(Message::DialogOk),
+                ]
+                .spacing(8),
+            ]
+            .spacing(12)
+            .into(),
+            Dialog::ConfirmEmptyTrash => confirm(
+                "Empty the trash?".into(),
+                "Everything in every trash is deleted for good.".into(),
+                "Empty trash",
+                true,
+            ),
+            Dialog::CloseTab { title, .. } => confirm(
+                format!("Close \"{title}\" without saving?"),
+                "Your unsaved changes will be lost. Cancel and press Ctrl+S to keep them.".into(),
+                "Discard & close",
+                true,
+            ),
+            Dialog::Conflict { src, dst, all, .. } => column![
+                text(format!("\"{}\" already exists", name(dst))).size(16),
+                text(format!(
+                    "in {}",
+                    dst.parent()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_default()
+                ))
+                .size(12)
+                .color(theme::MUTED),
+                text(format!("from {}", src.display()))
+                    .size(12)
+                    .color(theme::MUTED),
+                checkbox("Do this for all conflicts", *all)
+                    .on_toggle(Message::DialogFlag)
+                    .size(15)
+                    .text_size(13),
+                row![
+                    button(text("Stop"))
+                        .on_press(Message::DialogResolve(Resolution::Cancel))
+                        .style(button::secondary),
+                    Space::with_width(Length::Fill),
+                    button(text("Skip"))
+                        .on_press(Message::DialogResolve(Resolution::Skip))
+                        .style(button::secondary),
+                    button(text("Keep both"))
+                        .on_press(Message::DialogResolve(Resolution::KeepBoth))
+                        .style(button::secondary),
+                    button(text("Replace"))
+                        .on_press(Message::DialogResolve(Resolution::Replace))
+                        .style(button::danger),
+                ]
+                .spacing(8),
+            ]
+            .spacing(10)
+            .into(),
+        };
+        let tall = matches!(d, Dialog::Connect(_));
+        let body: Element<'a, Message> = if tall {
+            iced::widget::scrollable(body).height(Length::Shrink).into()
+        } else {
+            body
+        };
+        let card = container(body)
+            .width(if tall { 520 } else { 440 })
+            .max_height(760)
+            .padding(18)
+            .style(|t: &Theme| container::Style {
+                background: Some(t.extended_palette().background.base.color.into()),
+                border: iced::Border {
+                    radius: 10.0.into(),
+                    width: 1.0,
+                    color: t.extended_palette().background.strong.color,
+                },
+                shadow: iced::Shadow {
+                    color: iced::Color::from_rgba(0.0, 0.0, 0.0, 0.6),
+                    offset: iced::Vector::new(0.0, 6.0),
+                    blur_radius: 24.0,
+                },
+                ..Default::default()
+            });
+        let backdrop =
+            container(Space::new(Length::Fill, Length::Fill)).style(|_| container::Style {
+                background: Some(iced::Color::from_rgba(0.0, 0.0, 0.0, 0.45).into()),
+                ..Default::default()
+            });
+        stack![opaque(backdrop), center(opaque(card))].into()
     }
 }
 
-static CURSOR_EPOCH: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
-static LAST_CURSOR_EVENT_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// Servers and shares advertised on the LAN (Avahi).
+fn lan_events() -> impl iced::futures::Stream<Item = Message> {
+    use iced::futures::StreamExt;
+    netb::discover_lan().map(Message::NetLan)
+}
 
-fn track_events(event: iced::Event, status: iced::event::Status, _window: iced::window::Id) -> Option<Message> {
-    match event {
-        iced::Event::Mouse(iced::mouse::Event::CursorMoved { position }) => {
-            let epoch = CURSOR_EPOCH.get_or_init(std::time::Instant::now);
-            let now_ms = epoch.elapsed().as_millis() as u64;
-            let last_ms = LAST_CURSOR_EVENT_MS.load(std::sync::atomic::Ordering::Relaxed);
-            if now_ms.saturating_sub(last_ms) < 40 {
-                return None;
+/// Suite config changes → theme reload (never fires in standalone builds).
+fn theme_events() -> impl iced::futures::Stream<Item = Message> {
+    use iced::futures::StreamExt;
+    match theme::config_dir() {
+        Some(d) => devices::watch_dirs(vec![d])
+            .map(|_| Message::ThemeChanged)
+            .boxed(),
+        None => iced::futures::stream::empty().boxed(),
+    }
+}
+
+fn drive_events() -> impl iced::futures::Stream<Item = Message> {
+    use iced::futures::StreamExt;
+    devices::watch_drives().map(|_| Message::DrivesChanged)
+}
+
+fn shortcut(key: Key, mods: Modifiers) -> Option<Message> {
+    use sidebar::Key as K;
+    if mods.command() {
+        return match key.as_ref() {
+            Key::Character("s") => Some(Message::Save),
+            Key::Character("e") => Some(Message::ToggleEdit),
+            Key::Character("w") => Some(Message::CloseTab),
+            Key::Character("b") => Some(Message::ToggleLeft),
+            Key::Character("f") => Some(Message::Search),
+            Key::Character("l") => Some(Message::EditPath),
+            Key::Character("c") => Some(Message::Shortcut(MenuAction::Copy)),
+            Key::Character("x") => Some(Message::Shortcut(MenuAction::Cut)),
+            Key::Character("v") => Some(Message::Shortcut(MenuAction::Paste)),
+            Key::Character("z") => Some(Message::Undo),
+            Key::Character("a") => Some(Message::Key(K::SelectAll)),
+            Key::Character("t") | Key::Character("T") if mods.alt() => {
+                Some(Message::Shortcut(MenuAction::OpenTerminal))
             }
-            LAST_CURSOR_EVENT_MS.store(now_ms, std::sync::atomic::Ordering::Relaxed);
-            Some(Message::CursorMoved(position))
+            Key::Character("n") | Key::Character("N") if mods.shift() => {
+                Some(Message::Shortcut(MenuAction::NewFolder))
+            }
+            Key::Character("n") => Some(Message::Shortcut(MenuAction::NewText)),
+            Key::Named(key::Named::F4) => Some(Message::CloseTab),
+            _ => None,
+        };
+    }
+    if mods.alt() {
+        return match key.as_ref() {
+            Key::Named(key::Named::ArrowUp) => Some(Message::Key(K::Parent)),
+            _ => None,
+        };
+    }
+    Some(Message::RawKey(key, mods))
+}
+
+/// Plain keys for the files pane (also the fallback when the viewer
+/// doesn't use a key).
+fn files_key(key: Key, mods: Modifiers) -> Option<Message> {
+    use sidebar::Key as K;
+    match key.as_ref() {
+        Key::Named(key::Named::ArrowUp) => Some(Message::Key(K::Up)),
+        Key::Named(key::Named::ArrowDown) => Some(Message::Key(K::Down)),
+        Key::Named(key::Named::ArrowLeft) => Some(Message::Key(K::Left)),
+        Key::Named(key::Named::ArrowRight) => Some(Message::Key(K::Right)),
+        Key::Named(key::Named::Home) => Some(Message::Key(K::Home)),
+        Key::Named(key::Named::End) => Some(Message::Key(K::End)),
+        Key::Named(key::Named::PageUp) => Some(Message::Key(K::PageUp)),
+        Key::Named(key::Named::PageDown) => Some(Message::Key(K::PageDown)),
+        Key::Named(key::Named::Enter) => Some(Message::Key(K::Enter)),
+        Key::Named(key::Named::Backspace) => Some(Message::Key(K::Parent)),
+        Key::Named(key::Named::Escape) => Some(Message::Key(K::Escape)),
+        Key::Named(key::Named::F2) => Some(Message::Shortcut(MenuAction::Rename)),
+        Key::Named(key::Named::Delete) if mods.shift() => {
+            Some(Message::Shortcut(MenuAction::Delete))
         }
-        iced::Event::Window(iced::window::Event::Resized(size)) => Some(Message::WindowResized(size)),
-        iced::Event::Mouse(iced::mouse::Event::ButtonReleased(iced::mouse::Button::Left)) => Some(Message::PaneDragEnd),
-        iced::Event::Keyboard(iced::keyboard::Event::ModifiersChanged(m)) => Some(Message::ModifiersChanged(m)),
-        // Only act on keys iced's own focused widget (a text_input, etc.)
-        // left alone — Ignored means nothing else claimed it, so it's fair
-        // game for list navigation / shortcuts. A focused search box, path
-        // bar, or rename field marks these Captured and we stay out of it.
-        iced::Event::Keyboard(iced::keyboard::Event::KeyPressed { key, .. }) if status == iced::event::Status::Ignored => Some(Message::KeyPressed(key)),
+        Key::Named(key::Named::Delete) => Some(Message::Shortcut(MenuAction::Trash)),
+        Key::Character(c) => c
+            .chars()
+            .next()
+            .filter(|c| !c.is_control())
+            .map(|c| Message::Key(K::Char(c))),
         _ => None,
     }
 }
 
-fn context_btn(label: &str, msg: Message) -> Element<'static, Message> {
-    let label = label.to_string();
-    button(text(label).size(13)).on_press(msg).width(Length::Fill).style(theme::flat_button).into()
+#[cfg(test)]
+#[test]
+fn new_file_names_get_extension_once() {
+    assert_eq!(with_ext("Untitled", ".md"), "Untitled.md");
+    assert_eq!(with_ext("notes.txt", ".md"), "notes.txt");
+    assert_eq!(with_ext("todo", ".txt"), "todo.txt");
+    assert_eq!(with_ext("Makefile", ""), "Makefile");
 }
 
-fn open_with_row<'a>(path: &PathBuf, mime: &str, app: &'a AppEntry, is_default: bool) -> Element<'a, Message> {
-    let name_line = if is_default { format!("{}  (default)", app.name) } else { app.name.clone() };
-    let open_btn = button(column![text(name_line).size(13), text(&app.comment).size(10).style(theme::muted_text)].spacing(1))
-        .on_press(Message::OpenWith(path.clone(), app.exec.clone()))
-        .width(Length::Fill)
-        .style(theme::flat_button);
-
-    let content: Element<Message> = if is_default {
-        open_btn.into()
+/// `name` plus `ext` unless the name already has an extension.
+fn with_ext(name: &str, ext: &str) -> String {
+    if ext.is_empty() || Path::new(name).extension().is_some() {
+        name.to_string()
     } else {
-        let default_btn = button(text("Set Default").size(11)).on_press(Message::OpenWithSetDefault(mime.to_string(), app.desktop_id.clone())).style(theme::flat_button).padding([2, 6]);
-        row![open_btn, default_btn].spacing(6).align_y(iced::Alignment::Center).into()
-    };
-    content
+        format!("{name}{ext}")
+    }
 }
 
-fn detail_row<'a>(label: &'a str, value: String) -> Element<'a, Message> {
-    column![text(label).size(10).style(theme::muted_text), selectable_text(&value, 12)].spacing(1).into()
+/// Is `p` at (within 2 px of) or past the window's edge? Unknown size → no.
+fn at_edge(p: Point, size: iced::Size) -> bool {
+    const M: f32 = 2.0;
+    size.width > 0.0
+        && size.height > 0.0
+        && (p.x <= M || p.y <= M || p.x >= size.width - M || p.y >= size.height - M)
 }
 
-fn selectable_text<'a>(value: &str, size: u16) -> Element<'a, Message> {
-    text_input("", value).on_input(|_| Message::Noop).size(size).padding(0).style(|_, _| text_input::Style {
-        background: Background::Color(Color::TRANSPARENT),
-        border: Border { color: Color::TRANSPARENT, width: 0.0, radius: 0.0.into() },
-        icon: theme::p().text,
-        placeholder: theme::p().muted,
-        value: theme::p().text,
-        selection: theme::p().accent,
-    })
-    .into()
+#[cfg(test)]
+#[test]
+fn drag_out_edge_detection() {
+    let s = iced::Size::new(800.0, 600.0);
+    assert!(!at_edge(Point::new(400.0, 300.0), s));
+    assert!(at_edge(Point::new(-5.0, 300.0), s));
+    assert!(at_edge(Point::new(400.0, 601.0), s));
+    assert!(at_edge(Point::new(799.0, 10.0), s));
+    assert!(!at_edge(Point::new(-5.0, 300.0), iced::Size::ZERO));
 }
-
-fn drag_ghost_files<'a>(paths: &[PathBuf]) -> Element<'a, Message> {
-    let label = if let [single] = paths {
-        single.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()
-    } else {
-        format!("{} items", paths.len())
-    };
-    let icon = if paths.first().is_some_and(|p| p.is_dir()) { "\u{f07b}" } else { "\u{f0f6}" };
-    let pal = theme::p();
-    container(row![text(icon).font(ICON_FONT).size(15).style(theme::normal_text), text(label).size(13).style(theme::normal_text)].spacing(6).align_y(iced::Alignment::Center))
-        .padding([6, 10])
-        .style(move |_| container::Style { background: Some(Background::Color(Color { a: 0.9, ..pal.accent })), border: Border { radius: 6.0.into(), ..Default::default() }, ..Default::default() })
-        .into()
-}
-
-fn drag_ghost_line<'a>(base: Element<'a, Message>, x: f32) -> Element<'a, Message> {
-    use iced::widget::stack;
-    let line = container(Space::with_width(Length::Fixed(2.0))).height(Length::Fill).style(|_| container::Style { background: Some(Background::Color(theme::p().accent)), ..Default::default() });
-    let overlay = row![Space::with_width(Length::Fixed(x)), line, Space::with_width(Length::Fill)].height(Length::Fill);
-    stack![base, overlay].into()
-}
-
-/// Banner shown while a file is being dragged in from another app —
-/// og-wayland reports enter/motion/leave, but not fine-grained position
-/// relative to iced's own widget tree, so the drop target is "wherever the
-/// window is" rather than a specific row; dropping copies into the current
-/// tab's folder.
-fn external_drop_overlay<'a>(base: Element<'a, Message>) -> Element<'a, Message> {
-    use iced::widget::stack;
-    let pal = theme::p();
-    let banner = container(text("Drop to copy here").size(15).style(theme::normal_text))
-        .padding(16)
-        .style(move |_| container::Style {
-            background: Some(Background::Color(Color { a: 0.92, ..pal.accent })),
-            border: Border { radius: 8.0.into(), ..Default::default() },
-            ..Default::default()
-        });
-    let overlay = container(container(banner).style(|_| container::Style::default()))
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .center_x(Length::Fill)
-        .center_y(Length::Fill)
-        .style(theme::scrim);
-    stack![base, overlay].into()
-}
-
-fn pane_divider(target: PaneDrag) -> Element<'static, Message> {
-    mouse_area(
-        container(Space::with_width(Length::Fixed(DIVIDER_WIDTH))).height(Length::Fill).style(|_| container::Style { background: Some(Background::Color(theme::p().border)), ..Default::default() }),
-    )
-    .interaction(iced::mouse::Interaction::ResizingHorizontally)
-    .on_press(Message::PaneDragStart(target))
-    .into()
-}
-
-fn context_sep() -> Element<'static, Message> {
-    container(Space::with_height(1)).width(Length::Fill).style(theme::separator).into()
-}
-
-// Kept for potential re-use by the zoom step table (view code reads
-// tab.card_size(), which already indexes ZOOM_STEPS — this just documents
-// the constant is intentionally referenced from tab.rs, not dead).
-#[allow(dead_code)]
-const _: [u16; 6] = ZOOM_STEPS;

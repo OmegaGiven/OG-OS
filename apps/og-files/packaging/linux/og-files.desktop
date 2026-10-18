@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=OG Files
+GenericName=File Manager
+Comment=File manager with built-in viewers and editors
+Exec=og-files %U
+Icon=og-files
+Terminal=false
+Categories=System;FileTools;FileManager;Utility;
+MimeType=inode/directory;
+StartupWMClass=og-files

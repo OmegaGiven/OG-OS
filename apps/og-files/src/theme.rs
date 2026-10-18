@@ -1,169 +1,84 @@
-//! Shared palette, loaded from the suite config via og-config/og-theme and
-//! hot-reloaded when og-settings' Apply & Save changes it (see the
-//! `CheckThemeReload` poll in `app.rs`). Every call site goes through a
-//! function so a reload is picked up on the next frame with no plumbing.
+//! Palette. Standalone builds use a built-in dark theme; with the
+//! `og-suite` feature the colours come from the OG-OS suite config
+//! (`og-config` + `og-theme`, the same source og-bar and og-settings use)
+//! and are reloaded when that config file changes (see
+//! `App::subscription`).
 
-use iced::{widget::{button, container, text, text_input}, Background, Border, Color};
+use iced::theme::Palette;
+use iced::{color, Theme};
+use std::sync::{LazyLock, RwLock};
 
-const APP_TINT_SEED: &str = "og-files";
+pub const MUTED: iced::Color = color!(0x8a857b);
 
-#[derive(Clone, Copy)]
-pub struct Palette {
-    pub bg: Color,
-    pub sec_bg: Color,
-    pub text: Color,
-    pub accent: Color,
-    pub muted: Color,
-    pub selected_bg: Color,
-    pub surface: Color,
-    pub border: Color,
-    pub danger: Color,
+static THEME: LazyLock<RwLock<Theme>> = LazyLock::new(|| RwLock::new(load()));
+
+/// The current theme (cheap: cached; `reload` refreshes it).
+pub fn theme() -> Theme {
+    THEME
+        .read()
+        .map(|t| t.clone())
+        .unwrap_or_else(|_| builtin())
 }
 
-fn load() -> Palette {
-    let cfg = og_config::Config::load();
-    let c = og_theme::AppColors::from_config(&cfg, APP_TINT_SEED);
-    let mix = |a: Color, b: Color, t: f32| Color {
-        r: a.r * t + b.r * (1.0 - t),
-        g: a.g * t + b.g * (1.0 - t),
-        b: a.b * t + b.b * (1.0 - t),
-        a: 1.0,
-    };
-    Palette {
-        bg: c.bar_bg,
-        sec_bg: c.sec_bg,
-        text: c.text,
-        accent: c.accent,
-        muted: c.dim_text,
-        selected_bg: mix(c.accent, c.bar_bg, 0.25),
-        surface: c.surface,
-        border: mix(c.text, c.bar_bg, 0.18),
-        danger: Color { r: 0.75, g: 0.2, b: 0.2, a: 1.0 },
-    }
-}
-
-static THEME: std::sync::LazyLock<std::sync::RwLock<Palette>> =
-    std::sync::LazyLock::new(|| std::sync::RwLock::new(load()));
-
+/// Re-read the suite config (no-op for standalone builds).
 pub fn reload() {
-    if let Ok(mut g) = THEME.write() {
-        *g = load();
+    if let Ok(mut t) = THEME.write() {
+        *t = load();
     }
 }
 
-pub fn p() -> Palette {
-    *THEME.read().unwrap()
-}
-
-pub const ICON_FONT: iced::Font = iced::Font::with_name("Symbols Nerd Font");
-
-// ── Reusable style closures ────────────────────────────────────────────────
-
-pub fn muted_text(_: &iced::Theme) -> text::Style {
-    text::Style { color: Some(p().muted) }
-}
-
-pub fn normal_text(_: &iced::Theme) -> text::Style {
-    text::Style { color: Some(p().text) }
-}
-
-pub fn accent_text(_: &iced::Theme) -> text::Style {
-    text::Style { color: Some(p().accent) }
-}
-
-/// Flat toolbar / menu button: secondary background, surface on hover.
-pub fn flat_button(_: &iced::Theme, status: button::Status) -> button::Style {
-    let pal = p();
-    button::Style {
-        background: Some(Background::Color(match status {
-            button::Status::Hovered | button::Status::Pressed => pal.surface,
-            _ => pal.sec_bg,
-        })),
-        text_color: pal.text,
-        border: Border { radius: 4.0.into(), ..Default::default() },
-        ..Default::default()
+/// Folder holding the suite config, watched for live theme changes.
+pub fn config_dir() -> Option<std::path::PathBuf> {
+    if cfg!(feature = "og-suite") {
+        Some(crate::config::home().join(".config/sway-power"))
+    } else {
+        None
     }
 }
 
-/// Like `flat_button` but visibly disabled.
-pub fn disabled_button(_: &iced::Theme, _: button::Status) -> button::Style {
-    let pal = p();
-    button::Style {
-        background: Some(Background::Color(pal.sec_bg)),
-        text_color: pal.muted,
-        border: Border { radius: 4.0.into(), ..Default::default() },
-        ..Default::default()
-    }
-}
-
-/// Primary (accent-filled) action button.
-pub fn accent_button(_: &iced::Theme, status: button::Status) -> button::Style {
-    let pal = p();
-    let bg = match status {
-        button::Status::Hovered | button::Status::Pressed => Color { a: 0.85, ..pal.accent },
-        _ => pal.accent,
-    };
-    button::Style {
-        background: Some(Background::Color(bg)),
-        text_color: pal.bg,
-        border: Border { radius: 4.0.into(), ..Default::default() },
-        ..Default::default()
-    }
-}
-
-pub fn danger_button(_: &iced::Theme, status: button::Status) -> button::Style {
-    let pal = p();
-    let bg = match status {
-        button::Status::Hovered | button::Status::Pressed => Color { r: 0.85, g: 0.25, b: 0.25, a: 1.0 },
-        _ => pal.danger,
-    };
-    button::Style {
-        background: Some(Background::Color(bg)),
-        text_color: Color::WHITE,
-        border: Border { radius: 4.0.into(), ..Default::default() },
-        ..Default::default()
-    }
-}
-
-pub fn input_style(_: &iced::Theme, status: text_input::Status) -> text_input::Style {
-    let pal = p();
-    text_input::Style {
-        background: Background::Color(pal.surface),
-        border: Border {
-            color: if matches!(status, text_input::Status::Focused) { pal.accent } else { pal.border },
-            width: 1.0,
-            radius: 4.0.into(),
+fn builtin() -> Theme {
+    Theme::custom(
+        "OG Dark".to_string(),
+        Palette {
+            background: color!(0x15130f),
+            text: color!(0xe8e4dc),
+            primary: color!(0x8fb3ff),
+            success: color!(0x7fcf8f),
+            danger: color!(0xff7a7a),
         },
-        icon: pal.text,
-        placeholder: pal.muted,
-        value: pal.text,
-        selection: Color { a: 0.5, ..pal.accent },
-    }
+    )
 }
 
-/// Dialog / popup chrome.
-pub fn dialog_box(_: &iced::Theme) -> container::Style {
-    let pal = p();
-    container::Style {
-        background: Some(Background::Color(pal.sec_bg)),
-        border: Border { color: pal.border, width: 1.0, radius: 6.0.into() },
+#[cfg(feature = "og-suite")]
+fn load() -> Theme {
+    let cfg = og_config::Config::load();
+    let c = og_theme::AppColors::from_config(&cfg, "og-files");
+    Theme::custom(
+        "OG Suite".to_string(),
+        Palette {
+            background: c.bar_bg,
+            text: c.text,
+            primary: c.accent,
+            success: color!(0x7fcf8f),
+            danger: color!(0xe05a5a),
+        },
+    )
+}
+
+#[cfg(not(feature = "og-suite"))]
+fn load() -> Theme {
+    builtin()
+}
+
+pub fn panel(theme: &Theme) -> iced::widget::container::Style {
+    let p = theme.extended_palette();
+    iced::widget::container::Style {
+        background: Some(p.background.weak.color.scale_alpha(0.35).into()),
+        border: iced::Border {
+            radius: 10.0.into(),
+            width: 1.0,
+            color: p.background.strong.color,
+        },
         ..Default::default()
     }
-}
-
-pub fn panel(_: &iced::Theme) -> container::Style {
-    container::Style { background: Some(Background::Color(p().sec_bg)), ..Default::default() }
-}
-
-pub fn main_bg(_: &iced::Theme) -> container::Style {
-    container::Style { background: Some(Background::Color(p().bg)), ..Default::default() }
-}
-
-/// Dim scrim behind a modal dialog so the underlying view reads as inactive.
-pub fn scrim(_: &iced::Theme) -> container::Style {
-    container::Style { background: Some(Background::Color(Color { r: 0.0, g: 0.0, b: 0.0, a: 0.45 })), ..Default::default() }
-}
-
-pub fn separator(_: &iced::Theme) -> container::Style {
-    container::Style { background: Some(Background::Color(p().border)), ..Default::default() }
 }
