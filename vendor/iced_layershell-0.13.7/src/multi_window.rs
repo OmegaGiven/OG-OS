@@ -756,7 +756,9 @@ async fn run_instance<A, E, C>(
                     redraw_request: Some(window::RedrawRequest::NextFrame),
                 } = ui_state
                 {
-                    custom_actions.push(LayerShellAction::RedrawWindow(window.id));
+                    if !crate::output_registry::is_frozen(id) {
+                        custom_actions.push(LayerShellAction::RedrawWindow(window.id));
+                    }
                 }
 
                 debug.render_started();
@@ -772,6 +774,7 @@ async fn run_instance<A, E, C>(
                     ) {
                         Ok(()) => {
                             debug.render_finished();
+                            crate::output_registry::mark_drawn(id);
                         }
                         Err(error) => match error {
                             compositor::SurfaceError::OutOfMemory => {
@@ -874,7 +877,9 @@ async fn run_instance<A, E, C>(
 
                     match ui_state {
                         user_interface::State::Updated { redraw_request: _ } => {
-                            window_refresh_events.push(LayerShellAction::RedrawWindow(window.id));
+                            if !crate::output_registry::is_frozen(id) {
+                                window_refresh_events.push(LayerShellAction::RedrawWindow(window.id));
+                            }
                             is_updated = true;
                         }
                         user_interface::State::Outdated => {
@@ -904,9 +909,9 @@ async fn run_instance<A, E, C>(
                     // Update application
                     update(&mut application, &mut runtime, &mut debug, &mut messages);
 
-                    for (_id, window) in window_manager.iter_mut() {
+                    for (id, window) in window_manager.iter_mut() {
                         window.state.synchronize(&application);
-                        if !is_updated {
+                        if !is_updated && !crate::output_registry::is_frozen(id) {
                             window_refresh_events.push(LayerShellAction::RedrawWindow(window.id));
                         }
                     }

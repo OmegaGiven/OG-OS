@@ -1,5 +1,9 @@
+mod circuit;
+mod direct;
 mod effects;
 mod scene;
+mod sway;
+mod tokyo;
 
 use std::time::Instant;
 
@@ -110,6 +114,34 @@ enum Background {
     Failed,
 }
 
+/// Built-in procedural scenes. These don't use iced at all: they run on the
+/// lean Wayland + GLES renderer in direct/.
+enum Procedural {
+    /// Futuristic motherboard (circuit/).
+    Circuit,
+    /// Neo-Tokyo night with rain and sakura (tokyo/).
+    Tokyo,
+}
+
+/// The configured theme's built-in procedural scene, if it is one.
+fn configured_procedural(config: &Config) -> Option<Procedural> {
+    if config.wallpaper_animated_theme.is_empty() {
+        return None;
+    }
+    match Manifest::load(&config.wallpaper_animated_theme)?.procedural?.as_str() {
+        "circuit" => Some(Procedural::Circuit),
+        "tokyo" => Some(Procedural::Tokyo),
+        other => {
+            eprintln!("og-wallpaper: unknown procedural theme \"{other}\"");
+            None
+        }
+    }
+}
+
+/// Set when a procedural scene couldn't start (e.g. no GLES 3): the iced
+/// path then shows the plain fill instead of a silent swap to the demo.
+static PROCEDURAL_FAILED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 struct App {
     colors: AppColors,
     background: Background,
@@ -140,6 +172,8 @@ fn new() -> (App, Task<Message>) {
     let colors = AppColors::from_config(&config, "og-wallpaper");
     let background = if config.wallpaper_animated_theme.is_empty() {
         Background::Demo
+    } else if PROCEDURAL_FAILED.load(std::sync::atomic::Ordering::Relaxed) {
+        Background::Failed
     } else {
         match LoadedTheme::load(&config.wallpaper_animated_theme) {
             Some(theme) => Background::Theme(theme),
@@ -152,7 +186,9 @@ fn new() -> (App, Task<Message>) {
 fn update(app: &mut App, message: Message) -> Task<Message> {
     match message {
         Message::Tick => {
-            app.t = app.start.elapsed().as_secs_f32();
+            // Wrapped hourly: f32 seconds lose sub-frame precision after a
+            // few days, which made the animation stutter.
+            app.t = (app.start.elapsed().as_secs_f64() % 3600.0) as f32;
         }
     }
     Task::none()
@@ -165,9 +201,7 @@ fn view(app: &App, _id: iced::window::Id) -> Element<'_, Message> {
 fn remove_id(_app: &mut App, _id: iced::window::Id) {}
 
 fn subscription(_app: &App) -> Subscription<Message> {
-    // ~30fps — this is ambient desktop wallpaper, not something that
-    // needs to be buttery, and it's running full-time in the background
-    // on every output.
+    // ~30fps — ambient wallpaper running full-time on every output.
     iced::time::every(std::time::Duration::from_millis(33)).map(|_| Message::Tick)
 }
 
@@ -239,8 +273,25 @@ fn main() -> iced_layershell::Result {
     // og-bar/og-notify/etc) — self-gates here instead of needing sway
     // config to know about the setting, so switching wallpaper_mode in
     // og-settings is the only place that decides whether this runs.
-    if Config::load().wallpaper_mode != "animated" {
+    let config = Config::load();
+    if config.wallpaper_mode != "animated" {
         return Ok(());
+    }
+    if let Some(p) = configured_procedural(&config) {
+        let fps = config.wallpaper_fps;
+        let r = match p {
+            Procedural::Circuit => {
+                let colors = AppColors::from_config(&config, "og-wallpaper");
+                let c = |c: iced::Color| [c.r, c.g, c.b];
+                direct::run(circuit::Circuit { accent: c(colors.accent), bg: c(colors.bar_bg) }, fps)
+            }
+            Procedural::Tokyo => direct::run(tokyo::Tokyo::default(), fps),
+        };
+        // Only returns on failure.
+        if let Err(e) = r {
+            eprintln!("og-wallpaper: procedural scene failed: {e}");
+        }
+        PROCEDURAL_FAILED.store(true, std::sync::atomic::Ordering::Relaxed);
     }
 
     // Vsync (FIFO) blocks each present on a Wayland frame callback, and
@@ -255,9 +306,7 @@ fn main() -> iced_layershell::Result {
         .subscription(subscription)
         .layer_settings(LayerShellSettings {
             // Background, not Top/Overlay — this sits under every real
-            // window, purely decorative, and (being layer Background)
-            // never receives keyboard/pointer input at all regardless of
-            // the events_transparent setting below.
+            // window. Purely decorative: input-transparent.
             layer: Layer::Background,
             anchor: Anchor::Top | Anchor::Bottom | Anchor::Left | Anchor::Right,
             exclusive_zone: 0,

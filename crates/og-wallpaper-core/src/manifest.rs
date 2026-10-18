@@ -120,6 +120,10 @@ pub struct Manifest {
     // `Option<T>` field as `None` automatically.
     #[serde(default)]
     pub base_colors: Option<(String, String)>,
+    /// A built-in generated theme instead of artwork (no `base.png`):
+    /// og-wallpaper renders it itself. Currently only `"circuit"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub procedural: Option<String>,
 }
 
 pub fn themes_dir() -> PathBuf {

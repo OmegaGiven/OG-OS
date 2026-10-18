@@ -446,7 +446,7 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
                     if let Some(e) = save_err {
                         app.status = e;
                     } else {
-                        let manifest = Manifest { regions: regions.clone(), base_colors: app.baked_colors.clone() };
+                        let manifest = Manifest { regions: regions.clone(), base_colors: app.baked_colors.clone(), procedural: None };
                         match manifest.save(name) {
                             Ok(()) => {
                                 app.regions = regions;
