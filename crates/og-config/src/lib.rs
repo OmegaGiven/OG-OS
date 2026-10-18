@@ -183,6 +183,11 @@ pub struct Config {
     /// og-wallpaper falls back to its own built-in demo scene.
     #[serde(default)]
     pub wallpaper_animated_theme: String,
+    /// Frame-rate cap for og-wallpaper's procedural scenes (circuit, tokyo).
+    /// 30 suits small GPUs (Raspberry Pi); the scenes pause entirely while
+    /// windows cover the desktop either way.
+    #[serde(default = "default_wallpaper_fps")]
+    pub wallpaper_fps: u32,
     /// Read directly by the standalone `og-notify` daemon, not og-settings
     /// — flashes a rain/glow/wind/sparkle overlay on every `Notify` dbus
     /// call.
@@ -248,6 +253,7 @@ fn default_keyboard_repeat_delay() -> i32 { 600 }
 fn default_wallpaper_mode() -> String { "image".into() }
 fn default_wallpaper_color() -> String { "#1a1a2e".into() }
 fn default_wallpaper_fit() -> String { "fill".into() }
+fn default_wallpaper_fps() -> u32 { 60 }
 fn default_notif_fx_effect() -> String { "rain".into() }
 fn default_notif_fx_color() -> String { "#ff7800".into() }
 fn default_notif_fx_duration() -> u32 { 1600 }
@@ -298,6 +304,7 @@ impl Default for Config {
             wallpaper_color: default_wallpaper_color(),
             wallpaper_fit: default_wallpaper_fit(),
             wallpaper_animated_theme: String::new(),
+            wallpaper_fps: default_wallpaper_fps(),
             notif_fx_enabled: false,
             notif_fx_effect: default_notif_fx_effect(),
             notif_fx_color: default_notif_fx_color(),

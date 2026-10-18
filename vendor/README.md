@@ -30,3 +30,11 @@ and documented here; re-apply on any version bump.
   only real input/messages or a widget's own `NextFrame` request redraw,
   like iced_winit. Also dropped a duplicate `ui.draw()` per frame.
 - `output_registry::remove` also drops the surface's output name.
+- `output_registry::set_frozen(id, bool)`: pauses app-driven redraws
+  (messages, input, `NextFrame`) for one surface. Compositor configure and
+  refresh still redraw it. og-wallpaper's circuit theme uses this to stop
+  rendering on outputs whose visible workspace is covered by windows. A
+  surface only counts as frozen after it has presented once (a new
+  surface's first refresh doesn't present, so freezing it earlier left the
+  output with no buffer at all). No surface is frozen unless an app asks,
+  so og-bar is unaffected.
