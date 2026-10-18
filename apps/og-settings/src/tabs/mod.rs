@@ -1,6 +1,7 @@
 pub mod ai_context;
 pub mod audio;
 pub mod bar;
+pub mod bluetooth;
 pub mod devices;
 pub mod display;
 pub mod history;

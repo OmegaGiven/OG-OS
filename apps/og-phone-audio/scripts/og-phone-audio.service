@@ -1,0 +1,14 @@
+[Unit]
+Description=OG Phone Audio relay (PC audio -> phone -> headphones)
+After=pipewire.service pipewire-pulse.service wireplumber.service network-online.target
+PartOf=pipewire.service
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/og-phone-audio
+Restart=on-failure
+RestartSec=2
+Slice=session.slice
+
+[Install]
+WantedBy=default.target

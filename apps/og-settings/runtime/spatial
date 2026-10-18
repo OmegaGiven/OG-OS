@@ -82,7 +82,10 @@ bring_up() {    # ensure the HRTF sink exists, pinned to a real device. no routi
     pw-link -d "effect_output.og-spatial:output_FL" "$other:playback_FL" 2>/dev/null || true
     pw-link -d "effect_output.og-spatial:output_FR" "$other:playback_FR" 2>/dev/null || true
   done
-  pactl set-sink-volume "$hw" 100% 2>/dev/null || true
+  # explicit mode changes reset the device to unity gain; an automatic repin
+  # (headset plugged/unplugged, via the autoroute daemon) must not touch the
+  # volume or it blasts whatever was just plugged in
+  [ "${3:-}" = keepvol ] || pactl set-sink-volume "$hw" 100% 2>/dev/null || true
 }
 
 tear_down() {
@@ -148,8 +151,8 @@ case "${1:-status}" in
     hw_target
     ;;
 
-  load)  # internal: bring the sink up, no mode change, no routing
-    bring_up "${2:-}"
+  load)  # internal: bring the sink up, no mode change, no routing. [preset] [device]
+    bring_up "${2:-}" "${3:-}" keepvol
     ;;
 
   unload)

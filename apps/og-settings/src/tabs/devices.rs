@@ -7,7 +7,8 @@ use iced::{Background, Border, Length};
 
 use crate::app::{AppColors, Message};
 use crate::devices::{InputDevice, PciDevice, UsbDevice};
-use crate::sway::{BluetoothDevice, MonitorInfo};
+use crate::bluetooth::BtState;
+use crate::sway::MonitorInfo;
 
 type Element<'a> = iced::Element<'a, Message>;
 
@@ -68,7 +69,7 @@ pub fn view<'a>(
     colors: AppColors,
     usb: &'a [UsbDevice],
     input: &'a [InputDevice],
-    bluetooth: &'a [BluetoothDevice],
+    bluetooth: &'a BtState,
     monitors: &'a [MonitorInfo],
     pci: &'a [PciDevice],
 ) -> Element<'a> {
@@ -96,14 +97,19 @@ pub fn view<'a>(
         })
         .collect();
 
+    // Saved (paired/bonded) devices only — same live D-Bus state the
+    // Network tab's Bluetooth card uses; pairing happens there.
     let bt_rows: Vec<Element> = bluetooth
-        .iter()
+        .grouped()
+        .mine
+        .into_iter()
         .map(|d| {
-            let status = if d.connected { "Connected" } else if d.paired { "Paired" } else { "Not paired" };
+            let status = if d.connected { "Connected" } else { "Paired" };
+            let battery = d.battery.map(|b| format!(" · battery {b}%")).unwrap_or_default();
             row_card(
                 colors,
-                d.name.clone(),
-                format!("Bluetooth · {}", d.mac),
+                d.display_name(),
+                format!("Bluetooth · {}{battery}", d.address),
                 status_pill(colors, d.connected, status, status),
             )
         })

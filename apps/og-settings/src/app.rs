@@ -103,21 +103,16 @@ pub enum Message {
     PowerRowSelected(Option<(u8, usize)>),
 
     // Network tab
-    NetworkDataLoaded(sway::WifiStatus, Vec<sway::WifiNetwork>, Vec<sway::EthernetInterface>, sway::BluetoothAdapter, Vec<sway::BluetoothDevice>),
+    NetworkDataLoaded(sway::WifiStatus, Vec<sway::WifiNetwork>, Vec<sway::EthernetInterface>),
     WifiPowerToggled(bool),
     WifiScanStart,
     WifiConnect(String),
     WifiDisconnect,
     WifiForget(String),
     EthernetToggled(String, bool),
-    BluetoothPowerToggled(bool),
-    BluetoothDiscoverableToggled(bool),
-    BluetoothPairableToggled(bool),
-    BluetoothScanStart,
-    BluetoothConnect(String),
-    BluetoothDisconnect(String),
-    BluetoothPair(String),
-    BluetoothRemove(String),
+    /// Everything Bluetooth (BlueZ events, agent prompts, actions) —
+    /// handled by `crate::bluetooth::BtUi::update`.
+    Bluetooth(crate::bluetooth::BtMsg),
 
     // VPN section (part of the Network tab)
     VpnDataLoaded(crate::vpn::TailscaleStatus, crate::vpn::VpnState, Vec<crate::vpn::SplitApp>),
@@ -214,6 +209,17 @@ pub enum Message {
     SpatialStageMode(bool), // false = free play, true = guess-the-direction test
     SpatialStageClick(u8),  // a direction marker was clicked
     SpatialGameNext,        // play a new hidden direction
+
+    // Audio tab → Phone subtab (og-phone-audio relay)
+    PhoneStateLoaded(crate::phone_audio::PhoneState),
+    PhoneEnable(bool),
+    PhoneFrameMs(f32),
+    PhoneAutoDefault(bool),
+    PhoneDirection(&'static str),
+    PhoneNewCode,
+    PhoneInstallApk,
+    /// result of a background relay action — Ok carries an optional note
+    PhoneDone(Result<Option<String>, String>),
 
     // Devices tab
     DevicesLoaded(Vec<crate::devices::UsbDevice>, Vec<crate::devices::InputDevice>, Vec<crate::devices::PciDevice>),
@@ -503,8 +509,8 @@ pub struct App {
     pub wifi_status: sway::WifiStatus,
     pub wifi_networks: Vec<sway::WifiNetwork>,
     pub ethernet_interfaces: Vec<sway::EthernetInterface>,
-    pub bluetooth_adapter: sway::BluetoothAdapter,
-    pub bluetooth_devices: Vec<sway::BluetoothDevice>,
+    /// Bluetooth state, kept live by the BlueZ D-Bus subscription.
+    pub bt: crate::bluetooth::BtUi,
     pub network_scanning: bool,
 
     // VPN section
@@ -570,6 +576,11 @@ pub struct App {
 
     // Audio tab
     pub audio_subtab: AudioSubTab,
+    // Audio tab → Phone subtab
+    pub phone_cfg: crate::phone_audio::PhoneAudioConfig,
+    pub phone_state: crate::phone_audio::PhoneState,
+    pub phone_busy: bool,
+    pub phone_msg: Option<(bool, String)>,
     pub audio_snapshot: AudioSnapshot,
     /// Keyed by device name (sink or source). Live while Audio tab is open
     /// on the Output/Input subtab; dropping an entry kills its `parec`.
@@ -674,6 +685,7 @@ impl App {
             .and_then(|i| std::env::args().nth(i + 1))
             .and_then(|name| match name.as_str() {
                 "network" => Some(Tab::Network),
+                "bluetooth" => Some(Tab::Network),
                 "ai-context" => Some(Tab::AiContext),
                 "power" => Some(Tab::Power),
                 "display" => Some(Tab::Display),
@@ -690,13 +702,19 @@ impl App {
                 "history" => Some(Tab::History),
                 "sysmonitor" => Some(Tab::SysMonitor),
                 "search" => Some(Tab::Search),
-                "audio" => Some(Tab::Audio),
+                "audio" | "phone-audio" => Some(Tab::Audio),
                 "devices" => Some(Tab::Devices),
                 "printing" => Some(Tab::Printing),
                 _ => None,
             })
             .unwrap_or(Tab::Power);
         let initial_tab_is_network = initial_tab == Tab::Network;
+        // `--tab phone-audio` = Audio tab, opened on the Phone subtab
+        let initial_audio_subtab = if std::env::args().any(|a| a == "phone-audio") {
+            AudioSubTab::Phone
+        } else {
+            AudioSubTab::Output
+        };
 
         (
             Self {
@@ -760,8 +778,7 @@ impl App {
                 wifi_status: sway::WifiStatus::default(),
                 wifi_networks: Vec::new(),
                 ethernet_interfaces: Vec::new(),
-                bluetooth_adapter: sway::BluetoothAdapter::default(),
-                bluetooth_devices: Vec::new(),
+                bt: crate::bluetooth::BtUi::default(),
                 network_scanning: false,
 
                 update_status: sway::UpdateStatus::default(),
@@ -802,7 +819,11 @@ impl App {
                 galias_key: String::new(),
                 galias_url: String::new(),
 
-                audio_subtab: AudioSubTab::Output,
+                audio_subtab: initial_audio_subtab,
+                phone_cfg: crate::phone_audio::PhoneAudioConfig::load(),
+                phone_state: Default::default(),
+                phone_busy: false,
+                phone_msg: None,
                 audio_snapshot: AudioSnapshot::default(),
                 audio_meters: HashMap::new(),
                 mic_monitor: None,
@@ -833,17 +854,27 @@ impl App {
 
     /// Quick, synchronous refresh of Network tab state after a fast action
     /// (power toggle, connect, forget, etc) — unlike scanning, these
-    /// individual `rfkill`/`bluetoothctl`/`iwctl` calls return in well under
+    /// individual `rfkill`/`iwctl` calls return in well under
     /// 100ms, so there's no need for the async `load_network_data` path.
     fn sync_reload_network(&mut self) {
         self.wifi_status = sway::get_wifi_status();
         self.wifi_networks = sway::get_wifi_networks();
         self.ethernet_interfaces = sway::get_ethernet_interfaces();
-        self.bluetooth_adapter = sway::get_bluetooth_adapter();
-        self.bluetooth_devices = sway::get_bluetooth_devices();
     }
 
     pub fn update(&mut self, msg: Message) -> Task<Message> {
+        // Leaving the Network tab hides the Bluetooth card: stop the
+        // discovery it started right away (BlueZ scans are radio-hungry).
+        if let Message::TabSelected(t) = &msg {
+            if self.current_tab == Tab::Network && *t != Tab::Network {
+                let stop = self.bt.on_hidden().map(Message::Bluetooth);
+                return Task::batch([stop, self.update_inner(msg)]);
+            }
+        }
+        self.update_inner(msg)
+    }
+
+    fn update_inner(&mut self, msg: Message) -> Task<Message> {
         match msg {
             Message::TabSelected(t) => {
                 // Leaving SysMonitor — kill embedded btop
@@ -1064,12 +1095,10 @@ impl App {
             }
 
             // Network tab
-            Message::NetworkDataLoaded(wifi, networks, eth, bt_adapter, bt_devices) => {
+            Message::NetworkDataLoaded(wifi, networks, eth) => {
                 self.wifi_status = wifi;
                 self.wifi_networks = networks;
                 self.ethernet_interfaces = eth;
-                self.bluetooth_adapter = bt_adapter;
-                self.bluetooth_devices = bt_devices;
                 self.network_scanning = false;
             }
             Message::WifiPowerToggled(on) => {
@@ -1082,23 +1111,12 @@ impl App {
                     async {
                         tokio::task::spawn_blocking(|| {
                             sway::wifi_scan();
-                            (
-                                sway::get_wifi_status(),
-                                sway::get_wifi_networks(),
-                                sway::get_ethernet_interfaces(),
-                                sway::get_bluetooth_adapter(),
-                                sway::get_bluetooth_devices(),
-                            )
+                            (sway::get_wifi_status(), sway::get_wifi_networks(), sway::get_ethernet_interfaces())
                         })
                         .await
-                        .unwrap_or_else(|_| (
-                            sway::WifiStatus::default(), Vec::new(), Vec::new(),
-                            sway::BluetoothAdapter::default(), Vec::new(),
-                        ))
+                        .unwrap_or_else(|_| (sway::WifiStatus::default(), Vec::new(), Vec::new()))
                     },
-                    |(wifi, networks, eth, bt_adapter, bt_devices)| {
-                        Message::NetworkDataLoaded(wifi, networks, eth, bt_adapter, bt_devices)
-                    },
+                    |(wifi, networks, eth)| Message::NetworkDataLoaded(wifi, networks, eth),
                 );
             }
             Message::WifiConnect(ssid) => {
@@ -1117,58 +1135,9 @@ impl App {
                 sway::set_ethernet_up(&self.config.terminal, &iface, up);
                 self.sync_reload_network();
             }
-            Message::BluetoothPowerToggled(on) => {
-                sway::set_bluetooth_power(on);
-                self.sync_reload_network();
-            }
-            Message::BluetoothDiscoverableToggled(on) => {
-                sway::set_bluetooth_discoverable(on);
-                self.sync_reload_network();
-            }
-            Message::BluetoothPairableToggled(on) => {
-                sway::set_bluetooth_pairable(on);
-                self.sync_reload_network();
-            }
-            Message::BluetoothScanStart => {
-                self.network_scanning = true;
-                return Task::perform(
-                    async {
-                        tokio::task::spawn_blocking(|| {
-                            sway::bluetooth_scan();
-                            (
-                                sway::get_wifi_status(),
-                                sway::get_wifi_networks(),
-                                sway::get_ethernet_interfaces(),
-                                sway::get_bluetooth_adapter(),
-                                sway::get_bluetooth_devices(),
-                            )
-                        })
-                        .await
-                        .unwrap_or_else(|_| (
-                            sway::WifiStatus::default(), Vec::new(), Vec::new(),
-                            sway::BluetoothAdapter::default(), Vec::new(),
-                        ))
-                    },
-                    |(wifi, networks, eth, bt_adapter, bt_devices)| {
-                        Message::NetworkDataLoaded(wifi, networks, eth, bt_adapter, bt_devices)
-                    },
-                );
-            }
-            Message::BluetoothConnect(mac) => {
-                sway::bluetooth_connect(&mac);
-                self.sync_reload_network();
-            }
-            Message::BluetoothDisconnect(mac) => {
-                sway::bluetooth_disconnect(&mac);
-                self.sync_reload_network();
-            }
-            Message::BluetoothPair(mac) => {
-                sway::bluetooth_pair(&self.config.terminal, &mac);
-                self.sync_reload_network();
-            }
-            Message::BluetoothRemove(mac) => {
-                sway::bluetooth_remove(&mac);
-                self.sync_reload_network();
+            Message::Bluetooth(m) => {
+                let visible = self.current_tab == Tab::Network;
+                return self.bt.update(m, visible).map(Message::Bluetooth);
             }
 
             // VPN section
@@ -1420,6 +1389,13 @@ impl App {
                 }
                 self.audio_subtab = t;
                 self.sync_audio_meters();
+                if t == AudioSubTab::Phone {
+                    self.phone_cfg = crate::phone_audio::PhoneAudioConfig::load();
+                    return Task::perform(
+                        async { tokio::task::spawn_blocking(crate::phone_audio::state).await.unwrap_or_default() },
+                        Message::PhoneStateLoaded,
+                    );
+                }
             }
             Message::AudioMeterTick => {}
             Message::AudioSnapshotLoaded(s) => {
@@ -1437,6 +1413,50 @@ impl App {
                     // nothing chosen yet, or the chosen device vanished
                     self.spatial_out = Some(crate::surround::configured_hw().unwrap_or_else(crate::surround::hardware_default));
                 }
+            }
+
+            Message::PhoneStateLoaded(st) => {
+                self.phone_state = st;
+            }
+            Message::PhoneEnable(on) => {
+                return self.phone_action(move || crate::phone_audio::set_enabled(on).map(|_| None));
+            }
+            Message::PhoneFrameMs(ms) => {
+                self.phone_cfg.frame_ms = ms;
+                let cfg = self.phone_cfg.clone();
+                return self.phone_action(move || crate::phone_audio::apply(&cfg).map(|_| None));
+            }
+            Message::PhoneAutoDefault(v) => {
+                self.phone_cfg.auto_default = v;
+                let cfg = self.phone_cfg.clone();
+                return self.phone_action(move || crate::phone_audio::apply(&cfg).map(|_| None));
+            }
+            Message::PhoneDirection(d) => {
+                self.phone_cfg.direction = d.to_string();
+                let cfg = self.phone_cfg.clone();
+                return self.phone_action(move || crate::phone_audio::apply(&cfg).map(|_| None));
+            }
+            Message::PhoneNewCode => {
+                self.phone_cfg.pair_code = crate::phone_audio::new_pair_code();
+                let cfg = self.phone_cfg.clone();
+                return self.phone_action(move || {
+                    crate::phone_audio::apply(&cfg).map(|_| Some("New pair code saved — enter it in the phone app.".to_string()))
+                });
+            }
+            Message::PhoneInstallApk => {
+                return self.phone_action(|| crate::phone_audio::adb_install().map(Some));
+            }
+            Message::PhoneDone(res) => {
+                self.phone_busy = false;
+                self.phone_msg = match res {
+                    Ok(Some(note)) => Some((false, note)),
+                    Ok(None) => None,
+                    Err(e) => Some((true, e)),
+                };
+                return Task::perform(
+                    async { tokio::task::spawn_blocking(crate::phone_audio::state).await.unwrap_or_default() },
+                    Message::PhoneStateLoaded,
+                );
             }
 
             Message::SpatialRoute(m) => {
@@ -2409,8 +2429,11 @@ impl App {
             .width(Length::Fill)
             .height(Length::Fill);
 
-        // Modal overlays
-        if self.color_picker_open.is_some() {
+        // Modal overlays — a Bluetooth pairing prompt wins over everything
+        // (BlueZ is waiting on the answer, possibly with a device-side timer).
+        if let Some(modal) = tabs::bluetooth::prompt_modal(colors, &self.bt) {
+            iced::widget::stack![base, modal].into()
+        } else if self.color_picker_open.is_some() {
             let modal = self.color_picker_modal(colors);
             iced::widget::stack![base, modal].into()
         } else if self.theme_save_open {
@@ -2437,6 +2460,25 @@ impl App {
         } else {
             base.into()
         }
+    }
+
+    /// Run a Phone-subtab action (systemctl / adb) off the UI thread; result
+    /// comes back as `Message::PhoneDone`.
+    fn phone_action<F>(&mut self, f: F) -> Task<Message>
+    where
+        F: FnOnce() -> Result<Option<String>, String> + Send + 'static,
+    {
+        if self.phone_busy {
+            return Task::none();
+        }
+        self.phone_busy = true;
+        self.phone_msg = None;
+        Task::perform(
+            async move {
+                tokio::task::spawn_blocking(f).await.unwrap_or_else(|_| Err("background task failed".to_string()))
+            },
+            Message::PhoneDone,
+        )
     }
 
     /// Drive the `spatial` helper off the UI thread (it writes the drop-in,
@@ -2539,6 +2581,15 @@ impl App {
             None
         };
 
+        let phone_poll = if self.current_tab == Tab::Audio && self.audio_subtab == AudioSubTab::Phone {
+            Some(
+                iced::time::every(std::time::Duration::from_secs(1))
+                    .map(|_| Message::PhoneStateLoaded(crate::phone_audio::state())),
+            )
+        } else {
+            None
+        };
+
         let pty_poll = if self.current_tab == Tab::SysMonitor && self.pty_session.is_some() {
             Some(
                 iced::time::every(std::time::Duration::from_millis(50))
@@ -2635,7 +2686,17 @@ impl App {
             None
         };
 
-        let mut subs = vec![monitor_timer, resize_events];
+        // BlueZ object tree + pairing agent: always on, so agent prompts
+        // (incoming pairing requests) reach us whatever tab is showing.
+        let bluez = Subscription::run_with_id("og-settings-bluez", crate::bluetooth::dbus::events()).map(Message::Bluetooth);
+        let mut subs = vec![monitor_timer, resize_events, bluez];
+        if self.bt.scanning() {
+            // Drives the "Scanning… 1:43" countdown and the auto-stop.
+            subs.push(
+                iced::time::every(std::time::Duration::from_secs(1))
+                    .map(|_| Message::Bluetooth(crate::bluetooth::BtMsg::ScanTick)),
+            );
+        }
         if let Some(p) = pty_poll { subs.push(p); }
         if let Some(k) = kb { subs.push(k); }
         if let Some(t) = term_kb { subs.push(t); }
@@ -2644,6 +2705,7 @@ impl App {
         if let Some(a) = audio_poll { subs.push(a); }
         if let Some(a) = audio_meter_poll { subs.push(a); }
         if let Some(a) = spatial_poll { subs.push(a); }
+        if let Some(a) = phone_poll { subs.push(a); }
         if let Some(d) = bar_drag { subs.push(d); }
         Subscription::batch(subs)
     }
@@ -3095,8 +3157,7 @@ impl App {
                 &self.wifi_status,
                 &self.wifi_networks,
                 &self.ethernet_interfaces,
-                &self.bluetooth_adapter,
-                &self.bluetooth_devices,
+                &self.bt,
                 self.network_scanning,
                 &self.tailscale_status,
                 &self.vpn_state,
@@ -3192,13 +3253,19 @@ impl App {
                         .and_then(|n| self.spatial_outs.iter().find(|o| &o.name == n))
                         .cloned(),
                 },
+                tabs::audio::PhoneUi {
+                    state: &self.phone_state,
+                    cfg: &self.phone_cfg,
+                    busy: self.phone_busy,
+                    msg: self.phone_msg.as_ref(),
+                },
             ),
             Tab::Printing => tabs::printing::view(colors, self.cups_running, &self.printers, &self.detected_printers),
             Tab::Devices => tabs::devices::view(
                 colors,
                 &self.usb_devices,
                 &self.input_devices,
-                &self.bluetooth_devices,
+                &self.bt.state,
                 &self.monitors,
                 &self.pci_devices,
             ),
@@ -3642,34 +3709,20 @@ fn term_key_bytes(key: &keyboard::Key, text: Option<&str>) -> Option<Vec<u8>> {
     None
 }
 
-/// Bundles every Network-tab data source into one background task —
-/// `bluetoothctl info` runs once per device and `iwctl` calls aren't
-/// instant, so this stays off the UI thread the same way the Power tab's
-/// service lists do.
+/// Bundles the Wi-Fi/Ethernet data sources into one background task —
+/// `iwctl` calls aren't instant, so this stays off the UI thread the same
+/// way the Power tab's service lists do. (Bluetooth is event-driven over
+/// D-Bus instead — see `crate::bluetooth`.)
 fn load_network_data() -> Task<Message> {
     Task::perform(
         async {
             tokio::task::spawn_blocking(|| {
-                (
-                    sway::get_wifi_status(),
-                    sway::get_wifi_networks(),
-                    sway::get_ethernet_interfaces(),
-                    sway::get_bluetooth_adapter(),
-                    sway::get_bluetooth_devices(),
-                )
+                (sway::get_wifi_status(), sway::get_wifi_networks(), sway::get_ethernet_interfaces())
             })
             .await
-            .unwrap_or_else(|_| (
-                sway::WifiStatus::default(),
-                Vec::new(),
-                Vec::new(),
-                sway::BluetoothAdapter::default(),
-                Vec::new(),
-            ))
+            .unwrap_or_else(|_| (sway::WifiStatus::default(), Vec::new(), Vec::new()))
         },
-        |(wifi, networks, eth, bt_adapter, bt_devices)| {
-            Message::NetworkDataLoaded(wifi, networks, eth, bt_adapter, bt_devices)
-        },
+        |(wifi, networks, eth)| Message::NetworkDataLoaded(wifi, networks, eth),
     )
 }
 
