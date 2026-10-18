@@ -167,6 +167,7 @@ pub enum MenuAction {
     Eject,
     EmptyTrash,
     MakePdf,
+    ConvertPdf,
     Compress,
     DiskUsage,
     OpenDefault,
@@ -207,6 +208,7 @@ pub struct App {
     drag: Option<Drag>,
     /// drag-and-drop with other apps (og-suite builds on Wayland)
     dnd: Option<crate::extdnd::Dnd>,
+    win_size: iced::Size,
     /// files from another app are hovering over the window
     ext_hover: bool,
     /// pane under the pointer / pane that receives plain keys
@@ -287,6 +289,8 @@ pub enum Message {
     DndReady(Result<crate::extdnd::Dnd, String>),
     ExtDrop(crate::extdnd::DropEvent),
     CursorLeft,
+    /// window size (logical), for spotting a drag that reaches the edge
+    WinResized(iced::Size),
     AppsLoaded(Arc<openwith::Registry>),
     /// registry, files, MIME type of the first file
     OpenWithReady(Arc<openwith::Registry>, Vec<PathBuf>, String),
@@ -350,6 +354,7 @@ impl App {
             watcher: None,
             drag: None,
             dnd: None,
+            win_size: iced::Size::ZERO,
             ext_hover: false,
             hover_pane: None,
             focus_pane: PaneKind::Files,
@@ -851,6 +856,10 @@ impl App {
                             if let Some(e) = s.errors.first() {
                                 msg += &format!(", {} failed (first: {e})", s.errors.len());
                             }
+                            if job.spec.kind == ops::JobKind::Trash && !ops::TRASH_UNDO {
+                                msg +=
+                                    " (can't be undone here: restore it from the Finder's Trash)";
+                            }
                             let first = job.spec.sources.first().cloned();
                             self.details.record_for(msg, first.as_deref());
                             if let Some(u) = undo {
@@ -1201,12 +1210,53 @@ impl App {
                 let Some(first) = files.first().cloned() else {
                     return Task::none();
                 };
+                if openwith::SYSTEM_OPEN_WITH {
+                    // Windows: the system "Open with" dialog, one per file
+                    return Task::perform(
+                        async move {
+                            tokio::task::spawn_blocking(move || {
+                                for f in &files {
+                                    openwith::open_with_dialog(f)?;
+                                }
+                                Ok(format!("Open with… {}", openwith::describe(&files)))
+                            })
+                            .await
+                            .map_err(|e| e.to_string())?
+                        },
+                        |r| Message::OpDone(r, vec![]),
+                    );
+                }
                 self.with_apps(
                     move |reg| {
                         let mime = reg.mime_of(&first);
                         (reg, files, mime)
                     },
                     |(reg, files, mime)| Message::OpenWithReady(reg, files, mime),
+                )
+            }
+            MenuAction::ConvertPdf => {
+                let files: Vec<PathBuf> = items
+                    .into_iter()
+                    .filter(|p| crate::viewers::pdf::tools::topdf::supported(p))
+                    .collect();
+                if files.is_empty() {
+                    return Task::none();
+                }
+                Task::perform(
+                    async move {
+                        let mut last = None;
+                        for p in &files {
+                            let out = crate::viewers::convert::to_pdf(p.clone())
+                                .await
+                                .map_err(|e| format!("{}: {e}", p.display()))?;
+                            last = Some(out);
+                        }
+                        Ok(match (files.len(), last) {
+                            (1, Some(out)) => format!("Converted to {}", out.display()),
+                            (n, _) => format!("Converted {n} files to PDF"),
+                        })
+                    },
+                    move |r| Message::OpDone(r, vec![dir.clone()]),
                 )
             }
             MenuAction::MakePdf => {
@@ -1688,6 +1738,17 @@ impl App {
                         self.sidebar.sel.dragging = true;
                     }
                 }
+                // While the button is held, Wayland keeps the pointer grabbed
+                // by our window: there is no CursorLeft until release, but
+                // motion keeps coming with positions at/past the edge. That's
+                // where an in-app drag becomes a drag to other apps.
+                if self.drag.as_ref().is_some_and(|d| d.active) && at_edge(p, self.win_size) {
+                    self.drag_out();
+                }
+                Task::none()
+            }
+            Message::WinResized(size) => {
+                self.win_size = size;
                 Task::none()
             }
             Message::MouseUp => {
@@ -1877,16 +1938,8 @@ impl App {
                 }
             }
             Message::CursorLeft => {
-                // an in-app drag leaving the window becomes a drag to other apps
-                if let (Some(d), Some(dnd)) = (self.drag.as_ref().filter(|d| d.active), &self.dnd) {
-                    let paths = d.paths.clone();
-                    if let Err(e) = crate::extdnd::start_drag(dnd, paths) {
-                        self.details.record(format!("Drag out: {e}"));
-                    }
-                    // the compositor takes the drag; iced won't see the release
-                    self.drag = None;
-                    self.sidebar.mouse_up(true);
-                }
+                // X11 and others do report leaving during a drag
+                self.drag_out();
                 Task::none()
             }
             Message::NetLoaded(conns, backend, ssh_hosts) => {
@@ -2181,6 +2234,9 @@ impl App {
                     iced::mouse::Button::Left,
                 )) => Some(Message::MouseUp),
                 iced::Event::Mouse(iced::mouse::Event::CursorLeft) => Some(Message::CursorLeft),
+                iced::Event::Window(
+                    iced::window::Event::Resized(size) | iced::window::Event::Opened { size, .. },
+                ) => Some(Message::WinResized(size)),
                 iced::Event::Mouse(iced::mouse::Event::ButtonPressed(_)) => {
                     Some(Message::MouseDown)
                 }
@@ -2351,6 +2407,21 @@ impl App {
         .into()
     }
 
+    /// Hand an active in-app drag over to the compositor as a drag to
+    /// other apps (browser upload areas, other file managers, …).
+    fn drag_out(&mut self) {
+        let (Some(d), Some(dnd)) = (self.drag.as_ref().filter(|d| d.active), &self.dnd) else {
+            return;
+        };
+        let paths = d.paths.clone();
+        if let Err(e) = crate::extdnd::start_drag(dnd, paths) {
+            self.details.record(format!("Drag out: {e}"));
+        }
+        // the compositor takes the drag; iced won't see the release
+        self.drag = None;
+        self.sidebar.mouse_up(true);
+    }
+
     fn menu_view<'a>(&'a self, at: Point, t: &'a Target) -> Element<'a, Message> {
         let mut entries: Vec<(&str, MenuAction, bool)> = Vec::new();
         let n = t.items.len();
@@ -2413,6 +2484,13 @@ impl App {
             if t.items.iter().all(|(_, k)| *k == Kind::Image) {
                 entries.push(("Combine into PDF", MenuAction::MakePdf, true));
             }
+            if files_only
+                && t.items
+                    .iter()
+                    .all(|(p, _)| crate::viewers::pdf::tools::topdf::supported(p))
+            {
+                entries.push(("Convert to PDF", MenuAction::ConvertPdf, true));
+            }
             if let Some(c) = &t.net {
                 if self.is_mounted(c) {
                     entries.push(("Disconnect", MenuAction::NetDisconnect, true));
@@ -2429,7 +2507,7 @@ impl App {
             if let Some(d) = &t.drive {
                 if d.mount_point.is_none() {
                     entries.push(("Mount", MenuAction::Mount, !d.encrypted));
-                } else if !d.system {
+                } else if !d.system && devices::CAN_UNMOUNT {
                     entries.push(("Unmount", MenuAction::Unmount, true));
                 }
                 if d.ejectable {
@@ -2556,16 +2634,18 @@ impl App {
             .and_then(|p| p.extension())
             .map(|e| format!(".{} files", e.to_string_lossy()))
             .unwrap_or_else(|| "this type".into());
+        if openwith::CAN_SET_DEFAULT {
+            col = col.push(
+                checkbox(
+                    format!("Always open {ext} ({}) with this app", d.mime),
+                    d.set_default,
+                )
+                .on_toggle(Message::DialogFlag)
+                .size(15)
+                .text_size(13),
+            );
+        }
         col.push(
-            checkbox(
-                format!("Always open {ext} ({}) with this app", d.mime),
-                d.set_default,
-            )
-            .on_toggle(Message::DialogFlag)
-            .size(15)
-            .text_size(13),
-        )
-        .push(
             row![
                 Space::with_width(Length::Fill),
                 button(text("Cancel"))
@@ -2980,4 +3060,23 @@ fn with_ext(name: &str, ext: &str) -> String {
     } else {
         format!("{name}{ext}")
     }
+}
+
+/// Is `p` at (within 2 px of) or past the window's edge? Unknown size → no.
+fn at_edge(p: Point, size: iced::Size) -> bool {
+    const M: f32 = 2.0;
+    size.width > 0.0
+        && size.height > 0.0
+        && (p.x <= M || p.y <= M || p.x >= size.width - M || p.y >= size.height - M)
+}
+
+#[cfg(test)]
+#[test]
+fn drag_out_edge_detection() {
+    let s = iced::Size::new(800.0, 600.0);
+    assert!(!at_edge(Point::new(400.0, 300.0), s));
+    assert!(at_edge(Point::new(-5.0, 300.0), s));
+    assert!(at_edge(Point::new(400.0, 601.0), s));
+    assert!(at_edge(Point::new(799.0, 10.0), s));
+    assert!(!at_edge(Point::new(-5.0, 300.0), iced::Size::ZERO));
 }

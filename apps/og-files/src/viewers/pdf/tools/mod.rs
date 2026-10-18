@@ -18,14 +18,33 @@
 //!                   images → PDF, signatures)
 //!   * [`raster`]    hayro-rendered operations (to images, flatten, colour,
 //!                   redact regions, blank-page detection, fake scan)
-//!   * [`server`]    optional Stirling-PDF REST backend for OCR, compress,
-//!                   office conversion, PDF/A, certificate signing
+//!   * [`ocr`]       offline OCR (ocrs) → invisible text layer
+//!   * [`qrsplit`]   auto-split at QR separator pages (rqrr)
+//!   * [`scans`]     split several photos scanned on one sheet (imageproc)
+//!   * [`extract`]   layout-aware text extraction (hayro glyph capture →
+//!                   lines, columns, paragraphs, headings, lists, tables,
+//!                   images)
+//!   * [`convert`]   PDF → docx/odt/pptx/xlsx/csv/html/md/txt/rtf/xml/epub
+//!                   writers over the extracted layout
+//!   * [`topdf`]     anything → PDF (office files, HTML/web pages,
+//!                   Markdown, e-mail, e-books, comics, SVG) via an
+//!                   in-process Typst typesetter
 
+pub mod compress;
+pub mod convert;
+pub mod extract;
 pub mod layout;
+pub mod ocr;
 pub mod pages;
+pub mod pdfa;
+pub mod qrsplit;
 pub mod raster;
-pub mod server;
+pub mod repair;
+pub mod scans;
+
+pub mod sign;
 pub mod structure;
+pub mod topdf;
 
 #[derive(Debug, Clone)]
 pub enum Output {

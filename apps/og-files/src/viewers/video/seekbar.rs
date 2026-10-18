@@ -93,7 +93,7 @@ impl canvas::Program<Msg> for SeekBar {
             );
         }
         if let (Some(a), Some(b)) = self.marks {
-            rect(&mut f, x(a), x(b), super::ff::AMBER.scale_alpha(0.45));
+            rect(&mut f, x(a), x(b), super::common::AMBER.scale_alpha(0.45));
         }
         let accent = pal.primary.base.color;
         rect(&mut f, 0.0, x(self.pos), accent);
@@ -113,7 +113,7 @@ impl canvas::Program<Msg> for SeekBar {
             tick(&mut f, t, Color::from_rgb(0.35, 0.8, 1.0), 7.0);
         }
         for t in [self.marks.0, self.marks.1].into_iter().flatten() {
-            tick(&mut f, t, super::ff::AMBER, 7.0);
+            tick(&mut f, t, super::common::AMBER, 7.0);
         }
         f.fill(&Path::circle(Point::new(x(self.pos), mid), 6.0), accent);
         if let Some(p) = cursor.position_in(bounds) {

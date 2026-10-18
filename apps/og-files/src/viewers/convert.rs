@@ -1,12 +1,12 @@
 //! "Convert to PDF" for files that aren't PDFs, plus the unlock screen for
 //! password-protected PDFs.
 //!
-//! Images convert natively (`tools::layout::images_to_pdf`). Office
-//! documents, HTML, Markdown, e-mail and e-books go through the optional
-//! Stirling server (`tools::server::convert_to_pdf`), since they need
-//! LibreOffice-class engines.
+//! Everything converts natively: images through
+//! `tools::layout::images_to_pdf`, office documents, HTML, Markdown,
+//! e-mail, e-books, comics and SVG through `tools::topdf` (Typst
+//! typesetting in-process).
 
-use super::pdf::tools::{layout, server, structure};
+use super::pdf::tools::{layout, scans, structure, topdf};
 use super::Event;
 use crate::filetype::Kind;
 use crate::theme;
@@ -14,46 +14,22 @@ use iced::widget::{button, center, column, text, text_input};
 use iced::{Element, Task};
 use std::path::{Path, PathBuf};
 
-const SERVER_EXTS: [&str; 18] = [
-    "doc", "docx", "odt", "rtf", "ppt", "pptx", "odp", "xls", "xlsx", "ods", "epub", "html", "htm",
-    "md", "markdown", "eml", "txt", "csv",
-];
-
-fn ext(path: &Path) -> String {
-    path.extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("")
-        .to_ascii_lowercase()
-}
-
-/// Can this file be turned into a PDF, and does it need the server?
-pub fn convertible(path: &Path, kind: Kind) -> Option<bool> {
-    if kind == Kind::Image {
-        return Some(false);
-    }
-    SERVER_EXTS.contains(&ext(path).as_str()).then_some(true)
+/// Can this file be turned into a PDF (all in-process)?
+pub fn convertible(path: &Path, kind: Kind) -> bool {
+    kind == Kind::Image || topdf::supported(path)
 }
 
 /// Convert and write `<stem>.pdf` next to the file (never overwrites).
 pub async fn to_pdf(path: PathBuf) -> Result<PathBuf, String> {
-    let bytes = tokio::fs::read(&path).await.map_err(|e| e.to_string())?;
-    let is_image = crate::filetype::Kind::of(&path, false) == Kind::Image;
-    let name = path
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
+    // SVG is an "image" by MIME type but converts as a vector drawing
+    let raster = Kind::of(&path, false) == Kind::Image && !topdf::supported(&path);
+    let src = path.clone();
     let pdf = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, String> {
-        if is_image {
+        if raster {
+            let bytes = std::fs::read(&src).map_err(|e| e.to_string())?;
             return layout::images_to_pdf(&[bytes], None, 0.0);
         }
-        let cfg = server::ServerConfig::load().ok_or(
-            "this needs the Stirling server — set it up under PDF Tools → Server settings",
-        )?;
-        let r = server::convert_to_pdf(&cfg, &name, &bytes)?;
-        if r.ext != "pdf" {
-            return Err(format!("server returned .{} instead of a PDF", r.ext));
-        }
-        Ok(r.bytes)
+        topdf::file_to_pdf(&src)
     })
     .await
     .map_err(|e| e.to_string())??;
@@ -72,35 +48,46 @@ pub async fn to_pdf(path: PathBuf) -> Result<PathBuf, String> {
     Ok(out)
 }
 
-/// Server-side "extract image scans": several photos scanned on one sheet
-/// come back as separate images (usually a zip), written beside the scan.
-pub async fn split_scan(path: PathBuf) -> Result<PathBuf, String> {
+/// "Extract image scans", natively (`tools::scans`): several photos scanned
+/// on one sheet are cropped, straightened and written beside the scan as
+/// `<stem>-photo-01.<ext>` …. Returns a status line.
+pub async fn split_scan(path: PathBuf) -> Result<String, String> {
     let bytes = tokio::fs::read(&path).await.map_err(|e| e.to_string())?;
-    let name = path
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    let reply = tokio::task::spawn_blocking(move || {
-        let cfg = server::ServerConfig::load().ok_or(
-            "this needs the Stirling server — set it up under PDF Tools → Server settings",
-        )?;
-        server::scanner_image_split(&cfg, &name, &bytes)
+    let photos = tokio::task::spawn_blocking(move || {
+        scans::split_image_file(&bytes, scans::Options::default())
     })
     .await
-    .map_err(|e| e.to_string())??;
+    .map_err(|_| "the photo splitter crashed".to_string())??;
     let dir = path.parent().unwrap_or(Path::new(".")).to_path_buf();
     let stem = path
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| "scan".into());
-    let mut out = dir.join(format!("{stem}-photos.{}", reply.ext));
-    let mut n = 2;
-    while tokio::fs::try_exists(&out).await.unwrap_or(false) {
-        out = dir.join(format!("{stem}-photos ({n}).{}", reply.ext));
-        n += 1;
+    let count = photos.len();
+    let mut first = None;
+    for (suffix, bytes) in photos {
+        let (body, ext) = suffix.rsplit_once('.').unwrap_or((suffix.as_str(), "png"));
+        let mut out = dir.join(format!("{stem}-{body}.{ext}"));
+        let mut n = 2;
+        while tokio::fs::try_exists(&out).await.unwrap_or(false) {
+            out = dir.join(format!("{stem}-{body} ({n}).{ext}"));
+            n += 1;
+        }
+        crate::fsops::write_bytes(out.clone(), bytes).await?;
+        first.get_or_insert(out);
     }
-    crate::fsops::write_bytes(out.clone(), reply.bytes).await?;
-    Ok(out)
+    let first = first.map(|p| p.display().to_string()).unwrap_or_default();
+    Ok(match count {
+        1 => format!("Found 1 photo: {first}"),
+        n => format!("Found {n} photos: {first} …"),
+    })
+}
+
+pub fn split_status(r: Result<String, String>) -> Event {
+    Event::Status(match r {
+        Ok(s) => s,
+        Err(e) => format!("Split scanned photos failed: {e}"),
+    })
 }
 
 pub fn status(r: Result<PathBuf, String>) -> Event {

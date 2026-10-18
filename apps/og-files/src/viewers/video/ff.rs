@@ -16,6 +16,7 @@
 //! `<stem>-edit.<ext>`, "Snapshot frame" writes `<stem>-frame-MMmSSs.png`.
 //! Both run on worker threads and report through `Event::Status`.
 
+use super::common::{edit_name, fmt_mark, fmt_time, ExportEv, Info, AMBER};
 use crate::theme;
 use crate::viewers::Event;
 use crate::widgets::icon;
@@ -41,8 +42,9 @@ const MAX_DISPLAY: u32 = 1920;
 const QUEUE: usize = 8;
 /// Audio kept buffered ahead of the device (seconds).
 const AUDIO_AHEAD: f64 = 0.6;
+/// This build can stream-copy trims (`spawn_export`).
+pub(super) const CAN_EXPORT: bool = true;
 const SPEEDS: [f32; 4] = [0.5, 1.0, 1.5, 2.0];
-pub(super) const AMBER: iced::Color = iced::Color::from_rgb(1.0, 0.784, 0.42);
 
 fn init() {
     static ONCE: Once = Once::new();
@@ -50,38 +52,6 @@ fn init() {
         let _ = ff::init();
         ff::util::log::set_level(ff::util::log::Level::Fatal);
     });
-}
-
-/// Stream facts shown under the player.
-#[derive(Debug, Clone, Default)]
-pub struct Info {
-    /// seconds
-    pub duration: f64,
-    pub width: u32,
-    pub height: u32,
-    pub fps: f64,
-    pub video_codec: String,
-    /// "AAC 48 kHz 2ch"
-    pub audio: Option<String>,
-    /// bits/s (container), 0 if unknown
-    pub bit_rate: i64,
-}
-
-impl Info {
-    pub(super) fn summary(&self) -> String {
-        let mut s = format!(
-            "{} · {}×{} · {:.2} fps",
-            self.video_codec, self.width, self.height, self.fps
-        );
-        if self.bit_rate > 0 {
-            s += &format!(" · {:.1} Mb/s", self.bit_rate as f64 / 1e6);
-        }
-        match &self.audio {
-            Some(a) => s += &format!(" · {a}"),
-            None => s += " · no audio",
-        }
-        s
-    }
 }
 
 /// Stream facts of `path` (blocking).
@@ -1097,19 +1067,6 @@ impl Playback {
 
 // ══════════════════════════════════════════════════════════════════════ UI
 
-pub(super) fn fmt_time(t: f64) -> String {
-    let s = t.max(0.0) as u64;
-    if s >= 3600 {
-        format!("{}:{:02}:{:02}", s / 3600, s / 60 % 60, s % 60)
-    } else {
-        format!("{}:{:02}", s / 60, s % 60)
-    }
-}
-
-pub(super) fn fmt_mark(t: f64) -> String {
-    format!("{}.{}", fmt_time(t), ((t.max(0.0) * 10.0) as u64) % 10)
-}
-
 pub struct State {
     path: PathBuf,
     info: Info,
@@ -1130,12 +1087,6 @@ pub struct State {
     mark_out: Option<f64>,
     export: Option<f32>,
     snapshotting: bool,
-}
-
-#[derive(Debug, Clone)]
-pub enum ExportEv {
-    Progress(f32),
-    Done(Result<PathBuf, String>),
 }
 
 #[derive(Debug, Clone)]
@@ -1526,17 +1477,6 @@ impl State {
     }
 }
 
-/// `<stem>-edit.<ext>` beside `src`, made unique.
-pub(super) fn edit_name(src: &Path) -> PathBuf {
-    let dir = src.parent().unwrap_or(Path::new("."));
-    let stem = src.file_stem().unwrap_or_default().to_string_lossy();
-    let name = match src.extension() {
-        Some(ext) => format!("{stem}-edit.{}", ext.to_string_lossy()),
-        None => format!("{stem}-edit"),
-    };
-    crate::ops::unique_name(dir, &name)
-}
-
 /// Run `export_trim` on a worker thread into `<stem>-edit.<ext>`,
 /// streaming progress and the result.
 pub(super) fn spawn_export(src: PathBuf, tin: f64, tout: f64) -> Task<ExportEv> {
@@ -1566,24 +1506,7 @@ pub(super) fn spawn_export(src: PathBuf, tin: f64, tout: f64) -> Task<ExportEv> 
 pub(super) mod tests {
     use super::*;
 
-    /// Scratch dir under ~/.cache (never /tmp), removed on drop.
-    pub(in crate::viewers::video) struct Tmp(pub PathBuf);
-    impl Tmp {
-        pub fn new(name: &str) -> Tmp {
-            let home = std::env::var_os("HOME").expect("HOME");
-            let d = PathBuf::from(home)
-                .join(".cache/ogx-mpv-tests")
-                .join(format!("{name}-{}", std::process::id()));
-            let _ = std::fs::remove_dir_all(&d);
-            std::fs::create_dir_all(&d).unwrap();
-            Tmp(d)
-        }
-    }
-    impl Drop for Tmp {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
+    pub(in crate::viewers::video) use crate::viewers::video::common::tests::Tmp;
 
     const W: u32 = 160;
     const H: u32 = 120;

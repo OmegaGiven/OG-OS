@@ -306,7 +306,7 @@ enum PageImage {
     Gray(GrayImage),
 }
 
-fn open_hayro(pdf: &[u8]) -> Result<Pdf, String> {
+pub(super) fn open_hayro(pdf: &[u8]) -> Result<Pdf, String> {
     let data = Arc::new(pdf.to_vec());
     match std::panic::catch_unwind(|| Pdf::new(data)) {
         Ok(Ok(p)) => Ok(p),
@@ -316,7 +316,7 @@ fn open_hayro(pdf: &[u8]) -> Result<Pdf, String> {
 }
 
 /// Sorted, de-duplicated, bounds-checked page list.
-fn select(pages: &[usize], count: usize) -> Result<Vec<usize>, String> {
+pub(super) fn select(pages: &[usize], count: usize) -> Result<Vec<usize>, String> {
     if pages.is_empty() {
         return Err("no pages selected".into());
     }
@@ -341,7 +341,7 @@ fn effective_scale(dpi: f32, w: f32, h: f32) -> Result<f32, String> {
 
 /// Render page `i` on white; returns the RGBA bitmap and the page's visible
 /// size in points (rotation applied).
-fn render_page<'a>(
+pub(super) fn render_page<'a>(
     doc: &'a Pdf,
     cache: &RenderCache<'a>,
     i: usize,
@@ -388,7 +388,7 @@ fn img_points(img: &RgbaImage, dpi: f32) -> (f32, f32) {
     (img.width() as f32 / s, img.height() as f32 / s)
 }
 
-fn rgba_to_rgb(img: &RgbaImage) -> RgbImage {
+pub(super) fn rgba_to_rgb(img: &RgbaImage) -> RgbImage {
     let mut out = RgbImage::new(img.width(), img.height());
     for (d, s) in out.pixels_mut().zip(img.pixels()) {
         d.0 = [s.0[0], s.0[1], s.0[2]];
@@ -475,14 +475,14 @@ impl XorShift {
     }
 }
 
-fn encode_png(img: &RgbaImage) -> Result<Vec<u8>, String> {
+pub(super) fn encode_png(img: &RgbaImage) -> Result<Vec<u8>, String> {
     let mut buf = std::io::Cursor::new(Vec::new());
     img.write_to(&mut buf, image::ImageFormat::Png)
         .map_err(|e| format!("PNG encoding failed: {e}"))?;
     Ok(buf.into_inner())
 }
 
-fn encode_jpeg_rgb(img: &RgbImage, quality: u8) -> Result<Vec<u8>, String> {
+pub(super) fn encode_jpeg_rgb(img: &RgbImage, quality: u8) -> Result<Vec<u8>, String> {
     let mut buf = Vec::new();
     image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, quality.clamp(1, 100))
         .encode_image(img)

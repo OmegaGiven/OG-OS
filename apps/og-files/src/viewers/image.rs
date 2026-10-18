@@ -60,7 +60,7 @@ pub enum Msg {
     ToggleChecker,
     /// handled by the registry (needs the path): writes `<name>.pdf`
     ToPdf,
-    /// handled by the registry: split photos out of a scan (server)
+    /// handled by the registry: split photos out of a scan
     SplitScan,
 }
 
@@ -129,7 +129,7 @@ impl State {
         bar = bar
             .push(toggle("Edge", self.edge, Msg::ToggleEdge))
             .push(
-                button(text("Split scanned photos (server)").size(12))
+                button(text("Split scanned photos").size(12))
                     .on_press(Msg::SplitScan)
                     .style(button::secondary),
             )

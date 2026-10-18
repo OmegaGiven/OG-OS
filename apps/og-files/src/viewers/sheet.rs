@@ -90,6 +90,11 @@ pub async fn open(path: PathBuf) -> Result<Opened, String> {
         .map_err(|e| e.to_string())?
 }
 
+/// Every sheet's cells as text (Convert to PDF uses this).
+pub(crate) fn load_sheets(path: &Path) -> Result<Arc<Vec<SheetData>>, String> {
+    load(path).map(|o| o.sheets)
+}
+
 fn load(path: &Path) -> Result<Opened, String> {
     let ext = ext_lower(path);
     let (fmt, sheets) = match ext.as_str() {

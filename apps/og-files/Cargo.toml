@@ -3,6 +3,8 @@ name = "og-files"
 version = "0.1.0"
 edition = "2021"
 description = "OG Files — file manager with built-in viewers and editors"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/OmegaGiven/og-files"
 
 [[bin]]
 name = "og-files"
@@ -19,13 +21,28 @@ serde_json = "1"
 mime_guess = "2"
 hayro = "0.7"
 lopdf = { version = "0.45", default-features = false }
+memchr = "2"
+# CFF standard strings for the PDF/A font embedder (same version hayro uses)
+read-fonts = { version = "0.39", default-features = false }
+# PDF certificate signing / validation (tools/sign.rs): pure RustCrypto
+p12-keystore = "0.2"
+der = { version = "0.7", features = ["alloc", "oid"] }
+x509-cert = { version = "0.2", default-features = false, features = ["std", "pem"] }
+spki = "0.7"
+pkcs8 = { version = "0.10", features = ["pem", "encryption"] }
+rsa = { version = "0.9", features = ["sha2"] }
+p256 = { version = "0.13", features = ["ecdsa", "pem"] }
+p384 = { version = "0.13", features = ["ecdsa", "pem"] }
+sha1 = { version = "0.10", features = ["oid"] }
+sha2 = { version = "0.10", features = ["oid"] }
+rand_core = { version = "0.6", features = ["getrandom"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "tiff"] }
 ureq = { version = "2.12", default-features = false, features = ["tls"] }
 iced_fonts = { version = "0.1", features = ["bootstrap"] }
-zbus = { version = "5", default-features = false, features = ["tokio"] }
 notify = "8"
-# statvfs for the disk-usage header (already in the tree via other deps)
-libc = "0.2"
+# home / config / state / cache dirs on macOS and Windows (Linux keeps its
+# own XDG lookups in config.rs)
+dirs = "6"
 og-wayland = { path = "../../crates/og-wayland", optional = true }
 symphonia = { version = "0.5", features = ["mp3", "aac", "alac", "isomp4"] }
 lofty = "0.22"
@@ -37,7 +54,9 @@ stl_io = "0.8"
 glam = "0.25"
 bytemuck = { version = "1", features = ["derive"] }
 base64 = "0.22"
-ffmpeg-next = "9"
+# video decode fallback, thumbnails and trim (feature `ffmpeg`; needs the
+# FFmpeg dev libraries at build time)
+ffmpeg-next = { version = "9", optional = true }
 cpal = "0.18"
 # video player: libmpv loaded at runtime (falls back to ffmpeg-next without it)
 libloading = "0.8"
@@ -55,20 +74,75 @@ xz2 = "0.1"
 zstd = "0.13"
 bzip2 = "0.4"
 sevenz-rust2 = { version = "0.20", default-features = false, features = ["aes256", "bzip2", "deflate", "ppmd", "compress"] }
+# PDF vision tools (tools/ocr.rs, qrsplit.rs, scans.rs): pure-Rust OCR
+# (ocrs on the rten runtime, models embedded from assets/ocr/), QR
+# detection and scanned-photo segmentation
+ocrs = { version = "0.13", default-features = false, features = ["rten"] }
+rten = { version = "0.26", default-features = false, features = ["rten_format"] }
+rqrr = "0.11"
+imageproc = { version = "0.27", default-features = false }
+
+# anything → PDF (pdf/tools/topdf): Typst as an in-process typesetter, plus
+# input parsers. All pure Rust.
+typst = "0.15.1"
+typst-layout = "0.15.1"
+typst-pdf = "0.15.1"
+typst-kit = { version = "0.15.1", default-features = false, features = ["scan-fonts"] }
+# SVG sizing/validation (the usvg Typst's PDF export embeds SVGs with)
+usvg = { version = "0.47", default-features = false }
+pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
+scraper = { version = "0.24", default-features = false }
+url = "2"
+mail-parser = { version = "0.11", default-features = false }
+mobi = "0.8"
+rars = { version = "0.11", default-features = false }
 
 og-config = { path = "../../crates/og-config", optional = true }
 og-theme = { path = "../../crates/og-theme", optional = true }
+
+# Linux: UDisks2, Avahi, Secret Service over D-Bus
+[target.'cfg(target_os = "linux")'.dependencies]
+zbus = { version = "5", default-features = false, features = ["tokio"] }
+
+# statvfs, getuid, setsid, … (Linux + macOS)
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+# macOS / Windows: system trash, mounted volumes, OS keychain
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+trash = "5"
+sysinfo = { version = "0.37", default-features = false, features = ["disk"] }
+keyring = { version = "3", features = ["apple-native", "windows-native"] }
+
+# macOS app bundles (Info.plist, XML or binary) for "Open with"
+[target.'cfg(target_os = "macos")'.dependencies]
+plist = "1"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.60", features = ["Win32_Foundation", "Win32_System_Console", "Win32_Storage_FileSystem", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging", "Win32_System_Threading"] }
 
 [features]
 # OG-OS integration (on by default): suite palette with live reload and,
 # via og-wayland, drag-and-drop with other apps. Build with
 # --no-default-features for a fully standalone binary.
-default = ["og-suite"]
+default = ["og-suite", "ffmpeg"]
+# FFmpeg (ffmpeg-next): fallback video player when libmpv is missing, video
+# thumbnails and lossless trim export. Without it video needs libmpv.
+ffmpeg = ["dep:ffmpeg-next"]
 og-suite = ["dep:og-config", "dep:og-theme", "dep:og-wayland"]
 
 [dev-dependencies]
+# test-only: self-signed signing certificates generated in tests
+x509-cert = { version = "0.2", features = ["builder"] }
+# macapps tests run on every OS
+plist = "1"
 tokio = { version = "1.52.3", features = ["macros", "rt", "time", "sync", "fs"] }
 # validates the 3D viewer's WGSL without a GPU (same naga as iced's wgpu)
 naga = { version = "0.19", features = ["wgsl-in"] }
 # test-only: checks the highlighter language tokens resolve (already an iced dep)
 syntect = "5"
+# test-only: QR separator pages and rendered text for the vision tools
+qrcode = { version = "0.14", default-features = false, features = ["image"] }
+ab_glyph = "0.2"
+# test-only: builds the .cbr fixture (the app itself only reads RAR)
+rars = { version = "0.11", default-features = false, features = ["write"] }

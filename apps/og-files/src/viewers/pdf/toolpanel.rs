@@ -5,7 +5,10 @@
 //! Form values live in two small string/bool maps keyed by field name, so a
 //! tool's form is just a list of `field(...)` calls — no per-tool state.
 
-use super::tools::{self, layout, pages, raster, server, structure, Anchor, Output, Paper};
+use super::tools::{
+    self, compress, convert, layout, pages, pdfa, raster, repair, sign, structure, Anchor, Output,
+    Paper,
+};
 use crate::theme;
 use iced::mouse;
 use iced::widget::canvas::{self, Canvas, Frame, Geometry, Path, Stroke};
@@ -62,6 +65,7 @@ pub enum Tool {
     // convert & extract
     ToImages,
     ExtractImages,
+    ExtractScans,
     ExtractAttachments,
     ConvertTo,
     Info,
@@ -69,7 +73,7 @@ pub enum Tool {
     AutoRename,
     // optimize & colour
     CompressLossless,
-    CompressServer,
+    CompressImages,
     Repair,
     Ocr,
     PdfA,
@@ -141,6 +145,7 @@ pub const CATEGORIES: [(&str, &[Tool]); 5] = [
         &[
             ToImages,
             ExtractImages,
+            ExtractScans,
             ExtractAttachments,
             ConvertTo,
             Info,
@@ -152,7 +157,7 @@ pub const CATEGORIES: [(&str, &[Tool]); 5] = [
         "Optimize & colour",
         &[
             CompressLossless,
-            CompressServer,
+            CompressImages,
             Repair,
             Ocr,
             PdfA,
@@ -206,13 +211,14 @@ impl Tool {
             ValidateSignature => "Validate signatures",
             ToImages => "Pages to images",
             ExtractImages => "Extract images",
+            ExtractScans => "Split scanned photos",
             ExtractAttachments => "Extract attachments",
             ConvertTo => "Convert PDF to…",
             Info => "Document info",
             Compare => "Compare with another PDF",
             AutoRename => "Auto-rename from content",
             CompressLossless => "Compress (lossless)",
-            CompressServer => "Compress (strong)",
+            CompressImages => "Compress (images)",
             Repair => "Repair",
             Ocr => "OCR (make text searchable)",
             PdfA => "Convert to PDF/A",
@@ -240,7 +246,7 @@ impl Tool {
             SinglePage => "Stacks every page into one tall page.",
             Overlay => "Draws another PDF's pages over or under these.",
             InsertImages => "Adds image files as pages after the current page.",
-            InsertUrl => "Renders a web page to PDF (server) and inserts it after the current page.",
+            InsertUrl => "Typesets a web page (HTML and images; scripts don't run) and inserts it after the current page.",
             PageNumbers => "Placeholders: {n}, {total}, {filename}.",
             TextStamp => "Stamps a line of text on the chosen pages.",
             Watermark => "Large faint text on every page, centred or tiled.",
@@ -261,40 +267,27 @@ impl Tool {
             UnlockForms => "Makes read-only form fields editable.",
             RemoveSignatures => "Removes digital signatures.",
             ShowJavaScript => "Lists all scripts in the document.",
-            CertSign => "Signs with a .p12/.pfx certificate (server).",
-            ValidateSignature => "Checks digital signatures (server).",
+            CertSign => "PAdES signature with a .p12/.pfx or PEM certificate.",
+            ValidateSignature => "Checks every digital signature in the file.",
             ToImages => "Writes each page as an image next to the PDF.",
             ExtractImages => "Saves embedded images next to the PDF.",
+            ExtractScans => "Several photos scanned on one page → separate, straightened images.",
             ExtractAttachments => "Saves embedded files next to the PDF.",
-            ConvertTo => "Word, Excel, PowerPoint, HTML, Markdown and more (server).",
+            ConvertTo => "Word, Excel, PowerPoint, HTML, Markdown and more.",
             Info => "Pages, fonts, images, security, metadata.",
             Compare => "Text differences, page by page.",
             AutoRename => "Renames the file from its title or first line.",
             CompressLossless => "Smaller file without touching image quality.",
-            CompressServer => "Stronger compression incl. images (server).",
+            CompressImages => "Downsamples and re-encodes images, levels 1–9.",
             Repair => "Rebuilds a damaged file.",
-            Ocr => "Adds a text layer to scans (server).",
-            PdfA => "Archival PDF/A-2b (server).",
-            AutoSplit => "Splits at pages with Stirling's split QR code (server).",
+            Ocr => "Adds an invisible, searchable text layer to scans (offline, Latin script).",
+            PdfA => "Archival PDF/A-2b (best effort) with a verifier report.",
+            AutoSplit => "Splits at separator pages carrying a QR code; drops those pages.",
             Grayscale => "Converts to greyscale (pages become images).",
             Invert => "Dark pages, light text (pages become images).",
             AdjustColors => "Brightness, contrast, saturation (pages become images).",
             FakeScan => "Slight tilt, noise and paper tone.",
         }
-    }
-
-    pub fn needs_server(self) -> bool {
-        matches!(
-            self,
-            InsertUrl
-                | CertSign
-                | ValidateSignature
-                | ConvertTo
-                | CompressServer
-                | Ocr
-                | PdfA
-                | AutoSplit
-        )
     }
 }
 
@@ -310,6 +303,9 @@ pub enum JobOut {
     Select(Vec<usize>),
     /// prefill form fields (metadata, bookmarks)
     Prefill(Vec<(&'static str, String)>),
+    /// a new document version plus a report for the panel (compress,
+    /// repair, PDF/A)
+    PdfReport(Vec<u8>, String),
 }
 
 // ---------------------------------------------------------------- form ----
@@ -464,7 +460,6 @@ pub struct JobInput {
     pub current: usize,
     pub selected: Vec<usize>,
     pub file_name: String,
-    pub server: Option<server::ServerConfig>,
 }
 
 fn read(path: &str) -> Result<Vec<u8>, String> {
@@ -498,17 +493,6 @@ pub fn expand_home(p: &str) -> PathBuf {
     }
 }
 
-fn reply_out(r: server::Reply, suffix: &str) -> JobOut {
-    if r.ext == "pdf" {
-        JobOut::Out(Output::Pdf(r.bytes))
-    } else {
-        JobOut::Out(Output::Files(vec![(
-            format!("{suffix}.{}", r.ext),
-            r.bytes,
-        )]))
-    }
-}
-
 fn split_files(
     doc: &[u8],
     groups: Vec<Vec<usize>>,
@@ -524,6 +508,25 @@ fn split_files(
         })
         .collect::<Result<Vec<_>, _>>()?;
     Ok(JobOut::Out(Output::Files(files)))
+}
+
+/// "Split scanned photos" form → detector settings (Stirling's knobs).
+fn scan_options(form: &Form) -> Result<tools::scans::Options, String> {
+    let d = tools::scans::Options::default();
+    let whole = |k: &'static str, def: u32, max: f32| -> Result<u32, String> {
+        let v = form.num(k, def as f32)?;
+        if !(0.0..=max).contains(&v) {
+            return Err(format!("'{v}' is out of range (0–{max})"));
+        }
+        Ok(v.round() as u32)
+    };
+    Ok(tools::scans::Options {
+        angle_threshold: form.num("angle", d.angle_threshold)?.clamp(0.0, 45.0),
+        tolerance: whole("tolerance", d.tolerance as u32, 255.0)? as u8,
+        min_area: whole("min_area", d.min_area, 1e9)?,
+        min_contour_area: whole("min_contour", d.min_contour_area, 1e9)?,
+        border: whole("border", d.border, 1000.0)?,
+    })
 }
 
 fn slug(s: &str) -> String {
@@ -584,11 +587,6 @@ pub fn job(tool: Tool, form: &Form, input: JobInput) -> Result<Job, String> {
             spec
         };
         pages::parse(&spec, n)
-    };
-    let srv = || {
-        input.server.clone().ok_or_else(|| {
-            "Set up the Stirling server first (see Settings in this panel)".to_string()
-        })
     };
     let out = |r: Result<Vec<u8>, String>| r.map(|b| JobOut::Out(Output::Pdf(b)));
 
@@ -700,14 +698,8 @@ pub fn job(tool: Tool, form: &Form, input: JobInput) -> Result<Job, String> {
             })
         }
         InsertUrl => {
-            let (cfg, url) = (srv()?, form.t("url", ""));
-            Box::new(move |_| {
-                let r = server::url_to_pdf(&cfg, url.trim())?;
-                if r.ext != "pdf" {
-                    return Err(format!("server returned .{} instead of a PDF", r.ext));
-                }
-                Ok(JobOut::Insert(r.bytes))
-            })
+            let url = form.t("url", "");
+            Box::new(move |_| tools::topdf::url_to_pdf(url.trim()).map(JobOut::Insert))
         }
         PageNumbers => {
             let p = range("pages")?;
@@ -874,23 +866,40 @@ pub fn job(tool: Tool, form: &Form, input: JobInput) -> Result<Job, String> {
             structure::javascript_report(&pdf).map(|r| JobOut::Out(Output::Report(r)))
         }),
         CertSign => {
-            let (cfg, cert, pw) = (srv()?, form.t("cert", ""), form.t("cert_pw", ""));
-            let (reason, loc, vis) = (
-                form.t("reason", ""),
-                form.t("location", ""),
-                form.f("visible", false),
-            );
+            let (cert, key, pw) = (form.t("cert", ""), form.t("key", ""), form.t("cert_pw", ""));
+            if cert.trim().is_empty() {
+                return Err("choose a certificate file (.p12, .pfx or .pem)".into());
+            }
+            let visible = if form.f("visible", false) {
+                let page = form.num("sig_page", (input.current + 1) as f32)? as usize;
+                if page == 0 || page > n {
+                    return Err(format!("page {page} is outside 1–{n}"));
+                }
+                Some(sign::Visible {
+                    page: page - 1,
+                    anchor: form.anchor(Anchor::BottomRight),
+                })
+            } else {
+                None
+            };
+            let req = sign::Request {
+                reason: form.t("reason", ""),
+                location: form.t("location", ""),
+                contact: form.t("contact", ""),
+                visible,
+            };
             Box::new(move |pdf: Arc<Vec<u8>>| {
-                server::cert_sign(&cfg, &pdf, &read(&cert)?, &pw, &reason, &loc, vis)
-                    .map(|r| reply_out(r, "signed"))
+                let key = if key.trim().is_empty() {
+                    None
+                } else {
+                    Some(read(&key)?)
+                };
+                out(sign::sign(&pdf, &read(&cert)?, key.as_deref(), &pw, &req))
             })
         }
-        ValidateSignature => {
-            let cfg = srv()?;
-            Box::new(move |pdf: Arc<Vec<u8>>| {
-                server::validate_signature(&cfg, &pdf).map(|r| JobOut::Out(Output::Report(r)))
-            })
-        }
+        ValidateSignature => Box::new(move |pdf: Arc<Vec<u8>>| {
+            sign::validate(&pdf).map(|r| JobOut::Out(Output::Report(r)))
+        }),
         ToImages => {
             let (p, dpi) = (range("pages")?, form.num("dpi", 150.0)?);
             let fmt = if form.f("jpeg", false) {
@@ -912,6 +921,13 @@ pub fn job(tool: Tool, form: &Form, input: JobInput) -> Result<Job, String> {
                 Ok(JobOut::Out(Output::Files(f)))
             })
         }
+        ExtractScans => {
+            let p = range("pages")?;
+            let opts = scan_options(form)?;
+            Box::new(move |pdf: Arc<Vec<u8>>| {
+                tools::scans::split_pdf(&pdf, &p, opts).map(|f| JobOut::Out(Output::Files(f)))
+            })
+        }
         ExtractAttachments => Box::new(move |pdf: Arc<Vec<u8>>| {
             let f = structure::attachments_extract(&pdf)?;
             if f.is_empty() {
@@ -924,14 +940,17 @@ pub fn job(tool: Tool, form: &Form, input: JobInput) -> Result<Job, String> {
             )))
         }),
         ConvertTo => {
-            let cfg = srv()?;
-            let t = form.t("target", &server::Target::Docx.to_string());
-            let target = server::Target::ALL
+            let t = form.t("target", &convert::Target::Docx.to_string());
+            let target = convert::Target::ALL
                 .into_iter()
                 .find(|x| x.to_string() == t)
-                .unwrap_or(server::Target::Docx);
+                .unwrap_or(convert::Target::Docx);
+            let stem = std::path::Path::new(&input.file_name)
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "document".into());
             Box::new(move |pdf: Arc<Vec<u8>>| {
-                server::convert_from_pdf(&cfg, &pdf, target).map(|r| reply_out(r, "converted"))
+                convert::convert(&pdf, target, &stem).map(|f| JobOut::Out(Output::Files(f)))
             })
         }
         Info => Box::new(move |pdf: Arc<Vec<u8>>| {
@@ -952,47 +971,44 @@ pub fn job(tool: Tool, form: &Form, input: JobInput) -> Result<Job, String> {
         CompressLossless => {
             Box::new(move |pdf: Arc<Vec<u8>>| out(structure::compress_lossless(&pdf)))
         }
-        CompressServer => {
-            let (cfg, level) = (srv()?, form.num("level", 5.0)?.clamp(1.0, 9.0) as u8);
+        CompressImages => {
+            let opts = compress::Options {
+                level: form.num("level", 5.0)?.clamp(1.0, 9.0) as u8,
+                grayscale: form.f("gray", false),
+            };
             Box::new(move |pdf: Arc<Vec<u8>>| {
-                server::compress(&cfg, &pdf, level).map(|r| reply_out(r, "compressed"))
+                compress::compress(&pdf, opts).map(|c| JobOut::PdfReport(c.pdf, c.report))
             })
         }
-        Repair => {
-            let use_server = form.f("server", false);
-            let cfg = if use_server { Some(srv()?) } else { None };
-            Box::new(move |pdf: Arc<Vec<u8>>| match cfg {
-                Some(c) => server::repair(&c, &pdf).map(|r| reply_out(r, "repaired")),
-                None => out(structure::repair(&pdf)),
-            })
-        }
+        Repair => Box::new(move |pdf: Arc<Vec<u8>>| {
+            repair::repair(&pdf).map(|r| JobOut::PdfReport(r.pdf, r.report))
+        }),
         Ocr => {
-            let cfg = srv()?;
             let langs: Vec<String> = form
                 .t("langs", "eng")
                 .split([',', ' '])
                 .filter(|s| !s.is_empty())
                 .map(str::to_string)
                 .collect();
+            tools::ocr::check_languages(&langs)?;
+            let p = range("pages")?;
             let mode = if form.f("force", false) {
-                server::OcrMode::Force
+                tools::ocr::Mode::Force
             } else {
-                server::OcrMode::Skip
+                tools::ocr::Mode::Skip
+            };
+            Box::new(move |pdf: Arc<Vec<u8>>| out(tools::ocr::ocr_pdf(&pdf, &p, mode)))
+        }
+        PdfA => Box::new(move |pdf: Arc<Vec<u8>>| {
+            pdfa::convert(&pdf).map(|c| JobOut::PdfReport(c.pdf, c.report))
+        }),
+        AutoSplit => {
+            let opts = tools::qrsplit::Options {
+                any_qr: form.f("any_qr", false),
+                duplex: form.f("duplex", false),
             };
             Box::new(move |pdf: Arc<Vec<u8>>| {
-                server::ocr(&cfg, &pdf, &langs, mode).map(|r| reply_out(r, "ocr"))
-            })
-        }
-        PdfA => {
-            let cfg = srv()?;
-            Box::new(move |pdf: Arc<Vec<u8>>| {
-                server::to_pdfa(&cfg, &pdf).map(|r| reply_out(r, "pdfa"))
-            })
-        }
-        AutoSplit => {
-            let cfg = srv()?;
-            Box::new(move |pdf: Arc<Vec<u8>>| {
-                server::auto_split(&cfg, &pdf).map(|r| reply_out(r, "split"))
+                tools::qrsplit::auto_split(&pdf, opts).map(|f| JobOut::Out(Output::Files(f)))
             })
         }
         Grayscale => {
@@ -1077,7 +1093,6 @@ pub fn view_form<'a, M: Clone + 'a>(
     tool: Tool,
     form: &'a Form,
     editing: bool,
-    has_server: bool,
     on_form: impl Fn(FormMsg) -> M + Copy + 'a,
     on_action: impl Fn(Action) -> M + 'a,
 ) -> Element<'a, M> {
@@ -1349,15 +1364,26 @@ pub fn view_form<'a, M: Clone + 'a>(
             field("Quality (dpi)", "dpi", "200"),
         ],
         FlattenAll => vec![pages_f(), field("Quality (dpi)", "dpi", "200")],
-        CertSign => vec![
-            field("Certificate (.p12 / .pfx)", "cert", "~/certs/me.p12"),
-            secret("Certificate password", "cert_pw"),
-            row2(
-                field("Reason", "reason", ""),
-                field("Location", "location", ""),
-            ),
-            flag("Visible signature", "visible", false),
-        ],
+        CertSign => {
+            let mut v = vec![
+                field("Certificate (.p12 / .pfx / .pem)", "cert", "~/certs/me.p12"),
+                field("Private key (PEM only, if separate)", "key", ""),
+                secret("Password", "cert_pw"),
+                row2(
+                    field("Reason", "reason", ""),
+                    field("Location", "location", ""),
+                ),
+                field("Contact (optional)", "contact", ""),
+                flag("Visible signature", "visible", false),
+            ];
+            if form.f("visible", false) {
+                v.push(row2(
+                    field("Page", "sig_page", "current"),
+                    anchor(Anchor::BottomRight),
+                ));
+            }
+            v
+        }
         ToImages => vec![
             pages_f(),
             field("Resolution (dpi)", "dpi", "150"),
@@ -1367,20 +1393,47 @@ pub fn view_form<'a, M: Clone + 'a>(
         ConvertTo => vec![pick(
             "Format",
             "target",
-            server::Target::ALL.to_vec(),
-            form.t("target", &server::Target::Docx.to_string()),
+            convert::Target::ALL.to_vec(),
+            form.t("target", &convert::Target::Docx.to_string()),
             on_form,
         )],
         Compare => vec![field("Other PDF", "other", "/path/to/other.pdf")],
-        CompressServer => vec![field("Level 1 (light) – 9 (strong)", "level", "5")],
-        Repair => vec![flag(
-            "Use the server (Ghostscript/qpdf) instead",
-            "server",
-            false,
-        )],
+        CompressImages => vec![
+            field("Level 1 (lossless) – 9 (strongest)", "level", "5"),
+            flag("Greyscale", "gray", false),
+        ],
         Ocr => vec![
-            field("Languages (Tesseract codes)", "langs", "eng, deu"),
+            pages_f(),
+            field(
+                "Languages — Latin script only (eng, deu, fra, spa…); accents are dropped",
+                "langs",
+                "eng",
+            ),
             flag("Redo pages that already have text", "force", false),
+        ],
+        AutoSplit => vec![
+            flag(
+                "Split at any QR code (not only Stirling's separator sheet)",
+                "any_qr",
+                false,
+            ),
+            flag(
+                "Duplex scan: also drop the blank back of each separator",
+                "duplex",
+                false,
+            ),
+        ],
+        ExtractScans => vec![
+            pages_f(),
+            row2(
+                field("Straighten tilts over (°)", "angle", "1"),
+                field("Background tolerance (0–255)", "tolerance", "30"),
+            ),
+            row2(
+                field("Min photo area (px²)", "min_area", "8000"),
+                field("Ignore specks under (px²)", "min_contour", "500"),
+            ),
+            field("Trim edges (px)", "border", "1"),
         ],
         Grayscale | Invert => vec![field("Resolution (dpi)", "dpi", "150")],
         AdjustColors => vec![
@@ -1400,7 +1453,6 @@ pub fn view_form<'a, M: Clone + 'a>(
         _ => vec![],
     };
 
-    let blocked = tool.needs_server() && !has_server;
     let produces_report = matches!(tool, ShowJavaScript | Info | Compare | ValidateSignature);
     let produces_files = matches!(
         tool,
@@ -1409,6 +1461,7 @@ pub fn view_form<'a, M: Clone + 'a>(
             | SplitSize
             | ToImages
             | ExtractImages
+            | ExtractScans
             | ExtractAttachments
             | AutoSplit
             | ConvertTo
@@ -1416,13 +1469,7 @@ pub fn view_form<'a, M: Clone + 'a>(
     let modifies = !(produces_report || produces_files || matches!(tool, SelectPages | AutoRename));
 
     let mut actions = row![].spacing(6);
-    if blocked {
-        actions = actions.push(
-            text("Needs the Stirling server — see Server settings at the bottom of the tool list.")
-                .size(12)
-                .color(theme::MUTED),
-        );
-    } else if modifies {
+    if modifies {
         let inserts = matches!(tool, InsertImages | InsertUrl);
         actions = actions
             .push(
@@ -1446,7 +1493,7 @@ pub fn view_form<'a, M: Clone + 'a>(
 
     let mut col = column(fields).spacing(8);
     col = col.push(Space::with_height(4)).push(actions);
-    if modifies && !editing && !blocked {
+    if modifies && !editing {
         col = col.push(
             text("Turn on Edit pages to apply to this file; or save the result as a new file.")
                 .size(11)
@@ -1632,11 +1679,17 @@ mod tests {
             (RemoveSignatures, vec![]),
             (ShowJavaScript, vec![]),
             (ToImages, vec![("pages", "1-2"), ("dpi", "50")]),
+            (ConvertTo, vec![]),
+            (ConvertTo, vec![("target", "Excel (.xlsx)")]),
+            (ConvertTo, vec![("target", "PowerPoint (.pptx)")]),
             (Info, vec![]),
             (Compare, vec![("other", other.as_str())]),
             (AutoRename, vec![]),
             (CompressLossless, vec![]),
+            (CompressImages, vec![("level", "9")]),
             (Repair, vec![]),
+            (PdfA, vec![]),
+            (ValidateSignature, vec![]),
             (Grayscale, vec![("dpi", "50")]),
             (Invert, vec![("dpi", "50")]),
             (AdjustColors, vec![("bright", "10"), ("dpi", "50")]),
@@ -1653,7 +1706,6 @@ mod tests {
                 current: 0,
                 selected: vec![],
                 file_name: "sample.pdf".into(),
-                server: None,
             };
             let result = job(tool, &form, input).and_then(|j| j(doc.clone()));
             let check = match result {
@@ -1694,7 +1746,6 @@ mod tests {
             current: 1,
             selected: vec![],
             file_name: "s.pdf".into(),
-            server: None,
         };
         if let Err(e) = job(Signature, &form, input).and_then(|j| j(doc.clone())) {
             failures.push(format!("Draw signature: {e}"));
@@ -1708,7 +1759,6 @@ mod tests {
             current: 0,
             selected: vec![],
             file_name: "s.pdf".into(),
-            server: None,
         };
         if let Err(e) = job(RedactAreas, &form, input).and_then(|j| j(doc.clone())) {
             failures.push(format!("Redact areas: {e}"));
@@ -1744,7 +1794,6 @@ mod tests {
                 current: 0,
                 selected: vec![],
                 file_name: "demo.pdf".into(),
-                server: None,
             };
             match job(tool, &form, input)
                 .and_then(|j| j(doc.clone()))

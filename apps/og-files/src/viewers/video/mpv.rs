@@ -1,7 +1,9 @@
 //! libmpv backend: the client API is loaded at runtime (`dlopen`
-//! "libmpv.so.2", then "libmpv.so") through a small hand-written FFI, so the
-//! app builds and runs without mpv installed (the viewer then falls back to
-//! the FFmpeg player).
+//! "libmpv.so.2", then "libmpv.so"; a libmpv bundled with a release build
+//! — AppImage, macOS .app, Windows zip — first, see `lib_candidates`) through
+//! a small hand-written FFI, so the app builds and runs without mpv
+//! installed (the viewer then falls back to the FFmpeg player, or to an
+//! "Install mpv" placeholder in builds without the `ffmpeg` feature).
 //!
 //! A `Player` owns one mpv instance and two threads:
 //! * the **event thread** blocks in `mpv_wait_event`, turns property changes
@@ -151,15 +153,82 @@ pub struct Api {
     render_free: unsafe extern "C" fn(*mut RenderCtx),
 }
 
-/// Library names tried in order.
-pub const LIB_NAMES: [&str; 2] = ["libmpv.so.2", "libmpv.so"];
+/// Which platform's libmpv layout to search (a parameter so the search
+/// order of every OS is unit-tested on any host).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LibOs {
+    Linux,
+    Mac,
+    Windows,
+}
+
+impl LibOs {
+    pub const fn current() -> LibOs {
+        if cfg!(target_os = "macos") {
+            LibOs::Mac
+        } else if cfg!(windows) {
+            LibOs::Windows
+        } else {
+            LibOs::Linux
+        }
+    }
+}
+
+/// What `Api::load` tries, in order. Release builds bundle libmpv, so the
+/// bundled copy (relative to the canonical executable folder `exe_dir`)
+/// wins over a system one:
+/// * Linux AppImage (AppDir/usr/bin/og-files): `<exe_dir>/../lib/libmpv.so.2`,
+///   then `libmpv.so.2`, `libmpv.so` via the normal `dlopen` search;
+/// * macOS .app (Contents/MacOS/og-files):
+///   `<exe_dir>/../Frameworks/libmpv.2.dylib`, then Homebrew
+///   (`/opt/homebrew/lib`, `/usr/local/lib`), then `libmpv.2.dylib`,
+///   `libmpv.dylib`;
+/// * Windows: `<exe_dir>\libmpv-2.dll`, then `libmpv-2.dll`, `mpv-2.dll` on
+///   the DLL search path.
+pub fn lib_candidates(os: LibOs, exe_dir: Option<&std::path::Path>) -> Vec<std::ffi::OsString> {
+    use std::ffi::OsString;
+    use std::path::{Path, PathBuf};
+    let mut out: Vec<OsString> = Vec::new();
+    let up = |rel: &str| exe_dir.and_then(Path::parent).map(|p| p.join(rel));
+    match os {
+        LibOs::Linux => {
+            if let Some(d) = up("lib") {
+                out.push(d.join("libmpv.so.2").into());
+            }
+            out.extend(["libmpv.so.2", "libmpv.so"].map(OsString::from));
+        }
+        LibOs::Mac => {
+            if let Some(d) = up("Frameworks") {
+                out.push(d.join("libmpv.2.dylib").into());
+            }
+            for d in ["/opt/homebrew/lib", "/usr/local/lib"] {
+                out.push(PathBuf::from(d).join("libmpv.2.dylib").into());
+            }
+            out.extend(["libmpv.2.dylib", "libmpv.dylib"].map(OsString::from));
+        }
+        LibOs::Windows => {
+            if let Some(d) = exe_dir {
+                out.push(d.join("libmpv-2.dll").into());
+            }
+            out.extend(["libmpv-2.dll", "mpv-2.dll"].map(OsString::from));
+        }
+    }
+    out
+}
+
+/// The running executable's folder, symlinks resolved.
+fn exe_dir() -> Option<std::path::PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let exe = std::fs::canonicalize(&exe).unwrap_or(exe);
+    exe.parent().map(std::path::Path::to_path_buf)
+}
 
 impl Api {
     fn load() -> Result<Api, String> {
         let mut last = String::from("libmpv not found");
-        for name in LIB_NAMES {
+        for name in lib_candidates(LibOs::current(), exe_dir().as_deref()) {
             // SAFETY: loading libmpv runs only its (trusted) initialisers
-            match unsafe { Library::new(name) } {
+            match unsafe { Library::new(&name) } {
                 Ok(lib) => return Self::resolve(lib),
                 Err(e) => last = e.to_string(),
             }
@@ -1027,6 +1096,48 @@ mod tests {
         b.resize(1000);
         assert_eq!(b.bytes().as_ptr() as usize % 64, 0);
         assert!(b.bytes().len() >= 1000);
+    }
+
+    #[test]
+    fn video_mpv_library_search_order() {
+        use std::path::Path;
+        let s = |v: Vec<std::ffi::OsString>| -> Vec<String> {
+            v.into_iter()
+                .map(|o| o.to_string_lossy().replace('\\', "/"))
+                .collect()
+        };
+        assert_eq!(
+            s(lib_candidates(
+                LibOs::Linux,
+                Some(Path::new("/tmp/.mount_x/usr/bin"))
+            )),
+            [
+                "/tmp/.mount_x/usr/lib/libmpv.so.2",
+                "libmpv.so.2",
+                "libmpv.so"
+            ]
+        );
+        assert_eq!(
+            s(lib_candidates(LibOs::Linux, None)),
+            ["libmpv.so.2", "libmpv.so"]
+        );
+        assert_eq!(
+            s(lib_candidates(
+                LibOs::Mac,
+                Some(Path::new("/Applications/OG Files.app/Contents/MacOS"))
+            )),
+            [
+                "/Applications/OG Files.app/Contents/Frameworks/libmpv.2.dylib",
+                "/opt/homebrew/lib/libmpv.2.dylib",
+                "/usr/local/lib/libmpv.2.dylib",
+                "libmpv.2.dylib",
+                "libmpv.dylib"
+            ]
+        );
+        assert_eq!(
+            s(lib_candidates(LibOs::Windows, Some(Path::new("/og-files")))),
+            ["/og-files/libmpv-2.dll", "libmpv-2.dll", "mpv-2.dll"]
+        );
     }
 
     #[test]

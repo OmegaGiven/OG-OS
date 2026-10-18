@@ -35,11 +35,13 @@ Usage:
       single .gz/.xz/.zst/.bz2 files).
 
   og-files open FILE...
-      Open files in their default apps (mimeapps.list, as other desktops do).
+      Open files in their default apps (Linux: mimeapps.list, as other
+      desktops do; macOS: `open`; Windows: the file association).
 
   og-files open-with APP_ID FILE...
       Open files with the app whose desktop file id is APP_ID
       (e.g. org.gnome.Loupe or libreoffice-writer; \".desktop\" optional).
+      macOS: a bundle id (com.apple.Preview); Windows: a program (notepad).
 
   og-files apps FILE
       List the apps that can open FILE; the default is marked with *.
@@ -212,8 +214,7 @@ fn must_exist(files: &[PathBuf]) -> Result<Vec<PathBuf>, String> {
 fn run_job(job: &ArchiveJob) -> Result<(PathBuf, Vec<String>), String> {
     let cancel = AtomicBool::new(false);
     let total = job.total(&cancel);
-    // SAFETY: isatty only inspects the descriptor
-    let tty = unsafe { libc::isatty(2) } == 1;
+    let tty = std::io::IsTerminal::is_terminal(&std::io::stderr());
     let show = tty && total >= 8 << 20;
     let label = job.label();
     let (mut done, mut last) = (0u64, Instant::now());
@@ -337,6 +338,14 @@ fn exec(cmd: Cmd) -> Result<(), String> {
         }
         Cmd::OpenWith { app, files } => {
             let files = must_exist(&files)?;
+            if openwith::SYSTEM_OPEN_WITH {
+                // Windows: no app registry; APP is a program to run
+                let mut argv = vec![app.clone()];
+                argv.extend(files.iter().map(|f| f.to_string_lossy().into_owned()));
+                openwith::spawn_detached(&argv, None)?;
+                eprintln!("Opened {} with {app}", openwith::describe(&files));
+                return Ok(());
+            }
             let reg = Registry::load(&Env::from_env());
             let a = reg
                 .get(&app)
@@ -351,6 +360,13 @@ fn exec(cmd: Cmd) -> Result<(), String> {
             let mime = reg.mime_of(&file);
             let c = reg.choices(&mime);
             println!("{mime}");
+            if openwith::SYSTEM_OPEN_WITH {
+                println!("  (Windows: \"og-files open FILE\" uses the default app; the app list lives in Explorer's Open with)");
+                return Ok(());
+            }
+            if openwith::SYSTEM_DEFAULT {
+                println!("  default: chosen by the system (og-files open FILE)");
+            }
             if c.apps.is_empty() {
                 println!("  (no app is registered for this type)");
             }

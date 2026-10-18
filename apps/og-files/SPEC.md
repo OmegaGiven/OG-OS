@@ -232,8 +232,11 @@ streamed loading.
 
 ## 5a. PDF toolkit (Stirling-PDF, rebuilt natively)
 
-The goal is to bring Stirling-PDF's feature set (a self-hosted Stirling-PDF
-server, optionally) into the file manager.
+The goal is to bring Stirling-PDF's whole feature set into the file
+manager **with none of its dependencies**: every tool runs in-process in
+pure Rust (no Stirling server, Java, LibreOffice, Tesseract, Ghostscript,
+qpdf or browser engine), so the app works offline on Linux, macOS and
+Windows with nothing else installed.
 
 **Licensing.** The fork's only change from upstream is unlocking the
 enterprise features. Stirling's `app/core` is MIT. `app/proprietary` is
@@ -247,7 +250,11 @@ translated.
 |---|---|---|
 | Render | `hayro` 0.7 (pure Rust, MIT/Apache, CPU) | One worker thread per open PDF that keeps its parse and font cache (`viewers/pdf/engine.rs`). Panics are caught per page. Bitmaps are capped at 40 MP. Limits: no blending/knockout groups yet, and password-protected files fail to open. |
 | Edit | `lopdf` 0.45 (pure Rust, MIT) | `compose::build(sources, plan)` turns a plan of (source, page, rotation) into a new PDF. That single primitive covers reorder, delete, rotate, duplicate, merge/insert, extract and split. Inherited page attributes are pushed down, and unused objects are pruned. |
-| Heavy tools | Stirling REST API on a self-hosted server (optional) | For jobs that need Tesseract, Ghostscript, qpdf or LibreOffice. The app uploads the file and saves the result next to the original. Config goes in `$XDG_CONFIG_HOME/og-files/stirling.json` (`{ "url": "https://stirling.example.ts.net:8081", "api_key": "…" }`, sent as `X-API-KEY`). Without it those tools are just hidden, so the app stays standalone. |
+| Vision | `ocrs` 0.13 on `rten` 0.26 (OCR), `rqrr` 0.11 (QR), `imageproc` 0.27 (photo segmentation); all pure Rust | Offline and in-process. The OCR detection and recognition models (CC BY-SA 4.0, 12.2 MB) are compiled in from `assets/ocr/`; source, sha256 and license are in its README. Pages are rendered with hayro. |
+| Convert from PDF | `tools/extract.rs` + `tools/convert/` (pure Rust, in-process) | hayro interprets each page into a recording device (glyphs with Unicode, font, size, colour; images; rules), then a layout pass builds lines, columns, paragraphs, headings, lists and tables that eleven writers turn into files. See *Convert from PDF* below. |
+| Signatures | RustCrypto: `rsa` 0.9, `p256`/`p384` 0.13, `sha1`/`sha2`, `der` + `x509-cert` 0.2, `pkcs8`, `p12-keystore` 0.2 (all pure Rust, MIT/Apache) | CMS built and parsed with a small DER reader/writer in `tools/sign.rs`. |
+| Typeset | `typst` 0.15 (in-process `World`, no packages), GNU FreeFont compiled in (GPL-3.0+ with font exception) | Anything → PDF (`tools/topdf/`): every input becomes Typst source with escaped text, compiled to PDF with title + outline. |
+| Optimize | `tools/compress.rs`, `repair.rs`, `pdfa.rs` (lopdf + hayro + image) | Image downsampling by placed resolution, object dedup, object/xref streams; byte-scan repair; PDF/A-2b with sRGB intent, XMP, embedded standard-14 fonts and a verifier. |
 
 **Model.** The same rules as every other viewer apply: view mode is
 read-only, and **Edit pages** (`Ctrl+E`) enables page operations. **Save**
@@ -256,7 +263,7 @@ split, and any tool that makes a different document) always write
 **new files** next to the original (`<name>-pages-1-3.pdf`,
 `<name>-part-01.pdf`), work in either mode, and include unsaved edits.
 
-**Tools panel.** The **Tools** button in the PDF toolbar opens 54 tools
+**Tools panel.** The **Tools** button in the PDF toolbar opens 55 tools
 in five groups. Each tool has a form, and the page fields default to the
 ticked pages. The buttons are:
 - **Apply** (edit mode): the result becomes the working copy. Save
@@ -266,35 +273,217 @@ ticked pages. The buttons are:
 
 Other PDF toolbar additions: **Save copy**, plus **Duplicate** and **Blank
 page** in edit mode. Outside the PDF viewer: password-protected PDFs open
-behind an unlock screen. Images get **Make PDF** (native) and **Split
-scanned photos** (server). Office, HTML, Markdown and e-book files get
-**Convert to PDF** (server).
+behind an unlock screen. Images get **Make PDF** and **Split
+scanned photos**. Office documents, spreadsheets, presentations,
+HTML, Markdown, plain text, e-mail, e-books, comics and SVG get **Convert
+to PDF** (native, see "Anything → PDF" below) from the placeholder view and
+from the files pane's context menu (any selection of supported files).
 
-**Status: all Stirling core tools are built** (2026-10-11). "native" means
-in-process Rust; "server" means the Stirling REST API.
+**Status: all Stirling core tools are built natively** (2026-10-16). Every
+row below runs in-process; there is no server backend any more.
 
 | Group | Tools | Engine |
 |---|---|---|
 | Page editing | view, thumbnails, zoom, rotate, delete, reorder, duplicate, blank page, insert PDF, extract, split every N, select | native (plan + compose) |
 | Organize | split by ranges / bookmarks / file size, select pages by range, remove blank pages, crop, n-up (2–16), booklet, fit to paper, scale, split into sections, one long page, overlay PDF, insert images | native |
-| Organize | auto-split at QR pages, insert web page | server |
+| Vision | **OCR → searchable PDF** (invisible text layer, skip or redo pages that have text, page range), **auto-split at QR separator pages** (Stirling's sheet or any QR code; duplex drops the blank back), **split scanned photos** (PDF pages, and image files from the image viewer) | native |
+| Organize | insert web page (fetch + typeset, see below) | native |
 | Add & edit | page numbers, text stamp, watermark (centred / tiled), image stamp, **drawn signature** (canvas pad + click to place), attachments, bookmarks editor, metadata editor / wipe | native |
 | Security | AES-256 password + permissions, remove password, sanitize (JS, files, XMP, info, links, fonts), redact text, **redact areas** (drag boxes on the page, true removal by rasterizing), remove annotations / images, flatten forms, flatten to images, unlock forms, remove signatures, show JavaScript | native |
-| Security | sign with certificate (PKCS#12), validate signatures | server |
+| Security | sign with certificate (PAdES B-B; PKCS#12 or PEM; RSA / ECDSA P-256 / P-384), validate signatures | native (`tools/sign.rs`) |
 | Convert & extract | pages → PNG/JPEG, extract images, extract attachments, document info, compare (text diff), auto-rename | native |
-| Convert & extract | PDF → Word/ODT/Excel/PowerPoint/HTML/Markdown/text/RTF/XML/CSV/EPUB; Office/HTML/MD/EML/e-book/image → PDF | server |
+| Convert & extract | PDF → Word/ODT/Excel/PowerPoint/HTML/Markdown/text/RTF/XML/CSV/EPUB | native |
+| Convert & extract | Office/HTML/MD/text/EML/e-book/comic/SVG/image/web page → PDF | native (Typst, `tools/topdf`) |
 | Optimize & colour | lossless compress, repair, greyscale, invert, adjust colours, fake scan | native |
-| Optimize & colour | strong compress (Ghostscript/qpdf), repair via server, OCR (Tesseract), PDF/A-2b | server |
 
-**Server endpoints** (paths and fields taken from upstream `app/core` only,
-listed in `tools/server.rs`): `/api/v1/misc/{ocr-pdf, compress-pdf, repair,
-auto-split-pdf, extract-image-scans}`,
-`/api/v1/convert/{pdf/pdfa, pdf/word, pdf/presentation, pdf/text, pdf/xlsx,
-pdf/csv, pdf/html, pdf/markdown, pdf/xml, pdf/epub, file/pdf, html/pdf,
-markdown/pdf, eml/pdf, img/pdf, svg/pdf, ebook/pdf, url/pdf}`,
-`/api/v1/security/{cert-sign, validate-signature}`, and
-`/api/v1/info/status` for **Test connection**. The URL and API key are
-entered in Tools → Server settings and saved to `stirling.json` (mode 600).
+**Convert from PDF** (Tools → *Convert PDF to…*, `tools/convert`). No
+server, no external programs. Files are written next to the PDF as
+`<name>-converted.<ext>`.
+
+How the text is found (`tools/extract.rs`):
+- **Capture.** hayro's interpreter drives a recording `Device`. Text
+  decoding is hayro's: ToUnicode CMaps, simple-font encodings with
+  Differences, the standard encodings, and Identity-H CID fonts. Ligatures
+  are split (ﬁ → fi). Fonts are matched to their resource dictionaries by
+  hayro's cache key, which gives the family name (cleaned, e.g.
+  `ABCDEF+TimesNewRomanPS-BoldMT` → Times New Roman) and bold, italic and
+  monospace from the name, descriptor flags, weight and italic angle.
+  Invisible (OCR) text is kept and flagged. Fill+stroke and overprinted
+  duplicates are removed.
+- **Images.** Plain DeviceRGB/Gray JPEGs are passed through unchanged.
+  Everything else is decoded by hayro and saved as PNG (alpha kept).
+  The same image drawn twice is stored once.
+- **Layout.** Baselines are clustered into lines (superscripts and
+  subscripts join their line). Words come from spaces or gaps over 0.15 em.
+  Lines split into segments at large gaps. *Ruled tables* come from grids
+  of drawn rules (merged cells too). *Unruled tables* come from runs of
+  lines whose segments fall into consistent column bands. Prose columns
+  are excluded, except a long description column on the right. The
+  reading order is a recursive XY-cut that compares the widest gutter with
+  the widest horizontal gap, so two-column pages read column by column.
+  Then come paragraphs (spacing, indent, size or weight change, short last
+  line, TOC leader lines, code lines kept apart), alignment, headings
+  (size ≥ 1.15 × the body size, levels by size, or short bold lines) and
+  lists (bullets, `1.` `a)` `(iv)`, nesting by indent).
+
+What each format gets:
+- **Word / ODT / RTF:** Heading 1–3 styles, runs with bold, italic, size,
+  colour and font, alignment, native numbered and bulleted lists (each
+  ordered list restarts at the PDF's number), tables (borders when the
+  PDF had them, merged cells), images, a page break per PDF page, and the
+  PDF's page size and margins.
+- **PowerPoint:** one slide per page. The slide picture is the page
+  rendered *without its text* (text operators are stripped with lopdf).
+  The text goes on top as editable text boxes in place, one per paragraph
+  or table cell, keeping its line breaks. OCR text stays transparent. If
+  the file can't be rewritten (encrypted), the full render is used with
+  transparent text boxes.
+- **HTML:** one self-contained semantic file (h1–h3, p, nested ul/ol,
+  table with th, inline images).
+- **EPUB:** EPUB 3 with an NCX. Chapters start at level-1 headings, or
+  one per page.
+- **Markdown:** GFM tables. Images are written as separate
+  `<name>-converted-img-NN.*` files and linked.
+- **Text:** reading order, tables tab-separated, a form feed between
+  pages.
+- **Excel:** one sheet per table (numbers stored as numbers, bold header
+  row frozen, merged cells). With no tables, one sheet per page with one
+  row per line.
+- **CSV:** one file per table (`<name>-page02-table1.csv`). With no tables,
+  every line as (page, text).
+- **XML:** document → page → heading / paragraph / list-item / table /
+  image → line → span, with positions (pt, top-left origin), fonts,
+  sizes, colours and flags.
+
+On scanned pages with an OCR layer, the reflowed formats show the OCR
+text and drop the page-sized scan. A PDF with no text at all is refused
+("run OCR first"), except for PowerPoint.
+
+Limits: right-to-left and vertical scripts come out in visual order.
+Rotated text becomes separate lines. Type3 glyph widths are estimated.
+Text that is clipped or hidden under an image is still extracted.
+Running headers and footers are kept as paragraphs. Unruled-table
+detection is heuristic: a numbered code listing can come out as a
+two-column table, and a sparse table can come out as text. Equations come
+out as plain text.
+
+**Anything → PDF** (`tools/topdf/`, replaces the server's `file/pdf`,
+`html/pdf`, `markdown/pdf`, `eml/pdf`, `svg/pdf`, `ebook/pdf`, `cbz/pdf`,
+`cbr/pdf` and `url/pdf`). Every input becomes a small document model
+(`ir.rs`: headings, paragraphs of styled runs, labelled list items, lists,
+tables with spans/repeated headers, images, quotes, code, page breaks,
+absolutely placed boxes for slides), which is emitted as Typst source and
+typeset **in-process by Typst 0.15** (`typst` + `typst-pdf` as libraries;
+`engine.rs` is an in-memory `World` — no files, no packages). All user text
+enters Typst as string literals, never markup. Headings become the PDF
+outline; the document title goes into the PDF metadata. Fonts: GNU
+FreeFont (Sans/Serif/Mono, GPL-3.0-or-later + font exception, 6.7 MiB) is
+compiled in so output is identical on every OS (`assets/fonts/README.md`);
+system fonts are only a glyph fallback (CJK…; `OG_FILES_NO_SYSTEM_FONTS=1`
+turns that off). Images are validated (and BMP/TIFF re-encoded) before they
+reach Typst, so one broken picture never fails a document.
+
+| Input | Route | Fidelity / limits |
+|---|---|---|
+| .docx | the editor's DOCX model (§5b): styles resolved, run b/i/u/strike/size/colour, alignment, spacing, indents, Word list numbering, tables (grid widths, column spans, nested tables), inline images, hyperlinks, page breaks, last section's page size + margins, `dc:title` | no headers/footers, footnote text, floating positions, text boxes, vertical merges, charts |
+| .odt .rtf | document viewer's block model (`doc.rs`) | headings, bold/italic, lists, tables; no images |
+| .txt .text .log | monospace (layout kept), BOM/UTF-16/Latin-1 aware | `office::text(_, false)` reflows instead |
+| .md | pulldown-cmark → HTML → HTML path; images relative to the file | GFM tables, task lists, footnotes, strikethrough |
+| .html .htm .xhtml | html5ever (`scraper`) DOM → document | semantic tags, inline `style` basics (colour, weight, italic, decoration, size, text-align, display:none), `<font>`, `bgcolor` cells, local + `data:` images, inline `<svg>`; **not a browser**: no stylesheets, scripts, floats, positioning; layout tables (one cell/column, no borders) are unwrapped |
+| web page (Insert web page) | `ureq` (10 s connect, 30 s total, 16 MB page, ≤300 images / 128 MB) → HTML path, links absolutised | JavaScript-built pages come out empty |
+| .eml | `mail-parser`: Subject heading, From/To/Cc/Reply-To/Date block, HTML (or text) body with `cid:` images, attachment list + picture attachments | |
+| .xlsx .xlsm .xls .xlsb .ods .csv .tsv | the sheet viewer's loaders: one section per sheet (outline entry), header row repeated and shaded, numbers right-aligned, column widths from content, landscape when wide, proportional columns + smaller text when still too wide | values only (no cell formatting/formulas); ≤10 000 rows/sheet, 400 000 cells |
+| .pptx | slide size pages; text boxes/pictures/tables/groups at their EMU positions, placeholders positioned from layout/master, run b/i/u/strike/size/RGB, alignment, bullets/auto-numbers, solid fills and slide backgrounds | no theme colours/fonts, gradients, shape geometry, charts, SmartArt |
+| .odp | page layout size; frames (text boxes, images), custom shapes with text, automatic text styles | same limits |
+| .svg | page = drawing size, embedded as vector (krilla-svg, svg2pdf's successor inside typst-pdf) | |
+| .epub | spine order, XHTML chapters through the HTML path, package images, page break per chapter, nav/NCX labels as chapter headings where missing | |
+| .mobi .azw .azw3 | `mobi` crate (PalmDOC/HUFF), markup → HTML path, `recindex` / `kindle:embed` images | DRM fails; KF8-only books are best effort |
+| .fb2 | XML → HTML (sections, titles, emphasis, poems, epigraphs, base64 binaries) | |
+| .cbz .cbr .cb7 .cbt | archive images natural-sorted → existing images → PDF (page per image); RAR via the pure-Rust `rars` crate (RAR 1.3–7, solid) | ≤2 GB of pages |
+| .doc .ppt (binary) | — | refused with "save as .docx/.pptx" |
+| Optimize & colour | lossless compress, **compress levels 1–9** (image downsampling by placed resolution), repair, **PDF/A-2b** + verifier, greyscale, invert, adjust colours, fake scan | native (`tools/compress.rs`, `repair.rs`, `pdfa.rs`) |
+
+**Native compress / repair / PDF/A / certificate signatures** (2026-10-16,
+pure Rust; no Ghostscript, qpdf, Java or OpenSSL). Each tool that changes
+the document also shows a report in the panel (`JobOut::PdfReport`).
+- **Compress (images)**, levels 1–9 like Stirling. 1: merge duplicate
+  objects (hash + compare), Flate any uncompressed stream, prune, write
+  object + xref streams. 2: also recompress Flate/LZW/ASCII/RunLength
+  streams at level 9 and drop page thumbnails and `/PieceInfo`. 3–9: also
+  images, targets 300/220/150/150/120/96/72 dpi at JPEG quality
+  90/85/80/70/60/50/40. The effective resolution of every image comes
+  from the CTM at each `Do` on every page (through Form XObjects); the
+  smallest placement wins. Images in patterns or annotation appearances,
+  with colour-key masks, Decode arrays, CMYK/Indexed/16-bit/1-bit data,
+  or JPX/JBIG2/CCITT data are never resampled. Photos become JPEG; line
+  art and masked images stay Flate, and a soft mask is resized with its
+  image. Optional greyscale converts images and `rg/RG/k/K`. The result
+  must parse, keep the page count, render every page the input rendered,
+  and be smaller. Otherwise the original is kept, and the report says why.
+  Measured on local manuals: 6.6 MB colour-management guide → 58 % (L2),
+  1.5 MB manual → 29 % (L5), 3.2 MB image-heavy readme → 16 % (L5) / 8 %
+  (L9), 1.4 MB text manual → 61 % (L1); page renders unchanged at 30 dpi
+  (mean |Δ| ≤ 0.01).
+- **Repair** scans the bytes for `n g obj … endobj` and ignores the xref.
+  Later copies win, and object streams are unpacked in place. Wrong
+  `/Length`s are re-measured against `endstream`, objects cut off by a
+  truncated tail are dropped, and `/Root` comes from the last trailer or
+  xref-stream dict, else from a `/Type /Catalog` scan. lopdf parses that
+  synthetic file. The plain lopdf reading wins only if it yields more
+  pages. Then dangling references are nulled, the page tree is rebuilt,
+  and objects are renumbered. Every page is rendered with hayro, and
+  pages that still fail are listed.
+- **PDF/A-2b** (best effort): `%PDF-1.7` + binary comment, trailer `/ID`,
+  an sRGB `GTS_PDFA1` output intent (ICC v2 profile generated in code), and
+  `/DefaultCMYK` (bundled CC0 CGATS profile, `assets/icc/`) when DeviceCMYK
+  is used. XMP (`pdfaid` 2/B, Dublin Core) is kept in sync with Info and
+  stays unfiltered. It removes JavaScript, forbidden actions, `/AA`,
+  embedded files, XFA, `NeedAppearances`, media/3D annotations, image
+  `Interpolate`/`Alternates`/`OPI`, PostScript/reference XObjects,
+  transfer functions, external streams and LZW. Annotations become
+  printable and keep only `/AP /N`. Non-embedded standard-14 fonts, and
+  TrueType Arial/Times New Roman/Courier New stand-ins, get the
+  metric-compatible Foxit CFF fonts that hayro already compiles in
+  (`FontFile3 /Type1C`), with `/Widths` from the program (checked against
+  the AFM metrics in tests), a full FontDescriptor and ToUnicode.
+  A built-in verifier (`pdfa::verify`) runs on the result, and remaining
+  violations are listed. It checks header, ID, encryption, XMP + Info
+  consistency, output intent/ICC header, device colours vs. intent, font
+  embedding (+ CIDToGIDMap), width consistency of embedded Type 1/CFF
+  programs for the codes the pages show, actions, annotations,
+  forms, embedded files, LZW/external streams, image/XObject/ExtGState
+  rules, optional content and name/string limits. It does not check
+  content-stream operators, glyph presence, CIDSet/CharSet, TrueType cmap
+  tables or XMP extension schemas, so use veraPDF for a formal check.
+  Can't fix: other non-embedded fonts (Calibri, CID fonts…), annotations
+  without appearance streams, widths that already disagree with an
+  embedded font.
+- **Sign with certificate**: `.p12`/`.pfx` (legacy 3DES/RC2 or AES PBES2)
+  or PEM (certificate plus `PRIVATE KEY` / `ENCRYPTED PRIVATE KEY` / `RSA
+  PRIVATE KEY` / `EC PRIVATE KEY`, in one file or with a separate key
+  file). Keys: RSA (PKCS#1 v1.5, SHA-256), ECDSA P-256 (SHA-256), P-384
+  (SHA-384). The signature is written as an **incremental update**, so
+  earlier signatures stay valid. It adds a merged `/FT /Sig` field +
+  widget, either invisible or visible (signer/date/reason/location box at
+  a chosen page and corner). The signature dict carries
+  `/SubFilter /ETSI.CAdES.detached`, `/ByteRange` and a fixed-width
+  `/Contents` reserve. The CMS SignedData is detached, with content-type,
+  message-digest and signing-certificate-v2 attributes, and embeds the
+  signer certificate and chain. Per PAdES, the signing time goes in `/M`,
+  not in a CMS attribute. There is no timestamp (B-T needs a TSA).
+  Verified by the built-in validator, and in an `#[ignore]` test by
+  poppler `pdfsig` and `openssl cms -verify`.
+- **Validate signatures**: for each signature it checks byte-range sanity,
+  that the gap is exactly `/Contents`, the digest against
+  message-digest, content-type, and the CMS signature (RSA PKCS#1 v1.5 /
+  PSS, ECDSA P-256/P-384; SHA-1/256/384/512). It also checks
+  `adbe.pkcs7.sha1` content, whether the signature covers the whole
+  file (or how many bytes were appended), and signer/issuer, validity at
+  signing time. It reports whether the certificate is self-signed and
+  walks the embedded chain, verifying each link's signature. An RFC 3161
+  timestamp is checked too (its own CMS signature plus the message
+  imprint). Trust isn't evaluated, because there is no certificate store.
+  `adbe.x509.rsa_sha1` is reported as unsupported.
 
 **Known limits.** Each module's doc comments list them per function. The
 main ones:
@@ -307,6 +496,23 @@ main ones:
 - Raster tools (colour filters, redact areas, flatten to images) remove
   text selection on the affected pages.
 - The signature box assumes an unrotated page.
+- OCR (`tools/ocr.rs`) reads Latin script only: A–Z, a–z, digits and
+  ASCII punctuation. Accented letters come out unaccented; other scripts
+  (Cyrillic, Greek, CJK, Arabic…) are refused with a message. Pages render
+  at 150 dpi, where the models read best (body text 20–40 px tall; higher
+  dpi measurably dropped letters). Very small print (< 7 pt) is unreliable.
+  Text is assumed horizontal, so skewed lines get an axis-aligned box.
+  The layer is a Type 3 font with empty glyphs and a ToUnicode CMap,
+  drawn in render mode 3 inside its own `q … Q` after the untouched
+  original content, and it follows `/Rotate` and the CropBox. "Redo pages
+  that already have text" doesn't remove the old text, so those pages can
+  extract twice. There is no progress bar or cancel (the job system has
+  neither). A sparse page takes well under a second; dense pages take longer.
+- Auto-split renders each page at 200 dpi; QR codes under ~1.5 cm can be
+  missed. By default only Stirling's separator sheet splits.
+- Split scanned photos needs a background gap of about 2 mm (at 300 dpi)
+  between photos. Photos with large paper-coloured edges can be cropped
+  short, and tilt is straightened up to ±45°.
 - Decrypt can't tell whether a password was actually needed.
 - Phase 2: a `compose::build_from_doc` variant so split-by-size doesn't
   re-parse the file on every probe.
@@ -314,9 +520,23 @@ main ones:
 Pipelines and "recipes" (saved tool chains run on a selection) are still
 open: phase 3.
 
-**Tests (62).** `cargo test -p og-files` covers:
-- compose, pages, and every public function of structure, layout, raster
-  and server (server tests use a local mock HTTP server, no network);
+**Tests (62 + 18 for anything → PDF).** `cargo test -p og-files` covers:
+- `tools/topdf/tests.rs`: one test per input type from tiny generated
+  fixtures (docx/pptx/odp/epub/eml/mobi/fb2/comics built in memory, a local
+  HTTP server for web pages): output parses, page count, page size, text,
+  images, outline and title are checked;
+- compose, pages, and every public function of structure, layout and
+  raster;
+- the converters (`tools/convert/tests.rs`): a generated three-page PDF
+  (standard-14 and CID/ToUnicode text, two columns, a heading, a list, a
+  ruled and an unruled table, an image) checks the reading order, the
+  headings and the tables found, and that every output parses. That
+  means zip structure, well-formed XML parts, xlsx read back with
+  calamine, docx reopened by the app's docx parser, and docx/odt/rtf/epub
+  read by the app's document viewer. The ignored `soffice_opens_outputs`
+  test converts the office outputs with LibreOffice when it is installed.
+  `OGX_PDF=… OGX_DEMO_DIR=… cargo test -p og-files convert_real_file --
+  --ignored` writes every format for a real file;
 - `every_native_tool_runs_end_to_end`, which drives all native tools
   through the UI path (form → job → output) and checks that each result
   parses.
@@ -548,11 +768,13 @@ of the package, not assumed:
 - **Runtime behaviour:**
   - libmpv is opened at runtime; if it's missing (e.g. a stripped-down
     standalone build) the video tab falls back to the built-in FFmpeg
-    player instead of failing.
+    player (cargo feature `ffmpeg`, on by default in the monorepo) or,
+    without it, shows an "Install mpv" placeholder instead of failing.
   - Hardware decoding uses `hwdec=auto-safe`, so any machine without a
     working VAAPI driver silently decodes in software.
-- **Outside OG-OS** (other distros): build with `--no-default-features` and
-  install `mpv` + `ffmpeg` from the distro. A self-contained bundle
+- **Outside OG-OS** (other distros, macOS, Windows): build with
+  `--no-default-features` (add `--features ffmpeg` for the FFmpeg
+  fallback, thumbnails and trim) and install `mpv`; see §11 and README.md. A self-contained bundle
   (AppImage/Flatpak shipping libmpv) is possible later if needed.
 
 ## 8. History (bottom panel)
@@ -582,7 +804,7 @@ entered, saved over, discarded, exported, errors.
 - [x] CLI: `og-files [--view tree|list|grid] [--search TEXT] [--focus] [PATH]`; subcommands extract / compress / list / open / open-with / apps (§6c)
 - [x] viewers: text (read-only → edit mode, save over, discard), image, CSV/TSV
 - [x] PDF: hayro viewer + thumbnails; edit pages (rotate, delete, reorder, insert, duplicate, blank); export (extract, split, save copy)
-- [x] PDF toolkit: all Stirling core tools, 54 in a Tools panel (native + optional Stirling server), unlock screen, convert-to-PDF from other viewers; 62 tests
+- [x] PDF toolkit: all Stirling core tools, 55 in a Tools panel, all native (no server), unlock screen, convert-to-PDF from other viewers; 62 tests
 - [x] inspector metadata, details activity log
 - [x] placeholders naming each planned backend
 
@@ -637,3 +859,47 @@ entered, saved over, discarded, exported, errors.
    or specific excluded folders be configurable?
 3. **Grid in tree mode:** should the tree be able to show thumbnails inline
    (bigger rows for images), or are thumbnails grid-only?
+
+## 11. Platform support
+
+Linux is the reference platform; macOS (aarch64, x86_64) and Windows
+(x86_64 MSVC) build from the same code with `--no-default-features`
+(optionally `--features ffmpeg`). Per-OS code sits behind
+`cfg(target_os = …)`; small shared helpers are in `platform.rs` (finding
+programs, detached / console-less child processes, symlinks, hidden files,
+the Windows console for CLI subcommands).
+
+| Feature | Linux | macOS | Windows |
+|---|---|---|---|
+| Browse, viewers, editors, archives, search, CLI | ✅ | ✅ | ✅ (hidden attribute honoured; symlinks in archives skipped) |
+| Config / state / cache dirs | XDG (unchanged) | `~/Library/Application Support`, `~/Library/Caches` | `%APPDATA%`, `%LOCALAPPDATA%` |
+| Move to trash | ✅ freedesktop, per-volume | ✅ system Trash (`trash` crate) | ✅ Recycle Bin (`trash` crate) |
+| Trash view (list / restore / empty), undo of trash | ✅ | hidden — use the Finder; the status line says undo isn't available | ✅ (`trash::os_limited`) |
+| Drives | ✅ UDisks2: mount, unmount, eject, live | mounted volumes (`/`, `/Volumes/*`) with size; unmount + eject via `diskutil` | mounted drives with size, read-only (no unmount / eject) |
+| Live folder refresh | ✅ inotify | ✅ FSEvents | ✅ ReadDirectoryChanges |
+| Open in default app | mimeapps.list | `open` | ShellExecute |
+| Open with… | app dialog + "always open with" | app dialog (bundles in /Applications, ~/Applications, /System/Applications → `open -a`); no "set default" | the system "Open with" dialog |
+| Open terminal here | `$TERMINAL` / known terminals | Terminal.app, or `terminal` setting (app name or command) | Windows Terminal, else cmd (or `powershell` / `pwsh`) |
+| Inspector permissions | mode + writable | mode + writable | read-only flag |
+| Disk usage | hard links counted once, other filesystems not entered, statvfs | same | apparent sizes, no hard-link dedupe; GetDiskFreeSpaceEx |
+| Network: saved connections, Test | ✅ | ✅ | ✅ |
+| Network: mount | rclone + fuse3 (`--daemon`) | official rclone + macFUSE / FUSE-T; unmount `umount`, then `diskutil unmount force` | rclone + WinFsp, started in the background (pid file in the state dir); unmount ends it |
+| Network: tailnet peers | LocalAPI unix socket | `tailscale status --json` | `tailscale status --json` |
+| Network: LAN discovery (Avahi) | ✅ | none (section stays empty) | none (section stays empty) |
+| Remembered passwords | Secret Service | Keychain (`keyring` crate) | Credential Manager (`keyring` crate) |
+| Video (libmpv, loaded at runtime) | `../lib/libmpv.so.2` (AppImage), then `libmpv.so.2` / `.so` | `.app/Contents/Frameworks`, Homebrew, then `libmpv.2.dylib` | `libmpv-2.dll` next to the exe, then the DLL search path |
+| Video without libmpv | FFmpeg player (feature `ffmpeg`), else an "Install mpv" placeholder | same | same |
+| Video thumbnails, trim export | feature `ffmpeg` | feature `ffmpeg` | feature `ffmpeg` |
+| Audio | ALSA (cpal) | CoreAudio | WASAPI |
+| `og-suite` (suite theme, Wayland drag-out) | ✅ | — | — |
+
+Windows release builds use the GUI subsystem (no console window); the CLI
+subcommands attach to the parent console so they still print. Helper
+processes (rclone, tailscale) start without a console window; apps opened
+from og-files are detached.
+
+Tests: the whole suite runs on Linux. Tests of Linux-only backends
+(UDisks2, freedesktop trash, Avahi, the LocalAPI socket, desktop entries,
+unix permissions) are `cfg(target_os = "linux")`; pure per-OS logic
+(terminal choice, libmpv search order, mac app bundles, mount output and
+pid files) is tested on Linux too.

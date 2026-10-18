@@ -1,4 +1,6 @@
-use super::ff::tests::{make_video_with, Tmp};
+use super::common::tests::Tmp;
+#[cfg(feature = "ffmpeg")]
+use super::ff::tests::make_video_with;
 use super::*;
 use iced::keyboard::key::Named as N;
 
@@ -35,7 +37,7 @@ fn video_mpv_option_setup() {
     let get = |k: &str| o.iter().find(|(x, _)| x == k).map(|(_, v)| v.as_str());
     assert_eq!(get("vo"), Some("libmpv"));
     assert_eq!(get("hwdec"), Some("auto-safe"));
-    assert_eq!(get("ao"), Some("pipewire,pulse,alsa"));
+    assert_eq!(get("ao"), Some(AO));
     assert_eq!(get("keep-open"), Some("yes"));
     assert_eq!(get("idle"), Some("yes"));
     assert_eq!(get("input-default-bindings"), Some("no"));
@@ -311,6 +313,7 @@ fn video_playlist_from_folder() {
 }
 
 /// Wait for `f` up to `secs`.
+#[cfg(feature = "ffmpeg")]
 fn wait_until(secs: f64, mut f: impl FnMut() -> bool) -> bool {
     let end = Instant::now() + Duration::from_secs_f64(secs);
     while Instant::now() < end {
@@ -323,6 +326,7 @@ fn wait_until(secs: f64, mut f: impl FnMut() -> bool) -> bool {
 }
 
 /// libmpv headless: vo=libmpv + SW render into a small buffer, ao=null.
+#[cfg(feature = "ffmpeg")] // the test clip is encoded with FFmpeg
 #[test]
 fn video_mpv_headless_playback() {
     if let Err(e) = mpv::api() {
@@ -399,6 +403,7 @@ fn video_mpv_headless_playback() {
 }
 
 /// The viewer state machine on libmpv (or the FFmpeg fallback).
+#[cfg(feature = "ffmpeg")] // the test clip is encoded with FFmpeg
 #[tokio::test]
 async fn video_state_controls_mpv() {
     let t = Tmp::new("state-mpv");

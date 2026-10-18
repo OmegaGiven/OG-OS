@@ -33,7 +33,6 @@ use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use toolpanel::{Action, Form, FormMsg, JobOut, Tool};
-use tools::server::ServerConfig;
 use tools::Output;
 
 const THUMB_W: f32 = 110.0;
@@ -98,7 +97,6 @@ pub struct State {
     tool: Option<Tool>,
     form: Form,
     report: Option<(Tool, String)>,
-    server: Option<ServerConfig>,
     // last pointer position over the page image, in image pixels
     mouse: (f32, f32),
     // redaction box being dragged: start point, 0..1
@@ -150,11 +148,6 @@ pub enum Msg {
     InsertBlank,
     SaveCopy,
     SaveReport,
-    ServerLoaded(Option<ServerConfig>),
-    ServerSave,
-    ServerSaved(Result<ServerConfig, String>),
-    ServerTest,
-    ServerTested(Result<String, String>),
 }
 
 fn thumbs_task(src: usize, s: &Source) -> Task<Msg> {
@@ -194,7 +187,6 @@ impl State {
             tool: None,
             form: Form::default(),
             report: None,
-            server: None,
             mouse: (0.0, 0.0),
             drag: None,
         };
@@ -209,16 +201,7 @@ impl State {
                 .find(|t| t.label() == want);
         }
         let t = s.reset(source);
-        let srv = Task::perform(
-            async {
-                tokio::task::spawn_blocking(ServerConfig::load)
-                    .await
-                    .ok()
-                    .flatten()
-            },
-            Msg::ServerLoaded,
-        );
-        (s, Task::batch([t, srv]))
+        (s, t)
     }
 
     /// Fresh plan = the file as it is on disk.
@@ -373,7 +356,6 @@ impl State {
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default(),
-            server: self.server.clone(),
         };
         let job = match toolpanel::job(tool, &self.form, input) {
             Ok(j) => j,
@@ -703,6 +685,15 @@ impl State {
                     .to_lowercase()
                     .replace(|c: char| !c.is_alphanumeric(), "-");
                 let slug = slug.trim_matches('-').replace("--", "-");
+                // a document plus a report: show the report, then treat it
+                // like any other new document version
+                let r = match r {
+                    JobOut::PdfReport(bytes, report) => {
+                        self.report = Some((tool, report));
+                        JobOut::Out(Output::Pdf(bytes))
+                    }
+                    r => r,
+                };
                 match r {
                     JobOut::Out(Output::Pdf(bytes)) | JobOut::Insert(bytes)
                         if new_file || !self.editing =>
@@ -745,6 +736,8 @@ impl State {
                         self.form.prefill(v);
                         none
                     }
+                    // converted to Out(Pdf) above
+                    JobOut::PdfReport(..) => none,
                     JobOut::Rename(name) => {
                         if self.dirty {
                             return (
@@ -912,90 +905,6 @@ impl State {
                 }
                 None => none,
             },
-            Msg::ServerLoaded(cfg) => {
-                if let Some(c) = &cfg {
-                    self.form.prefill(vec![
-                        ("srv_url", c.url.clone()),
-                        ("srv_key", c.api_key.clone()),
-                    ]);
-                }
-                self.server = cfg;
-                none
-            }
-            Msg::ServerSave => {
-                let cfg = ServerConfig {
-                    url: self
-                        .form_text("srv_url")
-                        .trim()
-                        .trim_end_matches('/')
-                        .to_string(),
-                    api_key: self.form_text("srv_key").trim().to_string(),
-                };
-                let task = Task::perform(
-                    async move {
-                        let path = crate::config::config_dir().join("stirling.json");
-                        let json = serde_json::to_string_pretty(&cfg).map_err(|e| e.to_string())?;
-                        if let Some(d) = path.parent() {
-                            tokio::fs::create_dir_all(d)
-                                .await
-                                .map_err(|e| e.to_string())?;
-                        }
-                        tokio::fs::write(&path, json)
-                            .await
-                            .map_err(|e| e.to_string())?;
-                        // the key is a secret: keep the file private
-                        #[cfg(unix)]
-                        {
-                            use std::os::unix::fs::PermissionsExt;
-                            let _ = tokio::fs::set_permissions(
-                                &path,
-                                std::fs::Permissions::from_mode(0o600),
-                            )
-                            .await;
-                        }
-                        Ok(cfg)
-                    },
-                    Msg::ServerSaved,
-                );
-                (task, None)
-            }
-            Msg::ServerSaved(r) => match r {
-                Ok(c) => {
-                    self.server = (!c.url.is_empty()).then_some(c);
-                    (
-                        Task::none(),
-                        Some(Event::Status("Server settings saved".into())),
-                    )
-                }
-                Err(e) => (
-                    Task::none(),
-                    Some(Event::Status(format!("Couldn't save server settings: {e}"))),
-                ),
-            },
-            Msg::ServerTest => match self.server.clone() {
-                Some(c) => (
-                    Task::perform(
-                        async move {
-                            tokio::task::spawn_blocking(move || tools::server::ping(&c))
-                                .await
-                                .map_err(|e| e.to_string())?
-                        },
-                        Msg::ServerTested,
-                    ),
-                    None,
-                ),
-                None => (
-                    Task::none(),
-                    Some(Event::Status("Save the server settings first".into())),
-                ),
-            },
-            Msg::ServerTested(r) => (
-                Task::none(),
-                Some(Event::Status(match r {
-                    Ok(s) => format!("Stirling server OK: {s}"),
-                    Err(e) => format!("Stirling server: {e}"),
-                })),
-            ),
             _ => none,
         }
     }
@@ -1317,58 +1226,16 @@ impl State {
                 for (cat, tools) in toolpanel::CATEGORIES {
                     list = list.push(text(cat).size(14)).push(Space::with_height(2));
                     for &t in tools {
-                        let srv = t.needs_server();
-                        let label = if srv {
-                            format!("{}  · server", t.label())
-                        } else {
-                            t.label().to_string()
-                        };
                         list = list.push(
-                            button(text(label).size(12).color(if srv && self.server.is_none() {
-                                theme::MUTED
-                            } else {
-                                iced::Color::WHITE
-                            }))
-                            .on_press(Msg::PickTool(Some(t)))
-                            .style(button::text)
-                            .padding([2, 6])
-                            .width(Length::Fill),
+                            button(text(t.label()).size(12).color(iced::Color::WHITE))
+                                .on_press(Msg::PickTool(Some(t)))
+                                .style(button::text)
+                                .padding([2, 6])
+                                .width(Length::Fill),
                         );
                     }
                     list = list.push(Space::with_height(8));
                 }
-                // Stirling server settings
-                let srv_field =
-                    |label: &'static str, key: &'static str, secure: bool| -> Element<'_, Msg> {
-                        column![
-                            text(label).size(11).color(theme::MUTED),
-                            text_input("", &self.form_text(key))
-                                .on_input(move |v| Msg::Form(FormMsg::Text(key, v)))
-                                .secure(secure)
-                                .size(12),
-                        ]
-                        .spacing(2)
-                        .into()
-                    };
-                list = list
-                    .push(text("Server settings (Stirling-PDF)").size(14))
-                    .push(
-                        text(match &self.server {
-                            Some(c) => format!("Using {}", c.url),
-                            None => "Not set up. OCR, strong compression, Office conversion, PDF/A and certificate signing need it.".into(),
-                        })
-                        .size(11)
-                        .color(theme::MUTED),
-                    )
-                    .push(srv_field("URL", "srv_url", false))
-                    .push(srv_field("API key (Stirling: Account settings → API key)", "srv_key", true))
-                    .push(
-                        row![
-                            button(text("Save").size(12)).on_press(Msg::ServerSave),
-                            button(text("Test connection").size(12)).on_press(Msg::ServerTest).style(button::secondary),
-                        ]
-                        .spacing(6),
-                    );
                 list.into()
             }
             Some(tool) => {
@@ -1379,17 +1246,10 @@ impl State {
                     text(tool.label()).size(16),
                     text(tool.help()).size(12).color(theme::MUTED),
                     Space::with_height(4),
-                    toolpanel::view_form(
-                        tool,
-                        &self.form,
-                        self.editing,
-                        self.server.is_some(),
-                        Msg::Form,
-                        |a| match a {
-                            Action::Run => Msg::RunTool(false),
-                            Action::RunNewFile => Msg::RunTool(true),
-                        }
-                    ),
+                    toolpanel::view_form(tool, &self.form, self.editing, Msg::Form, |a| match a {
+                        Action::Run => Msg::RunTool(false),
+                        Action::RunNewFile => Msg::RunTool(true),
+                    }),
                 ]
                 .spacing(6);
                 if self.busy {

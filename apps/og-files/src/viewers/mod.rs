@@ -82,6 +82,8 @@ pub enum Msg {
     /// "Convert to PDF" from the image/placeholder views
     Convert,
     Converted(Result<PathBuf, String>),
+    /// "Split scanned photos" finished (status line or error)
+    ScanSplit(Result<String, String>),
     DiskUsage(diskusage::Msg),
     Audio(audio::Msg),
     Video(video::Msg),
@@ -294,10 +296,11 @@ impl Viewer {
                 Some(Event::Status("Converting to PDF…".into())),
             ),
             (Viewer::Image(_), Msg::Image(image::Msg::SplitScan)) => (
-                Task::perform(convert::split_scan(path.to_path_buf()), Msg::Converted),
+                Task::perform(convert::split_scan(path.to_path_buf()), Msg::ScanSplit),
                 Some(Event::Status("Splitting scanned photos…".into())),
             ),
             (_, Msg::Converted(r)) => (Task::none(), Some(convert::status(r))),
+            (_, Msg::ScanSplit(r)) => (Task::none(), Some(convert::split_status(r))),
             (Viewer::DiskUsage(s), Msg::DiskUsage(m)) => {
                 let (t, ev) = s.update(m);
                 (t.map(Msg::DiskUsage), ev)

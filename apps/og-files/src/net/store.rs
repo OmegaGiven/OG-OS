@@ -38,7 +38,6 @@ pub(crate) fn save(dir: &Path, conns: &[Conn]) -> Result<Vec<Conn>, String> {
 }
 
 pub(crate) fn write_atomic(path: &Path, data: &[u8]) -> std::io::Result<()> {
-    use std::os::unix::fs::OpenOptionsExt;
     let dir = path.parent().unwrap_or(Path::new("."));
     std::fs::create_dir_all(dir)?;
     let tmp = dir.join(format!(
@@ -47,14 +46,17 @@ pub(crate) fn write_atomic(path: &Path, data: &[u8]) -> std::io::Result<()> {
         std::process::id()
     ));
     let res = (|| {
-        let mut f = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&tmp)?;
+        let mut o = std::fs::OpenOptions::new();
+        o.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            o.mode(0o600);
+        }
+        let mut f = o.open(&tmp)?;
         f.write_all(data)?;
         f.sync_all()?;
+        drop(f); // Windows can't rename a file that's still open
         std::fs::rename(&tmp, path)
     })();
     if res.is_err() {
@@ -198,12 +200,15 @@ mod tests {
             .map(|e| e.unwrap().file_name().into_string().unwrap())
             .collect();
         assert_eq!(names, vec!["connections.json"]);
-        use std::os::unix::fs::PermissionsExt;
-        let mode = std::fs::metadata(dir.join("connections.json"))
-            .unwrap()
-            .permissions()
-            .mode();
-        assert_eq!(mode & 0o777, 0o600);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(dir.join("connections.json"))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
         // no password field anywhere
         let raw = std::fs::read_to_string(dir.join("connections.json")).unwrap();
         assert!(!raw.to_lowercase().contains("pass\""));

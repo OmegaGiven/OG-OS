@@ -1,14 +1,66 @@
 //! Tailnet peers from the Tailscale LocalAPI (`GET /localapi/v0/status`
-//! over tailscaled's unix socket). Read-only.
+//! over tailscaled's unix socket) on Linux, or from `tailscale status
+//! --json` (same JSON) on macOS and Windows. Read-only.
 
 use super::{Discovered, Proto, Source};
 use serde_json::Value;
+#[cfg(target_os = "linux")]
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::time::Duration;
 
+#[cfg(target_os = "linux")]
 pub(crate) const SOCKET: &str = "/run/tailscale/tailscaled.sock";
 
+/// Where the `tailscale` CLI may be when it isn't on $PATH.
+#[cfg(any(not(target_os = "linux"), test))]
+pub(crate) fn cli_candidates(os_mac: bool) -> Vec<PathBuf> {
+    if os_mac {
+        vec![
+            "/Applications/Tailscale.app/Contents/MacOS/Tailscale".into(),
+            "/usr/local/bin/tailscale".into(),
+            "/opt/homebrew/bin/tailscale".into(),
+        ]
+    } else {
+        let pf = std::env::var_os("ProgramFiles").unwrap_or_else(|| "C:\\Program Files".into());
+        vec![PathBuf::from(pf).join("Tailscale").join("tailscale.exe")]
+    }
+}
+
+/// macOS / Windows: peers from `tailscale status --json`.
+#[cfg(not(target_os = "linux"))]
+pub(crate) async fn discover_cli(user: String) -> Result<Vec<Discovered>, String> {
+    let exe = crate::platform::find_program("tailscale")
+        .or_else(|| {
+            cli_candidates(cfg!(target_os = "macos"))
+                .into_iter()
+                .find(|p| p.is_file())
+        })
+        .ok_or("Tailscale isn't installed")?;
+    let mut cmd = std::process::Command::new(exe);
+    cmd.args(["status", "--json"])
+        .stdin(std::process::Stdio::null());
+    crate::platform::no_window(&mut cmd);
+    let mut cmd = tokio::process::Command::from(cmd);
+    cmd.kill_on_drop(true);
+    let out = tokio::time::timeout(Duration::from_secs(5), cmd.output())
+        .await
+        .map_err(|_| "Tailscale didn't answer".to_string())?
+        .map_err(|e| format!("Can't run tailscale: {e}"))?;
+    if !out.status.success() && out.stdout.is_empty() {
+        let err = String::from_utf8_lossy(&out.stderr);
+        return Err(if err.trim().is_empty() {
+            "Tailscale isn't running".into()
+        } else {
+            format!("Tailscale: {}", err.trim())
+        });
+    }
+    let json: Value = serde_json::from_slice(&out.stdout)
+        .map_err(|e| format!("Unexpected answer from Tailscale: {e}"))?;
+    Ok(parse_status(&json, &user))
+}
+
+#[cfg(target_os = "linux")]
 pub(crate) async fn discover(socket: PathBuf, user: String) -> Result<Vec<Discovered>, String> {
     let body = tokio::task::spawn_blocking(move || fetch(&socket, "/localapi/v0/status"))
         .await
@@ -19,6 +71,7 @@ pub(crate) async fn discover(socket: PathBuf, user: String) -> Result<Vec<Discov
 }
 
 /// HTTP/1.1 GET over a unix socket; returns the (de-chunked) body.
+#[cfg(target_os = "linux")]
 fn fetch(socket: &std::path::Path, path: &str) -> Result<Vec<u8>, String> {
     let mut s = std::os::unix::net::UnixStream::connect(socket).map_err(|e| match e.kind() {
         std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused => {
@@ -43,6 +96,7 @@ fn fetch(socket: &std::path::Path, path: &str) -> Result<Vec<u8>, String> {
 
 /// Split status line + headers from the body; handle chunked and
 /// Content-Length bodies. Err on non-2xx.
+#[cfg(any(target_os = "linux", test))]
 pub(crate) fn parse_http_response(raw: &[u8]) -> Result<Vec<u8>, String> {
     let split = raw
         .windows(4)
@@ -85,6 +139,7 @@ pub(crate) fn parse_http_response(raw: &[u8]) -> Result<Vec<u8>, String> {
     Ok(body)
 }
 
+#[cfg(any(target_os = "linux", test))]
 pub(crate) fn dechunk(mut b: &[u8]) -> Result<Vec<u8>, String> {
     let mut out = Vec::new();
     loop {
@@ -250,6 +305,15 @@ mod tests {
         assert!(parse_http_response(b"HTTP/1.1 200").is_err());
     }
 
+    #[test]
+    fn net_tailnet_cli_locations() {
+        let mac = cli_candidates(true);
+        assert!(mac[0].ends_with("Tailscale.app/Contents/MacOS/Tailscale"));
+        let win = cli_candidates(false);
+        assert!(win[0].ends_with("Tailscale/tailscale.exe"));
+    }
+
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn net_tailnet_missing_socket() {
         let e = discover("/nonexistent/tailscaled.sock".into(), "me".into())
@@ -259,6 +323,7 @@ mod tests {
     }
 
     /// Live, read-only: GET status from the real LocalAPI. Prints counts only.
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     #[ignore]
     async fn net_tailnet_live() {

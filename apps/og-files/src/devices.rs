@@ -1,4 +1,5 @@
 //! Drives via UDisks2 over D-Bus (zbus) and live folder watching (notify).
+//! macOS / Windows list mounted volumes read-only instead (`volumes.rs`).
 //!
 //! Nothing here shells out (og-files used lsblk/udisksctl). All D-Bus calls
 //! are async; mount/unmount go through UDisks2, which applies polkit rules
@@ -7,14 +8,39 @@
 //! Timers use `tokio::time`, which is compiled in because iced's `tokio`
 //! feature enables tokio's `time` driver.
 
-use iced::futures::{SinkExt, Stream, StreamExt};
-use std::collections::{HashMap, HashSet};
+#[cfg(target_os = "linux")]
+use iced::futures::StreamExt;
+use iced::futures::{SinkExt, Stream};
+#[cfg(target_os = "linux")]
+use std::collections::HashMap;
+use std::collections::HashSet;
+#[cfg(target_os = "linux")]
 use std::ffi::OsStr;
+#[cfg(target_os = "linux")]
 use std::os::unix::ffi::OsStrExt;
-use std::path::{Path, PathBuf};
+#[cfg(target_os = "linux")]
+use std::path::Path;
+use std::path::PathBuf;
 use std::time::Duration;
+#[cfg(target_os = "linux")]
 use zbus::fdo::ManagedObjects;
+#[cfg(target_os = "linux")]
 use zbus::zvariant::{OwnedValue, Value};
+
+#[cfg(not(target_os = "linux"))]
+mod volumes;
+#[cfg(not(target_os = "linux"))]
+pub use volumes::{eject, list, mount, root_path, unmount, watch_drives, CAN_UNMOUNT};
+
+/// Mounted drives can be unmounted from the app (UDisks2).
+#[cfg(target_os = "linux")]
+pub const CAN_UNMOUNT: bool = true;
+
+/// The "Root" entry of the tree.
+#[cfg(target_os = "linux")]
+pub fn root_path() -> PathBuf {
+    PathBuf::from("/")
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Drive {
@@ -37,27 +63,38 @@ pub struct Drive {
     pub system: bool,
 }
 
+#[cfg(target_os = "linux")]
 const UDISKS: &str = "org.freedesktop.UDisks2";
+#[cfg(target_os = "linux")]
 const UDISKS_ROOT: &str = "/org/freedesktop/UDisks2";
+#[cfg(target_os = "linux")]
 const IFACE_BLOCK: &str = "org.freedesktop.UDisks2.Block";
+#[cfg(target_os = "linux")]
 const IFACE_FS: &str = "org.freedesktop.UDisks2.Filesystem";
+#[cfg(target_os = "linux")]
 const IFACE_DRIVE: &str = "org.freedesktop.UDisks2.Drive";
+#[cfg(target_os = "linux")]
 const IFACE_ENCRYPTED: &str = "org.freedesktop.UDisks2.Encrypted";
+#[cfg(target_os = "linux")]
 const IFACE_OM: &str = "org.freedesktop.DBus.ObjectManager";
+#[cfg(target_os = "linux")]
 const IFACE_PROPS: &str = "org.freedesktop.DBus.Properties";
 
 /// Mount points that make a volume a "system" volume.
+#[cfg(target_os = "linux")]
 const SYSTEM_MOUNTS: &[&str] = &["/", "/boot", "/boot/efi", "/efi", "/home", "/var", "/usr"];
 
 /// Filesystems the user might care about: removable media, other internal
 /// partitions with a mountable filesystem, and mounted system volumes.
 /// Swap, EFI-only and empty devices are skipped.
+#[cfg(target_os = "linux")]
 pub async fn list() -> Result<Vec<Drive>, String> {
     let objects = managed_objects().await?;
     Ok(parse_drives(&Snapshot::from_objects(&objects)))
 }
 
 /// Mount via UDisks2 (Filesystem.Mount); returns the mount point.
+#[cfg(target_os = "linux")]
 pub async fn mount(id: &str) -> Result<PathBuf, String> {
     let conn = system_bus().await?;
     let reply = conn
@@ -74,6 +111,7 @@ pub async fn mount(id: &str) -> Result<PathBuf, String> {
     Ok(PathBuf::from(path))
 }
 
+#[cfg(target_os = "linux")]
 pub async fn unmount(id: &str) -> Result<(), String> {
     let conn = system_bus().await?;
     unmount_on(conn, id).await
@@ -81,6 +119,7 @@ pub async fn unmount(id: &str) -> Result<(), String> {
 
 /// Unmount every filesystem on the drive, then power it off (or eject
 /// optical media).
+#[cfg(target_os = "linux")]
 pub async fn eject(id: &str) -> Result<(), String> {
     let conn = system_bus().await?;
     let objects = managed_objects().await?;
@@ -116,6 +155,7 @@ pub async fn eject(id: &str) -> Result<(), String> {
 /// Fires (debounced ~300 ms) whenever drives appear/disappear or mount
 /// state changes (UDisks2 InterfacesAdded/Removed + PropertiesChanged).
 /// Ends if the system bus is unavailable.
+#[cfg(target_os = "linux")]
 pub fn watch_drives() -> impl Stream<Item = ()> + Send + 'static {
     iced::stream::channel(4, |mut out| async move {
         use zbus::message::Type;
@@ -264,6 +304,7 @@ fn collect_changed(ev: &notify::Event, watched: &HashSet<PathBuf>, changed: &mut
 
 // ---------------------------------------------------------------- D-Bus
 
+#[cfg(target_os = "linux")]
 async fn system_bus() -> Result<&'static zbus::Connection, String> {
     static BUS: tokio::sync::OnceCell<zbus::Connection> = tokio::sync::OnceCell::const_new();
     BUS.get_or_try_init(zbus::Connection::system)
@@ -271,6 +312,7 @@ async fn system_bus() -> Result<&'static zbus::Connection, String> {
         .map_err(|_| "System bus unavailable".to_string())
 }
 
+#[cfg(target_os = "linux")]
 async fn managed_objects() -> Result<ManagedObjects, String> {
     let conn = system_bus().await?;
     let reply = conn
@@ -289,6 +331,7 @@ async fn managed_objects() -> Result<ManagedObjects, String> {
         .map_err(map_err)
 }
 
+#[cfg(target_os = "linux")]
 async fn unmount_on(conn: &zbus::Connection, id: &str) -> Result<(), String> {
     conn.call_method(
         Some(UDISKS),
@@ -303,14 +346,17 @@ async fn unmount_on(conn: &zbus::Connection, id: &str) -> Result<(), String> {
 }
 
 /// Options for Filesystem.Mount: let polkit prompt if authorization is needed.
+#[cfg(target_os = "linux")]
 fn mount_options() -> HashMap<&'static str, Value<'static>> {
     HashMap::from([("auth.no_user_interaction", Value::Bool(false))])
 }
 
+#[cfg(target_os = "linux")]
 fn empty_options() -> HashMap<&'static str, Value<'static>> {
     HashMap::new()
 }
 
+#[cfg(target_os = "linux")]
 fn map_err(e: zbus::Error) -> String {
     match &e {
         zbus::Error::MethodError(name, detail, _) => {
@@ -322,6 +368,7 @@ fn map_err(e: zbus::Error) -> String {
 }
 
 /// Short user-facing message for a D-Bus error name (+ optional detail).
+#[cfg(target_os = "linux")]
 fn map_error_name(name: &str, detail: Option<&str>) -> String {
     let short = name.strip_prefix("org.freedesktop.UDisks2.Error.");
     match short {
@@ -365,6 +412,7 @@ fn map_error_name(name: &str, detail: Option<&str>) -> String {
 // ---------------------------------------------------------------- parsing
 
 #[derive(Debug, Default, Clone)]
+#[cfg(target_os = "linux")]
 struct BlockInfo {
     path: String,
     device: PathBuf,
@@ -383,6 +431,7 @@ struct BlockInfo {
 }
 
 #[derive(Debug, Default, Clone)]
+#[cfg(target_os = "linux")]
 struct DriveInfo {
     removable: bool,
     media_removable: bool,
@@ -394,21 +443,26 @@ struct DriveInfo {
 
 /// The parts of GetManagedObjects we use.
 #[derive(Debug, Default)]
+#[cfg(target_os = "linux")]
 struct Snapshot {
     blocks: Vec<BlockInfo>,
     drives: HashMap<String, DriveInfo>,
 }
 
+#[cfg(target_os = "linux")]
 type Props = HashMap<String, OwnedValue>;
 
+#[cfg(target_os = "linux")]
 fn prop<'a>(props: &'a Props, key: &str) -> Option<&'a Value<'static>> {
     props.get(key).map(|v| &**v)
 }
 
+#[cfg(target_os = "linux")]
 fn prop_bool(props: &Props, key: &str) -> bool {
     matches!(prop(props, key), Some(Value::Bool(true)))
 }
 
+#[cfg(target_os = "linux")]
 fn prop_u64(props: &Props, key: &str) -> u64 {
     match prop(props, key) {
         Some(Value::U64(n)) => *n,
@@ -416,6 +470,7 @@ fn prop_u64(props: &Props, key: &str) -> u64 {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn prop_str(props: &Props, key: &str) -> String {
     match prop(props, key) {
         Some(Value::Str(s)) => s.as_str().trim().to_string(),
@@ -424,6 +479,7 @@ fn prop_str(props: &Props, key: &str) -> String {
 }
 
 /// Object-path property; "/" (UDisks' "none") maps to None.
+#[cfg(target_os = "linux")]
 fn prop_path(props: &Props, key: &str) -> Option<String> {
     match prop(props, key) {
         Some(Value::ObjectPath(p)) if p.as_str() != "/" => Some(p.as_str().to_string()),
@@ -431,6 +487,7 @@ fn prop_path(props: &Props, key: &str) -> Option<String> {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn value_bytes(v: &Value<'_>) -> Option<Vec<u8>> {
     match v {
         Value::Array(a) => a
@@ -445,6 +502,7 @@ fn value_bytes(v: &Value<'_>) -> Option<Vec<u8>> {
 }
 
 /// D-Bus byte strings (`ay`) carry a trailing NUL.
+#[cfg(target_os = "linux")]
 fn bytes_to_path(mut bytes: Vec<u8>) -> PathBuf {
     while bytes.last() == Some(&0) {
         bytes.pop();
@@ -452,6 +510,7 @@ fn bytes_to_path(mut bytes: Vec<u8>) -> PathBuf {
     PathBuf::from(OsStr::from_bytes(&bytes))
 }
 
+#[cfg(target_os = "linux")]
 fn prop_bytepath(props: &Props, key: &str) -> PathBuf {
     prop(props, key)
         .and_then(value_bytes)
@@ -459,6 +518,7 @@ fn prop_bytepath(props: &Props, key: &str) -> PathBuf {
         .unwrap_or_default()
 }
 
+#[cfg(target_os = "linux")]
 fn prop_bytepaths(props: &Props, key: &str) -> Vec<PathBuf> {
     match prop(props, key) {
         Some(Value::Array(a)) => a
@@ -471,6 +531,7 @@ fn prop_bytepaths(props: &Props, key: &str) -> Vec<PathBuf> {
     }
 }
 
+#[cfg(target_os = "linux")]
 impl Snapshot {
     fn from_objects(objects: &ManagedObjects) -> Self {
         let mut snap = Snapshot::default();
@@ -536,10 +597,12 @@ impl Snapshot {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn is_system_mount(p: &Path) -> bool {
     SYSTEM_MOUNTS.iter().any(|m| p == Path::new(m))
 }
 
+#[cfg(target_os = "linux")]
 fn parse_drives(snap: &Snapshot) -> Vec<Drive> {
     // LUKS containers that are unlocked: their cleartext device is listed instead
     let unlocked: HashSet<&str> = snap
@@ -605,6 +668,7 @@ fn parse_drives(snap: &Snapshot) -> Vec<Drive> {
 }
 
 #[derive(Debug, PartialEq)]
+#[cfg(target_os = "linux")]
 struct EjectPlan {
     drive: String,
     /// filesystem objects to unmount (cleartext devices before others)
@@ -614,6 +678,7 @@ struct EjectPlan {
     power_off: bool,
 }
 
+#[cfg(target_os = "linux")]
 fn eject_plan(snap: &Snapshot, id: &str) -> Result<EjectPlan, String> {
     let block = snap.block(id).ok_or("Device is no longer available")?;
     let drive = snap.drive_of(block).ok_or("Not a removable drive")?;
@@ -654,7 +719,8 @@ fn eject_plan(snap: &Snapshot, id: &str) -> Result<EjectPlan, String> {
 
 // ---------------------------------------------------------------- tests
 
-#[cfg(test)]
+// UDisks2 parsing and inotify timing: Linux
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
     use zbus::names::OwnedInterfaceName;

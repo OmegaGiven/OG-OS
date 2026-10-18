@@ -347,6 +347,7 @@ impl Ctx<'_> {
             f.write_all(&buf[..n]).map_err(|e| e.to_string())?;
             (self.progress)(n as u64);
         }
+        #[cfg(unix)]
         if let Some(m) = mode {
             use std::os::unix::fs::PermissionsExt;
             let m = m & 0o777;
@@ -354,6 +355,8 @@ impl Ctx<'_> {
                 let _ = fs::set_permissions(&p, fs::Permissions::from_mode(m | 0o600));
             }
         }
+        #[cfg(not(unix))]
+        let _ = mode;
         self.report.files += 1;
         Ok(())
     }
@@ -366,10 +369,18 @@ impl Ctx<'_> {
             self.report.skipped.push(format!("{raw} -> {target}"));
             return Ok(());
         }
+        if cfg!(windows) {
+            // needs Developer Mode / admin there: leave links out
+            self.report
+                .skipped
+                .push(format!("{raw} -> {target} (symbolic link)"));
+            return Ok(());
+        }
         if let Some(parent) = p.parent() {
             fs::create_dir_all(parent).map_err(|e| e.to_string())?;
         }
-        std::os::unix::fs::symlink(target, &p).map_err(|e| format!("{}: {e}", p.display()))?;
+        crate::platform::symlink(Path::new(target), &p)
+            .map_err(|e| format!("{}: {e}", p.display()))?;
         self.report.files += 1;
         Ok(())
     }
@@ -819,13 +830,23 @@ fn add_zip<W: Write + io::Seek>(
     rel: &str,
     pk: &mut Pack,
 ) -> Result<(), String> {
-    use std::os::unix::fs::PermissionsExt;
     pk.check()?;
     let err = |e: &dyn std::fmt::Display| format!("{}: {e}", abs.display());
     let m = fs::symlink_metadata(abs).map_err(|e| err(&e))?;
+    #[cfg(unix)]
+    let perm = {
+        use std::os::unix::fs::PermissionsExt;
+        m.permissions().mode() & 0o7777
+    };
+    #[cfg(not(unix))]
+    let perm = match (m.is_dir(), m.permissions().readonly()) {
+        (true, _) => 0o755,
+        (false, true) => 0o444,
+        (false, false) => 0o644,
+    };
     let opts = zip::write::SimpleFileOptions::default()
         .compression_method(zip::CompressionMethod::Deflated)
-        .unix_permissions(m.permissions().mode() & 0o7777)
+        .unix_permissions(perm)
         .large_file(m.len() >= u32::MAX as u64);
     if m.file_type().is_symlink() {
         let t = fs::read_link(abs).map_err(|e| err(&e))?;
@@ -1919,6 +1940,7 @@ mod tests {
         assert!(fs::symlink_metadata(dest.join("ok/link")).is_err());
     }
 
+    #[cfg(unix)] // Windows extraction skips symlinks by design
     #[test]
     fn tar_symlink_escape_rejected() {
         let t = Tmp::new("tarslip");

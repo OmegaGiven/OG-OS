@@ -2036,11 +2036,9 @@ mod tests {
 
     impl TmpDir {
         fn new(name: &str) -> Self {
-            let home = std::env::var_os("HOME").expect("HOME");
-            let p = PathBuf::from(home).join(format!(
-                ".cache/ogx-p2-audio-tests/{name}-{}",
-                std::process::id()
-            ));
+            let p = dirs::cache_dir()
+                .unwrap_or_else(std::env::temp_dir)
+                .join(format!("ogx-p2-audio-tests/{name}-{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&p);
             std::fs::create_dir_all(&p).unwrap();
             Self(p)

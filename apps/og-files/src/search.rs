@@ -252,7 +252,9 @@ fn walk(
         for e in rd.flatten() {
             scanned += 1;
             let name = e.file_name().to_string_lossy().into_owned();
-            if name.starts_with('.') {
+            if name.starts_with('.')
+                || (cfg!(windows) && crate::platform::is_hidden(&name, e.metadata().ok().as_ref()))
+            {
                 continue;
             }
             // file_type() doesn't follow symlinks: no loops, no wandering off-tree

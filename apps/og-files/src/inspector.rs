@@ -67,22 +67,23 @@ impl Inspector {
                     field("Type", m.kind.label().into()),
                     field("Size", fsops::human_size(m.size)),
                     field("Modified", fsops::ago(m.modified)),
-                    field(
-                        "Mode",
-                        m.mode
-                            .map(|x| format!("{:o}", x & 0o7777))
-                            .unwrap_or_else(|| "—".into())
-                    ),
-                    field(
-                        "Writable",
-                        if m.readonly {
-                            "no".into()
-                        } else {
-                            "yes".into()
-                        }
-                    ),
                 ]
                 .spacing(6);
+                // unix permission bits; Windows only has the read-only flag
+                if let Some(x) = m.mode {
+                    c = c.push(field("Mode", format!("{:o}", x & 0o7777)));
+                }
+                c = c.push(field(
+                    if m.mode.is_some() {
+                        "Writable"
+                    } else {
+                        "Read-only"
+                    },
+                    match (m.mode.is_some(), m.readonly) {
+                        (true, ro) => if ro { "no" } else { "yes" }.into(),
+                        (false, ro) => if ro { "yes" } else { "no" }.into(),
+                    },
+                ));
                 if let Some(n) = m.child_count {
                     c = c.push(field("Items", n.to_string()));
                 }
@@ -104,7 +105,7 @@ impl Inspector {
 
 fn tools_for(kind: Kind) -> &'static str {
     match kind {
-        Kind::Image => "view · Make PDF · split scanned photos (server); editing: phase 3",
+        Kind::Image => "view · Make PDF · split scanned photos; editing: phase 3",
         Kind::Video => {
             "play · seek · frame step · speed; edit mode: snapshot frame, trim → new file"
         }
@@ -114,7 +115,7 @@ fn tools_for(kind: Kind) -> &'static str {
         Kind::Table => "sheets · edit cells · rows/columns · sort (edit mode)",
         Kind::Text => "edit mode · syntax colours · find (phase 2)",
         Kind::Doc => {
-            "PDF: page editing + 54-tool panel (Tools). DOCX: Word-style editor (edit mode). Markdown: edit source. ODT / EPUB: reader"
+            "PDF: page editing + 55 built-in tools (Tools). DOCX: Word-style editor (edit mode). Markdown: edit source. ODT / EPUB: reader"
         }
         Kind::Model3d => "orbit · pan · zoom · shaded / wire / normals · Y/Z up · dimensions",
         Kind::Archive => "browse like a folder · open entries · extract",

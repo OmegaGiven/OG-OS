@@ -7,7 +7,9 @@
 //!
 //! Without libmpv (or with `OGX_NO_MPV=1`) the viewer falls back to the
 //! FFmpeg-library player in `ff.rs`, which also provides grid thumbnails and
-//! the stream-copy trim exporter for both.
+//! the stream-copy trim exporter for both. Builds without the `ffmpeg`
+//! feature use `ff_none.rs` instead: no thumbnails, no trim export, and an
+//! "Install mpv" placeholder when libmpv can't be loaded.
 //!
 //! Like mpv's watch-later, the position of every file is remembered in
 //! `$XDG_STATE_HOME/og-files/video-positions.json` and resumed silently.
@@ -18,6 +20,11 @@
 //! into `<stem>-edit.<ext>`, "Snapshot frame" writes
 //! `<stem>-frame-MMmSSs.png`; both report through `Event::Status`.
 
+mod common;
+#[cfg(feature = "ffmpeg")]
+mod ff;
+#[cfg(not(feature = "ffmpeg"))]
+#[path = "ff_none.rs"]
 mod ff;
 mod mpv;
 mod screen;
@@ -26,7 +33,7 @@ mod seekbar;
 use super::Event;
 use crate::theme;
 use crate::widgets::icon;
-use ff::{fmt_mark, fmt_time, ExportEv, Info, AMBER};
+use common::{fmt_mark, fmt_time, ExportEv, Info, AMBER};
 use iced::futures::SinkExt;
 use iced::keyboard::{key::Named, Key, Modifiers};
 use iced::widget::{
@@ -48,6 +55,13 @@ const EXTS: &[&str] = &[
 const ASPECTS: [&str; 6] = ["no", "16:9", "4:3", "2.35:1", "1.85:1", "1:1"];
 /// Fullscreen controls hide after this long without pointer motion.
 const HIDE_AFTER: Duration = Duration::from_millis(2500);
+/// mpv audio outputs tried in order.
+#[cfg(target_os = "macos")]
+const AO: &str = "coreaudio";
+#[cfg(windows)]
+const AO: &str = "wasapi";
+#[cfg(not(any(target_os = "macos", windows)))]
+const AO: &str = "pipewire,pulse,alsa";
 
 /// Does this viewer handle `path` (by extension / sniffing)?
 pub fn supported(path: &Path) -> bool {
@@ -129,7 +143,7 @@ fn mpv_options(path: &Path, mute: bool) -> Vec<(String, String)> {
         ("ytdl", "no"),
         ("vo", "libmpv"),
         ("hwdec", "auto-safe"),
-        ("ao", "pipewire,pulse,alsa"),
+        ("ao", AO),
         ("audio-client-name", "og-files"),
         ("keep-open", "yes"),
         ("idle", "yes"),
@@ -294,11 +308,11 @@ struct Saved {
 const RESUME_MAX: usize = 1000;
 
 fn resume_store() -> Option<PathBuf> {
-    let base = std::env::var_os("XDG_STATE_HOME")
-        .filter(|v| !v.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/state")))?;
-    Some(base.join("og-files/video-positions.json"))
+    let dir = match std::env::var_os("XDG_STATE_HOME").filter(|v| !v.is_empty()) {
+        Some(v) => PathBuf::from(v).join("og-files"),
+        None => crate::config::state_dir(),
+    };
+    Some(dir.join("video-positions.json"))
 }
 
 /// Worth resuming: past the first 10 s and not at the end.
@@ -1648,12 +1662,16 @@ impl MpvState {
                     .spacing(4)
                 )
                 .padding([4, 8])
-                .on_press_maybe((!busy).then_some(Msg::Export)),
+                .on_press_maybe((!busy && ff::CAN_EXPORT).then_some(Msg::Export)),
             ]
             .spacing(6)
             .align_y(Alignment::Center);
             col = col.push(edit).push(
-                text("Exports are new files (keyframe-aligned stream copy); the video is never saved over.")
+                text(if ff::CAN_EXPORT {
+                    "Exports are new files (keyframe-aligned stream copy); the video is never saved over."
+                } else {
+                    "Snapshots are new files; the video is never saved over. Trim export needs a build with FFmpeg."
+                })
                     .size(12)
                     .color(theme::MUTED),
             );

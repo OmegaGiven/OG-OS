@@ -9,7 +9,12 @@
 //! a `Paths` value (and, for processes, a `Runner`) so tests can point it at
 //! a scratch directory and capture commands instead of running them.
 
+#[cfg(target_os = "linux")]
 mod keyring;
+#[cfg(not(target_os = "linux"))]
+#[path = "keyring_os.rs"]
+mod keyring;
+#[cfg(target_os = "linux")]
 mod lan;
 mod rclone;
 mod sshcfg;
@@ -90,7 +95,8 @@ pub struct Conn {
 pub enum Source {
     /// a Tailscale peer: online right now?, OS reported by tailscale
     Tailnet { online: bool, os: String },
-    /// advertised on the LAN via mDNS / DNS-SD
+    /// advertised on the LAN via mDNS / DNS-SD (Avahi: Linux only)
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     Lan,
     /// a `Host` entry in ~/.ssh/config
     SshConfig,
@@ -130,6 +136,7 @@ impl Discovered {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub enum LanEvent {
     Found(Discovered),
     Lost { name: String, proto: Proto },
@@ -147,17 +154,14 @@ pub(crate) struct Paths {
     /// ~/.ssh (config, keys)
     pub ssh_dir: PathBuf,
     /// /proc/mounts
+    #[cfg_attr(any(target_os = "macos", windows), allow(dead_code))]
     pub proc_mounts: PathBuf,
 }
 
 impl Paths {
     pub fn real() -> Self {
         let home = crate::config::home();
-        let state = std::env::var_os("XDG_STATE_HOME")
-            .map(PathBuf::from)
-            .filter(|p| p.is_absolute())
-            .unwrap_or_else(|| home.join(".local/state"))
-            .join("og-files");
+        let state = crate::config::state_dir();
         Paths {
             config_dir: crate::config::config_dir(),
             state_dir: state,
@@ -176,6 +180,7 @@ pub(crate) fn local_user() -> String {
 }
 
 /// rclone + fusermount3 present? Err explains what to install.
+#[cfg(not(any(target_os = "macos", windows)))]
 pub fn backend_available() -> Result<(), String> {
     let rclone = rclone::on_path("rclone");
     let fuse = rclone::on_path("fusermount3");
@@ -189,6 +194,51 @@ pub fn backend_available() -> Result<(), String> {
             "Install rclone and FUSE 3 to connect to network storage (pacman -S rclone fuse3)"
                 .into(),
         ),
+    }
+}
+
+/// rclone + a FUSE layer (macFUSE / FUSE-T on macOS, WinFsp on Windows)
+/// present? Err explains what to install.
+#[cfg(any(target_os = "macos", windows))]
+pub fn backend_available() -> Result<(), String> {
+    use std::path::Path;
+    let rclone = rclone::on_path("rclone");
+    let fuse = if cfg!(target_os = "macos") {
+        [
+            "/Library/Filesystems/macfuse.fs",
+            "/Library/Filesystems/osxfuse.fs",
+            "/usr/local/lib/libfuse-t.dylib",
+            "/opt/homebrew/lib/libfuse-t.dylib",
+        ]
+        .iter()
+        .any(|p| Path::new(p).exists())
+    } else {
+        ["ProgramFiles(x86)", "ProgramFiles"]
+            .iter()
+            .any(|v| std::env::var_os(v).is_some_and(|d| Path::new(&d).join("WinFsp").is_dir()))
+    };
+    let (get_rclone, fuse_name, get_fuse) = if cfg!(target_os = "macos") {
+        (
+            "the official rclone binary from rclone.org (Homebrew's can't mount)",
+            "macFUSE",
+            "macFUSE (macfuse.github.io) or FUSE-T",
+        )
+    } else {
+        (
+            "rclone (winget install Rclone.Rclone)",
+            "WinFsp",
+            "WinFsp (winget install WinFsp.WinFsp)",
+        )
+    };
+    match (rclone, fuse) {
+        (true, true) => Ok(()),
+        (false, true) => Err(format!(
+            "Install {get_rclone} to connect to network storage"
+        )),
+        (true, false) => Err(format!("Install {get_fuse} to mount network storage")),
+        (false, false) => Err(format!(
+            "Install {get_rclone} and {fuse_name} to connect to network storage"
+        )),
     }
 }
 
@@ -218,10 +268,14 @@ pub fn to_url(c: &Conn) -> String {
     url::print(c)
 }
 
-/// Tailnet peers (Tailscale LocalAPI over its unix socket), as SFTP
-/// candidates. Err if tailscaled isn't running.
+/// Tailnet peers (Tailscale LocalAPI over its unix socket; macOS /
+/// Windows: `tailscale status --json`), as SFTP candidates. Err if
+/// tailscaled isn't running.
 pub async fn discover_tailnet() -> Result<Vec<Discovered>, String> {
-    tailnet::discover(tailnet::SOCKET.into(), local_user()).await
+    #[cfg(target_os = "linux")]
+    return tailnet::discover(tailnet::SOCKET.into(), local_user()).await;
+    #[cfg(not(target_os = "linux"))]
+    return tailnet::discover_cli(local_user()).await;
 }
 
 /// `Host` entries from ~/.ssh/config (no wildcards).
@@ -230,9 +284,13 @@ pub fn ssh_config_hosts() -> Vec<Discovered> {
 }
 
 /// LAN services via Avahi (D-Bus): _sftp-ssh/_ssh, _smb, _webdav(s), _ftp.
-/// Runs until dropped; ends if Avahi isn't available.
+/// Runs until dropped; ends if Avahi isn't available (always, on macOS and
+/// Windows: no Avahi there).
 pub fn discover_lan() -> impl Stream<Item = LanEvent> + Send + 'static {
-    lan::browse()
+    #[cfg(target_os = "linux")]
+    return lan::browse();
+    #[cfg(not(target_os = "linux"))]
+    return iced::futures::stream::empty();
 }
 
 /// Can we log in and list the remote folder? Ok = short description.
@@ -241,7 +299,7 @@ pub async fn test(conn: Conn, password: Option<String>) -> Result<String, String
     rclone::test(
         &Paths::real(),
         &rclone::System,
-        &keyring::SecretService,
+        &keyring::Store,
         conn,
         password,
     )
@@ -260,7 +318,7 @@ pub async fn mount(
     rclone::mount(
         &Paths::real(),
         &rclone::System,
-        &keyring::SecretService,
+        &keyring::Store,
         conn,
         password,
         remember,
@@ -301,15 +359,23 @@ pub(crate) mod testdir {
         pub fn new(tag: &str) -> Self {
             use std::sync::atomic::{AtomicU32, Ordering};
             static N: AtomicU32 = AtomicU32::new(0);
-            let dir = crate::config::home()
-                .join(".cache/ogx-net-tests")
+            let dir = dirs::cache_dir()
+                .unwrap_or_else(std::env::temp_dir)
+                .join("ogx-net-tests")
                 .join(format!(
                     "{tag}-{}-{}",
                     std::process::id(),
                     N.fetch_add(1, Ordering::Relaxed)
                 ));
             let _ = std::fs::remove_dir_all(&dir);
-            std::fs::create_dir_all(&dir).unwrap();
+            // Windows can briefly deny access (antivirus scans, pending
+            // deletes) — retry before failing the test
+            let mut tries = 0;
+            while let Err(e) = std::fs::create_dir_all(&dir) {
+                tries += 1;
+                assert!(tries < 20, "create {}: {e}", dir.display());
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
             TestDir(dir)
         }
 

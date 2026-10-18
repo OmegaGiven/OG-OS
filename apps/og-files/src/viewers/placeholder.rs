@@ -9,8 +9,8 @@ use std::path::PathBuf;
 
 pub struct State {
     kind: Kind,
-    /// Some(needs_server) when "Convert to PDF" is possible
-    convert: Option<bool>,
+    /// "Convert to PDF" is possible
+    convert: bool,
 }
 
 impl State {
@@ -25,7 +25,7 @@ impl State {
         let plan = match self.kind {
             Kind::Video => "Phase 2: GStreamer playback into a wgpu texture (play, seek, trim).",
             Kind::Audio => "Phase 2: symphonia decode + cpal output, waveform view, trim.",
-            Kind::Doc => "Phase 2: DOCX/ODT/EPUB text view. Convert to PDF works now (server).",
+            Kind::Doc => "Phase 2: DOCX/ODT/EPUB text view. Convert to PDF works now.",
             Kind::Model3d => "Phase 3: glTF/OBJ/STL into an iced shader widget (orbit camera).",
             Kind::Table => "Phase 2: xlsx/ods via calamine.",
             Kind::Archive => "Phase 2: browse archives as folders (zip / tar crates).",
@@ -38,15 +38,8 @@ impl State {
         ]
         .spacing(8)
         .align_x(iced::Alignment::Center);
-        if let Some(server) = self.convert {
-            c = c.push(
-                button(text(if server {
-                    "Convert to PDF (Stirling server)"
-                } else {
-                    "Convert to PDF"
-                }))
-                .on_press(on_convert),
-            );
+        if self.convert {
+            c = c.push(button(text("Convert to PDF")).on_press(on_convert));
         }
         center(c).into()
     }

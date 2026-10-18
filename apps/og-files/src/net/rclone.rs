@@ -26,6 +26,9 @@ pub(crate) struct Cmd {
     pub stdin: Option<String>,
     /// stdout/stderr to /dev/null (daemonizing children keep pipes open)
     pub detach: bool,
+    /// start it and return at once (Ok, stdout = pid): Windows mounts,
+    /// where rclone can't daemonize itself
+    pub background: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -46,8 +49,15 @@ impl Runner for System {
     async fn run(&self, cmd: Cmd, timeout: Duration) -> Result<Out, String> {
         use std::process::Stdio;
         use tokio::io::AsyncWriteExt;
-        let mut c = tokio::process::Command::new(&cmd.program);
-        c.args(&cmd.args).kill_on_drop(true);
+        let mut c = std::process::Command::new(&cmd.program);
+        c.args(&cmd.args);
+        if cmd.background {
+            crate::platform::detach(&mut c);
+        }
+        // no console window flashing up on Windows
+        crate::platform::no_window(&mut c);
+        let mut c = tokio::process::Command::from(c);
+        c.kill_on_drop(!cmd.background);
         // never let a stray inherited definition leak into our remote
         for (k, _) in std::env::vars_os() {
             if k.to_str().is_some_and(|k| k.starts_with(ENV_PREFIX)) {
@@ -60,7 +70,7 @@ impl Runner for System {
         } else {
             Stdio::null()
         });
-        if cmd.detach {
+        if cmd.detach || cmd.background {
             c.stdout(Stdio::null()).stderr(Stdio::null());
         } else {
             c.stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -76,6 +86,18 @@ impl Runner for System {
                 .map_err(|e| format!("{}: {e}", cmd.program))?;
             drop(stdin);
         }
+        if cmd.background {
+            let pid = child.id().unwrap_or(0);
+            // reap it whenever it ends (unmount kills it)
+            tokio::spawn(async move {
+                let _ = child.wait().await;
+            });
+            return Ok(Out {
+                ok: true,
+                stdout: pid.to_string(),
+                stderr: String::new(),
+            });
+        }
         match tokio::time::timeout(timeout, child.wait_with_output()).await {
             Err(_) => Err("timeout".into()),
             Ok(Err(e)) => Err(format!("{}: {e}", cmd.program)),
@@ -88,15 +110,9 @@ impl Runner for System {
     }
 }
 
-/// Executable `name` somewhere on $PATH?
+/// Executable `name` somewhere on $PATH (`name.exe` on Windows)?
 pub(crate) fn on_path(name: &str) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    std::env::var_os("PATH").is_some_and(|p| {
-        std::env::split_paths(&p).any(|d| {
-            std::fs::metadata(d.join(name))
-                .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
-        })
-    })
+    crate::platform::find_program(name).is_some()
 }
 
 // ------------------------------------------------------------ remote (env)
@@ -365,6 +381,7 @@ pub(crate) struct MountEntry {
 }
 
 /// /proc/mounts lines; octal escapes (`\040` = space) decoded.
+#[cfg(any(not(any(target_os = "macos", windows)), test))]
 pub(crate) fn parse_mounts(text: &str) -> Vec<MountEntry> {
     fn unescape(s: &str) -> String {
         let b = s.as_bytes();
@@ -400,8 +417,84 @@ pub(crate) fn parse_mounts(text: &str) -> Vec<MountEntry> {
         .collect()
 }
 
+/// `mount` output on macOS: `SRC on TARGET (TYPE, opt, …)`. The
+/// filesystem type is reported as `fuse.rclone` for rclone's own mounts
+/// (source `OGF:…` on macFUSE / FUSE-T) so the rest matches Linux.
+#[cfg(any(target_os = "macos", test))]
+pub(crate) fn parse_mount_output(text: &str) -> Vec<MountEntry> {
+    text.lines()
+        .filter_map(|l| {
+            let (source, rest) = l.split_once(" on ")?;
+            let open = rest.rfind(" (")?;
+            let target = PathBuf::from(&rest[..open]);
+            let opts = rest[open + 2..].trim_end_matches(')');
+            let mut fstype = opts.split(',').next().unwrap_or("").trim().to_string();
+            if source.starts_with(&format!("{REMOTE}:")) {
+                fstype = "fuse.rclone".into();
+            }
+            Some(MountEntry {
+                source: source.to_string(),
+                target,
+                fstype,
+            })
+        })
+        .collect()
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
 fn read_mounts(paths: &Paths) -> Vec<MountEntry> {
     parse_mounts(&std::fs::read_to_string(&paths.proc_mounts).unwrap_or_default())
+}
+
+#[cfg(target_os = "macos")]
+fn read_mounts(_paths: &Paths) -> Vec<MountEntry> {
+    let out = std::process::Command::new("/sbin/mount")
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output();
+    match out {
+        Ok(o) => parse_mount_output(&String::from_utf8_lossy(&o.stdout)),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// Windows has no mount table we can read: rclone mounts started by us are
+/// remembered in `rclone-<id>.pid` (pid, then mount folder); one counts
+/// while its folder exists (WinFsp removes it when rclone exits).
+#[cfg(windows)]
+fn read_mounts(paths: &Paths) -> Vec<MountEntry> {
+    let Ok(rd) = std::fs::read_dir(&paths.state_dir) else {
+        return Vec::new();
+    };
+    rd.flatten()
+        .filter(|e| {
+            let n = e.file_name().to_string_lossy().into_owned();
+            n.starts_with("rclone-") && n.ends_with(".pid")
+        })
+        .filter_map(|e| {
+            let text = std::fs::read_to_string(e.path()).ok()?;
+            let (_pid, target) = parse_pid_file(&text)?;
+            target.exists().then(|| MountEntry {
+                source: format!("{REMOTE}:"),
+                target,
+                fstype: "fuse.rclone".into(),
+            })
+        })
+        .collect()
+}
+
+/// `rclone-<id>.pid`: "<pid>\n<mount folder>\n".
+#[cfg(any(windows, test))]
+pub(crate) fn parse_pid_file(text: &str) -> Option<(u32, PathBuf)> {
+    let mut l = text.lines();
+    let pid = l.next()?.trim().parse().ok()?;
+    let target = l.next().map(str::trim).filter(|t| !t.is_empty())?;
+    Some((pid, PathBuf::from(target)))
+}
+
+#[cfg(windows)]
+fn pid_file(paths: &Paths, c: &Conn) -> PathBuf {
+    log_file(paths, c).with_extension("pid")
 }
 
 fn is_rclone_mount(paths: &Paths, at: &Path) -> bool {
@@ -460,29 +553,37 @@ pub(crate) fn log_file(paths: &Paths, c: &Conn) -> PathBuf {
 }
 
 pub(crate) fn mount_args(rem: &Remote, mp: &Path, log: &Path, volname: &str) -> Vec<String> {
-    let mut a: Vec<String> = [
-        "mount",
-        &rem.spec,
-        &mp.display().to_string(),
-        "--daemon",
-        "--daemon-wait",
-        "10s",
-        "--vfs-cache-mode",
-        "writes",
-        "--dir-cache-time",
-        "30s",
-        "--poll-interval",
-        "30s",
-        "--log-file",
-        &log.display().to_string(),
-        "--log-level",
-        "NOTICE",
-        "--volname",
-        volname,
-    ]
-    .iter()
-    .map(|s| s.to_string())
-    .collect();
+    // rclone can't daemonize on Windows: it is started in the background
+    // instead (`Cmd::background`)
+    let daemon: &[&str] = if cfg!(windows) {
+        &[]
+    } else {
+        &["--daemon", "--daemon-wait", "10s"]
+    };
+    let mp_s = mp.display().to_string();
+    let mut a: Vec<String> = ["mount", rem.spec.as_str(), mp_s.as_str()]
+        .into_iter()
+        .chain(daemon.iter().copied())
+        .map(str::to_string)
+        .collect();
+    a.extend(
+        [
+            "--vfs-cache-mode",
+            "writes",
+            "--dir-cache-time",
+            "30s",
+            "--poll-interval",
+            "30s",
+            "--log-file",
+            &log.display().to_string(),
+            "--log-level",
+            "NOTICE",
+            "--volname",
+            volname,
+        ]
+        .iter()
+        .map(|s| s.to_string()),
+    );
     a.extend(rem.flags.iter().cloned());
     a
 }
@@ -553,6 +654,10 @@ pub(crate) async fn mount_with(
     let (rem, secret) = prepare(paths, r, kr, conn, password, facts).await?;
 
     std::fs::create_dir_all(&mp).map_err(|e| format!("Can't create {}: {e}", mp.display()))?;
+    if cfg!(windows) {
+        // WinFsp creates the mount folder itself and refuses an existing one
+        let _ = std::fs::remove_dir(&mp);
+    }
     let _ = std::fs::create_dir_all(&paths.state_dir);
     let log = log_file(paths, conn);
     let _ = std::fs::remove_file(&log);
@@ -562,12 +667,20 @@ pub(crate) async fn mount_with(
         env: rem.env.clone(),
         stdin: None,
         detach: true,
+        background: cfg!(windows),
     };
     let fail = |msg: String| {
         let _ = std::fs::remove_dir(&mp); // only if still empty
         Err(msg)
     };
     match r.run(cmd, Duration::from_secs(20)).await {
+        #[cfg(windows)]
+        Ok(out) if out.ok => {
+            let _ = std::fs::write(
+                pid_file(paths, conn),
+                format!("{}\n{}\n", out.stdout.trim(), mp.display()),
+            );
+        }
         Ok(out) if out.ok => {}
         Ok(_) => return fail(friendly_error(&log_tail(&log), conn)),
         Err(e) if e == "timeout" => {}
@@ -641,6 +754,7 @@ pub(crate) async fn test_with(
         env: rem.env,
         stdin: None,
         detach: false,
+        background: false,
     };
     match r.run(cmd, Duration::from_secs(15)).await {
         Ok(out) if out.ok => {
@@ -657,6 +771,81 @@ pub(crate) async fn test_with(
     }
 }
 
+/// macOS: `umount`, then a forced `diskutil unmount` when it's busy.
+#[cfg(target_os = "macos")]
+pub(crate) async fn unmount(paths: &Paths, r: &impl Runner, conn: &Conn) -> Result<(), String> {
+    let mp = mount_point(paths, conn);
+    if is_rclone_mount(paths, &mp) {
+        let t = Duration::from_secs(10);
+        let m = mp.display().to_string();
+        let first = r
+            .run(
+                Cmd {
+                    program: "/sbin/umount".into(),
+                    args: vec![m.clone()],
+                    ..Default::default()
+                },
+                t,
+            )
+            .await;
+        if !matches!(first, Ok(Out { ok: true, .. })) {
+            let o = r
+                .run(
+                    Cmd {
+                        program: "/usr/sbin/diskutil".into(),
+                        args: vec!["unmount".into(), "force".into(), m],
+                        ..Default::default()
+                    },
+                    t,
+                )
+                .await;
+            match o {
+                Ok(o) if o.ok => {}
+                Ok(o) => return Err(format!("Unmount failed: {}", o.stderr.trim())),
+                Err(e) => return Err(format!("Unmount failed: {e}")),
+            }
+        }
+    }
+    let _ = std::fs::remove_dir(&mp); // only removes an empty folder
+    Ok(())
+}
+
+/// Windows: end the rclone process we started (WinFsp then removes the
+/// mount folder).
+#[cfg(windows)]
+pub(crate) async fn unmount(paths: &Paths, r: &impl Runner, conn: &Conn) -> Result<(), String> {
+    let pf = pid_file(paths, conn);
+    let entry = std::fs::read_to_string(&pf)
+        .ok()
+        .and_then(|t| parse_pid_file(&t));
+    if let Some((pid, mp)) = entry {
+        if mp.exists() {
+            let o = r
+                .run(
+                    Cmd {
+                        program: "taskkill".into(),
+                        args: vec!["/PID".into(), pid.to_string(), "/T".into(), "/F".into()],
+                        ..Default::default()
+                    },
+                    Duration::from_secs(10),
+                )
+                .await;
+            if let Ok(o) = &o {
+                if !o.ok && mp.exists() {
+                    return Err(format!("Unmount failed: {}", o.stderr.trim()));
+                }
+            }
+            let start = tokio::time::Instant::now();
+            while mp.exists() && start.elapsed() < Duration::from_secs(5) {
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+        }
+    }
+    let _ = std::fs::remove_file(&pf);
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
 pub(crate) async fn unmount(paths: &Paths, r: &impl Runner, conn: &Conn) -> Result<(), String> {
     let mp = mount_point(paths, conn);
     if is_rclone_mount(paths, &mp) {
@@ -986,7 +1175,8 @@ mod tests {
         assert!(!e.contains_key("KEY_USE_AGENT"));
         c.auth = Auth::KeyFile("~/.ssh/work".into());
         let e = env_map(&remote(&c, None, Some("OBS"), &facts(true)).unwrap());
-        assert_eq!(e["KEY_FILE"], "/home/me/.ssh/work");
+        let want = PathBuf::from("/home/me").join(".ssh/work");
+        assert_eq!(e["KEY_FILE"], want.to_string_lossy());
         assert_eq!(e["KEY_FILE_PASS"], "OBS");
         c.auth = Auth::Anonymous;
         assert!(remote(&c, None, None, &facts(true)).is_err());
@@ -1073,6 +1263,27 @@ mod tests {
     }
 
     #[test]
+    fn net_rclone_mac_mount_output_and_pid_file() {
+        let text = "/dev/disk3s1s1 on / (apfs, sealed, local, read-only, journaled)\n\
+                    OGF:media on /Users/me/Network/go media (macfuse, nodev, nosuid, synchronous, mounted by me)\n\
+                    map auto_home on /System/Volumes/Data/home (autofs, automounted, nobrowse)\n";
+        let m = parse_mount_output(text);
+        assert_eq!(m.len(), 3);
+        assert_eq!(m[0].fstype, "apfs");
+        assert_eq!(m[0].target, PathBuf::from("/"));
+        assert_eq!(m[1].fstype, "fuse.rclone");
+        assert_eq!(m[1].target, PathBuf::from("/Users/me/Network/go media"));
+        assert_eq!(m[2].fstype, "autofs");
+        assert_eq!(
+            parse_pid_file("4242\nC:\\Users\\me\\Network\\nas\n"),
+            Some((4242, PathBuf::from("C:\\Users\\me\\Network\\nas")))
+        );
+        assert_eq!(parse_pid_file("x\nC:\\a"), None);
+        assert_eq!(parse_pid_file("12\n"), None);
+    }
+
+    #[cfg(target_os = "linux")] // /proc/self/mountinfo format
+    #[test]
     fn net_rclone_proc_mounts_parsing() {
         let text = "proc /proc proc rw 0 0\n\
                     OGF:/srv /home/me/Network/go\\040—\\040media fuse.rclone rw,nosuid,nodev,relatime,user_id=1000 0 0\n\
@@ -1102,6 +1313,7 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "linux")] // /proc/self/mountinfo format
     #[tokio::test]
     async fn net_rclone_mount_flow_password_never_in_argv() {
         let t = TestDir::new("rclone-mount");
