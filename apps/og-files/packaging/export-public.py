@@ -21,13 +21,20 @@ ROOT = Path(subprocess.check_output(["git", "-C", str(APP), "rev-parse", "--show
 SELF = "packaging/export-public.py"
 SUITE_DEPS = ("og-config", "og-theme", "og-wayland")
 
-# strings that must never be published (real tailnet / personal ids)
+# strings that must never be published (real tailnet / credentials / home
+# paths). Personal e-mail addresses are caught generically below instead of
+# being listed here, so this file itself holds nothing personal.
 BLOCK = [
     r"tail[0-9a-f]{6}\.ts\.net",  # real tailnet suffixes (tests use tail1234)
     r"gh[pousr]_[A-Za-z0-9]{20,}", r"sk-[A-Za-z0-9]{20,}",
     r"-----BEGIN [A-Z ]*PRIVATE KEY-----",
-    r"/home/omegagiven", r"bassheadbeads", r"omegagiven9@",
+    r"/home/omegagiven",
 ]
+EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}")
+EMAIL_OK = re.compile(
+    r"(?:^|\.|@)example\.(?:com|org|net)$|\.(?:local|lan|test|invalid|internal)$"
+    r"|@users\.noreply\.github\.com$|@anthropic\.com$|^noreply@"
+)
 
 
 def tracked():
@@ -45,6 +52,14 @@ def scan(files):
             text = (APP / f).read_text(errors="ignore")
         except IsADirectoryError:
             continue
+        binary = "\0" in text[:8192]
+        for m in ([] if binary else EMAIL.finditer(text)):
+            # user@host inside a URL (sftp://u@host) isn't an address
+            if text[max(0, m.start() - 3) : m.start()].endswith("//"):
+                continue
+            if not EMAIL_OK.search(m.group(0)):
+                line = text.count("\n", 0, m.start()) + 1
+                bad.append(f"{f}:{line}: e-mail address {m.group(0)}")
         for r in rx:
             for m in r.finditer(text):
                 if "tail1234" in m.group(0):
