@@ -3,6 +3,7 @@ mod ai_skills;
 mod app;
 mod audio;
 mod audio_meter;
+mod bluetooth;
 mod color_wheel;
 mod devices;
 mod config;

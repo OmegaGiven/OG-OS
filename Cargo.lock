@@ -5646,6 +5646,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "vt100",
+ "zbus 5.19.0",
 ]
 
 [[package]]

@@ -1140,7 +1140,9 @@ pub fn apply_unfocused_opacity_now(value: f32) {
         .spawn();
 }
 
-// ── Network / Bluetooth ─────────────────────────────────────────────────────
+// ── Network ─────────────────────────────────────────────────────────────────
+//
+// (Bluetooth moved to `crate::bluetooth`, which talks to BlueZ over D-Bus.)
 //
 // This machine runs systemd-networkd + iwd (no NetworkManager, no nmcli),
 // so wifi is driven through `iwctl` and ethernet through `ip`. `iwctl`
@@ -1277,118 +1279,6 @@ fn run_output(cmd: &str, args: &[&str]) -> String {
         .output()
         .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
         .unwrap_or_default()
-}
-
-// ── Bluetooth ────────────────────────────────────────────────────────────
-
-#[derive(Debug, Clone, Default)]
-pub struct BluetoothAdapter {
-    pub present: bool,
-    pub powered: bool,
-    pub discoverable: bool,
-    pub pairable: bool,
-    pub discovering: bool,
-}
-
-pub fn get_bluetooth_adapter() -> BluetoothAdapter {
-    let out = run_output("bluetoothctl", &["show"]);
-    if out.trim().is_empty() {
-        return BluetoothAdapter::default();
-    }
-    let field = |key: &str| -> bool {
-        out.lines()
-            .find(|l| l.trim_start().starts_with(key))
-            .is_some_and(|l| l.contains("yes"))
-    };
-    BluetoothAdapter {
-        present: true,
-        powered: field("Powered:"),
-        discoverable: field("Discoverable:"),
-        pairable: field("Pairable:"),
-        discovering: field("Discovering:"),
-    }
-}
-
-pub fn set_bluetooth_power(on: bool) {
-    let _ = Command::new("bluetoothctl").args(["power", if on { "on" } else { "off" }]).output();
-}
-
-pub fn set_bluetooth_discoverable(on: bool) {
-    let _ = Command::new("bluetoothctl").args(["discoverable", if on { "on" } else { "off" }]).output();
-}
-
-pub fn set_bluetooth_pairable(on: bool) {
-    let _ = Command::new("bluetoothctl").args(["pairable", if on { "on" } else { "off" }]).output();
-}
-
-/// Blocks for a few seconds while bluetoothctl scans — call from a
-/// background task, not directly from the UI thread.
-pub fn bluetooth_scan() {
-    let _ = Command::new("bluetoothctl").args(["--timeout", "5", "scan", "on"]).output();
-}
-
-#[derive(Debug, Clone)]
-pub struct BluetoothDevice {
-    pub mac: String,
-    pub name: String,
-    pub paired: bool,
-    pub connected: bool,
-    pub trusted: bool,
-}
-
-pub fn get_bluetooth_devices() -> Vec<BluetoothDevice> {
-    let list = run_output("bluetoothctl", &["devices"]);
-    let mut devices = Vec::new();
-    for line in list.lines() {
-        let rest = match line.trim().strip_prefix("Device ") {
-            Some(r) => r,
-            None => continue,
-        };
-        let Some((mac, name)) = rest.split_once(' ') else { continue };
-        let info = run_output("bluetoothctl", &["info", mac]);
-        let flag = |key: &str| -> bool {
-            info.lines().find(|l| l.trim_start().starts_with(key)).is_some_and(|l| l.contains("yes"))
-        };
-        devices.push(BluetoothDevice {
-            mac: mac.to_string(),
-            name: name.trim().to_string(),
-            paired: flag("Paired:"),
-            connected: flag("Connected:"),
-            trusted: flag("Trusted:"),
-        });
-    }
-    devices.sort_by(|a, b| b.connected.cmp(&a.connected).then(b.paired.cmp(&a.paired)));
-    devices
-}
-
-pub fn bluetooth_connect(mac: &str) {
-    let _ = Command::new("bluetoothctl").args(["connect", mac]).output();
-}
-
-pub fn bluetooth_disconnect(mac: &str) {
-    let _ = Command::new("bluetoothctl").args(["disconnect", mac]).output();
-}
-
-/// Pairing can require an interactive PIN/confirmation, so this runs in a
-/// spawned terminal instead of a headless subprocess — same reasoning as
-/// the sudo-password flows elsewhere in this file.
-pub fn bluetooth_pair(terminal: &str, mac: &str) {
-    let term = if terminal.is_empty() { "alacritty" } else { terminal };
-    // bluetoothctl only auto-registers its pairing agent (needed for
-    // PIN/passkey confirmation) inside a genuine interactive session — a
-    // one-shot `bluetoothctl pair MAC` invocation never registers one, so
-    // any device requiring confirmation fails with "No agent available for
-    // request type 2" / "Operation not permitted" even though nothing looks
-    // wrong in the spawned terminal. Piping commands into a single session
-    // with the agent registered first fixes it.
-    let script = format!(
-        "bluetoothctl <<'BTEOF'\nagent on\ndefault-agent\npair {mac}\ntrust {mac}\nquit\nBTEOF\necho; read -rsn1 -p 'Press any key to close...'"
-    );
-    let _ = Command::new(term).arg("-e").arg("bash").arg("-c").arg(script).spawn();
-}
-
-pub fn bluetooth_remove(mac: &str) {
-    let _ = Command::new("bluetoothctl").args(["remove", mac]).output();
 }
 
 // ── WiFi ─────────────────────────────────────────────────────────────────
