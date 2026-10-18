@@ -27,5 +27,15 @@ pub fn load_default_font() -> Option<(&'static str, Vec<u8>)> {
     // way to get the `&'static str` `Font::with_name` requires out of a
     // name resolved at runtime, and there's exactly one of these per run.
     let family: &'static str = Box::leak(family.to_string().into_boxed_str());
+    let _ = FAMILY.set(family);
     Some((family, bytes))
+}
+
+static FAMILY: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
+
+/// The loaded default font at the given weight (falls back to iced's
+/// default family if fc-match found nothing).
+pub fn weighted(weight: iced::font::Weight) -> iced::Font {
+    let base = FAMILY.get().map_or(iced::Font::DEFAULT, |f| iced::Font::with_name(f));
+    iced::Font { weight, ..base }
 }
