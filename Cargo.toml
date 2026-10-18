@@ -13,6 +13,7 @@ members = [
     "apps/og-hotkeys",
     "apps/og-notif-center",
     "apps/og-notify",
+    "apps/og-phone-audio",
     "apps/og-search",
     "apps/og-settings",
     "apps/og-voice",

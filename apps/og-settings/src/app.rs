@@ -215,6 +215,17 @@ pub enum Message {
     SpatialStageClick(u8),  // a direction marker was clicked
     SpatialGameNext,        // play a new hidden direction
 
+    // Audio tab → Phone subtab (og-phone-audio relay)
+    PhoneStateLoaded(crate::phone_audio::PhoneState),
+    PhoneEnable(bool),
+    PhoneFrameMs(f32),
+    PhoneAutoDefault(bool),
+    PhoneDirection(&'static str),
+    PhoneNewCode,
+    PhoneInstallApk,
+    /// result of a background relay action — Ok carries an optional note
+    PhoneDone(Result<Option<String>, String>),
+
     // Devices tab
     DevicesLoaded(Vec<crate::devices::UsbDevice>, Vec<crate::devices::InputDevice>, Vec<crate::devices::PciDevice>),
 
@@ -570,6 +581,11 @@ pub struct App {
 
     // Audio tab
     pub audio_subtab: AudioSubTab,
+    // Audio tab → Phone subtab
+    pub phone_cfg: crate::phone_audio::PhoneAudioConfig,
+    pub phone_state: crate::phone_audio::PhoneState,
+    pub phone_busy: bool,
+    pub phone_msg: Option<(bool, String)>,
     pub audio_snapshot: AudioSnapshot,
     /// Keyed by device name (sink or source). Live while Audio tab is open
     /// on the Output/Input subtab; dropping an entry kills its `parec`.
@@ -690,13 +706,19 @@ impl App {
                 "history" => Some(Tab::History),
                 "sysmonitor" => Some(Tab::SysMonitor),
                 "search" => Some(Tab::Search),
-                "audio" => Some(Tab::Audio),
+                "audio" | "phone-audio" => Some(Tab::Audio),
                 "devices" => Some(Tab::Devices),
                 "printing" => Some(Tab::Printing),
                 _ => None,
             })
             .unwrap_or(Tab::Power);
         let initial_tab_is_network = initial_tab == Tab::Network;
+        // `--tab phone-audio` = Audio tab, opened on the Phone subtab
+        let initial_audio_subtab = if std::env::args().any(|a| a == "phone-audio") {
+            AudioSubTab::Phone
+        } else {
+            AudioSubTab::Output
+        };
 
         (
             Self {
@@ -802,7 +824,11 @@ impl App {
                 galias_key: String::new(),
                 galias_url: String::new(),
 
-                audio_subtab: AudioSubTab::Output,
+                audio_subtab: initial_audio_subtab,
+                phone_cfg: crate::phone_audio::PhoneAudioConfig::load(),
+                phone_state: Default::default(),
+                phone_busy: false,
+                phone_msg: None,
                 audio_snapshot: AudioSnapshot::default(),
                 audio_meters: HashMap::new(),
                 mic_monitor: None,
@@ -1420,6 +1446,13 @@ impl App {
                 }
                 self.audio_subtab = t;
                 self.sync_audio_meters();
+                if t == AudioSubTab::Phone {
+                    self.phone_cfg = crate::phone_audio::PhoneAudioConfig::load();
+                    return Task::perform(
+                        async { tokio::task::spawn_blocking(crate::phone_audio::state).await.unwrap_or_default() },
+                        Message::PhoneStateLoaded,
+                    );
+                }
             }
             Message::AudioMeterTick => {}
             Message::AudioSnapshotLoaded(s) => {
@@ -1437,6 +1470,50 @@ impl App {
                     // nothing chosen yet, or the chosen device vanished
                     self.spatial_out = Some(crate::surround::configured_hw().unwrap_or_else(crate::surround::hardware_default));
                 }
+            }
+
+            Message::PhoneStateLoaded(st) => {
+                self.phone_state = st;
+            }
+            Message::PhoneEnable(on) => {
+                return self.phone_action(move || crate::phone_audio::set_enabled(on).map(|_| None));
+            }
+            Message::PhoneFrameMs(ms) => {
+                self.phone_cfg.frame_ms = ms;
+                let cfg = self.phone_cfg.clone();
+                return self.phone_action(move || crate::phone_audio::apply(&cfg).map(|_| None));
+            }
+            Message::PhoneAutoDefault(v) => {
+                self.phone_cfg.auto_default = v;
+                let cfg = self.phone_cfg.clone();
+                return self.phone_action(move || crate::phone_audio::apply(&cfg).map(|_| None));
+            }
+            Message::PhoneDirection(d) => {
+                self.phone_cfg.direction = d.to_string();
+                let cfg = self.phone_cfg.clone();
+                return self.phone_action(move || crate::phone_audio::apply(&cfg).map(|_| None));
+            }
+            Message::PhoneNewCode => {
+                self.phone_cfg.pair_code = crate::phone_audio::new_pair_code();
+                let cfg = self.phone_cfg.clone();
+                return self.phone_action(move || {
+                    crate::phone_audio::apply(&cfg).map(|_| Some("New pair code saved — enter it in the phone app.".to_string()))
+                });
+            }
+            Message::PhoneInstallApk => {
+                return self.phone_action(|| crate::phone_audio::adb_install().map(Some));
+            }
+            Message::PhoneDone(res) => {
+                self.phone_busy = false;
+                self.phone_msg = match res {
+                    Ok(Some(note)) => Some((false, note)),
+                    Ok(None) => None,
+                    Err(e) => Some((true, e)),
+                };
+                return Task::perform(
+                    async { tokio::task::spawn_blocking(crate::phone_audio::state).await.unwrap_or_default() },
+                    Message::PhoneStateLoaded,
+                );
             }
 
             Message::SpatialRoute(m) => {
@@ -2439,6 +2516,25 @@ impl App {
         }
     }
 
+    /// Run a Phone-subtab action (systemctl / adb) off the UI thread; result
+    /// comes back as `Message::PhoneDone`.
+    fn phone_action<F>(&mut self, f: F) -> Task<Message>
+    where
+        F: FnOnce() -> Result<Option<String>, String> + Send + 'static,
+    {
+        if self.phone_busy {
+            return Task::none();
+        }
+        self.phone_busy = true;
+        self.phone_msg = None;
+        Task::perform(
+            async move {
+                tokio::task::spawn_blocking(f).await.unwrap_or_else(|_| Err("background task failed".to_string()))
+            },
+            Message::PhoneDone,
+        )
+    }
+
     /// Drive the `spatial` helper off the UI thread (it writes the drop-in,
     /// bounces the filter-chain and toggles the autoroute service). Result
     /// comes back as `Message::SpatialRouted`.
@@ -2534,6 +2630,15 @@ impl App {
             Some(
                 iced::time::every(std::time::Duration::from_secs(2))
                     .map(|_| Message::SpatialStreamsLoaded(crate::surround::active_streams())),
+            )
+        } else {
+            None
+        };
+
+        let phone_poll = if self.current_tab == Tab::Audio && self.audio_subtab == AudioSubTab::Phone {
+            Some(
+                iced::time::every(std::time::Duration::from_secs(1))
+                    .map(|_| Message::PhoneStateLoaded(crate::phone_audio::state())),
             )
         } else {
             None
@@ -2644,6 +2749,7 @@ impl App {
         if let Some(a) = audio_poll { subs.push(a); }
         if let Some(a) = audio_meter_poll { subs.push(a); }
         if let Some(a) = spatial_poll { subs.push(a); }
+        if let Some(a) = phone_poll { subs.push(a); }
         if let Some(d) = bar_drag { subs.push(d); }
         Subscription::batch(subs)
     }
@@ -3191,6 +3297,12 @@ impl App {
                         .as_ref()
                         .and_then(|n| self.spatial_outs.iter().find(|o| &o.name == n))
                         .cloned(),
+                },
+                tabs::audio::PhoneUi {
+                    state: &self.phone_state,
+                    cfg: &self.phone_cfg,
+                    busy: self.phone_busy,
+                    msg: self.phone_msg.as_ref(),
                 },
             ),
             Tab::Printing => tabs::printing::view(colors, self.cups_running, &self.printers, &self.detected_printers),

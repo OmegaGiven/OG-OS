@@ -95,16 +95,18 @@ pub enum AudioSubTab {
     Recording,
     Configuration,
     Spatial,
+    Phone,
 }
 
 impl AudioSubTab {
-    pub const ALL: [AudioSubTab; 6] = [
+    pub const ALL: [AudioSubTab; 7] = [
         AudioSubTab::Output,
         AudioSubTab::Input,
         AudioSubTab::Playback,
         AudioSubTab::Recording,
         AudioSubTab::Configuration,
         AudioSubTab::Spatial,
+        AudioSubTab::Phone,
     ];
 
     pub fn label(&self) -> &'static str {
@@ -115,6 +117,7 @@ impl AudioSubTab {
             AudioSubTab::Recording => "Recording",
             AudioSubTab::Configuration => "Configuration",
             AudioSubTab::Spatial => "Spatial",
+            AudioSubTab::Phone => "Phone",
         }
     }
 }
@@ -310,6 +313,7 @@ pub fn view<'a>(
     meters: &'a HashMap<String, Meter>,
     mic_monitor: Option<&'a (String, u32)>,
     spatial: SpatialUi<'a>,
+    phone: PhoneUi<'a>,
 ) -> Element<'a> {
     let tab_row: Vec<Element> = AudioSubTab::ALL
         .iter()
@@ -381,6 +385,7 @@ pub fn view<'a>(
             }
         }
         AudioSubTab::Spatial => spatial_view(colors, &spatial),
+        AudioSubTab::Phone => phone_view(colors, &phone),
     };
 
     column![
@@ -656,4 +661,219 @@ fn spatial_view<'a>(colors: AppColors, s: &SpatialUi<'a>) -> Element<'a> {
     });
 
     column![mode_card, streams_card, test_card, stage_card].spacing(14).into()
+}
+
+// ══ Phone subtab ══════════════════════════════════════════════════════════
+//
+// Front end for the `og-phone-audio` relay: PC audio → phone over Wi-Fi →
+// the phone's Bluetooth headphones, mixed with the phone's own sound.
+// Backed by `crate::phone_audio`; live like Spatial, not staged.
+
+pub struct PhoneUi<'a> {
+    pub state: &'a crate::phone_audio::PhoneState,
+    pub cfg: &'a crate::phone_audio::PhoneAudioConfig,
+    pub busy: bool,
+    /// (is_error, text) from the last action
+    pub msg: Option<&'a (bool, String)>,
+}
+
+fn phone_view<'a>(colors: AppColors, p: &PhoneUi<'a>) -> Element<'a> {
+    let dim = move |t: &str| text(t.to_string()).size(12).style(move |_| text::Style { color: Some(colors.dim_text) });
+    let head = move |t: &str| text(t.to_string()).size(13).style(move |_| text::Style { color: Some(colors.text) });
+    let card = move |content: iced::widget::Column<'a, Message>| {
+        container(content.spacing(10).padding(14)).width(Length::Fill).style(move |_| container::Style {
+            background: Some(Background::Color(colors.sec_bg)),
+            border: Border { color: colors.border, width: 1.0, radius: colors.radius.into() },
+            ..Default::default()
+        })
+    };
+    let st = p.state;
+    let on = st.running;
+
+    // ── relay on/off ────────────────────────────────────────────────
+    let service_note = if !st.installed {
+        "og-phone-audio isn't installed yet — run apps/og-phone-audio/scripts/install.sh in OG-toolkit."
+    } else if on {
+        "Running. Starts with your session and waits for the phone to show up on the network."
+    } else {
+        "Off. Turning it on also starts it at every login."
+    };
+    let toggle_row = row![
+        head("Relay PC audio to my phone"),
+        iced::widget::horizontal_space(),
+        iced::widget::toggler(on).size(18).on_toggle_maybe((st.installed && !p.busy).then_some(Message::PhoneEnable)),
+    ]
+    .align_y(iced::Alignment::Center);
+
+    let msg_banner: Element<'a> = match p.msg {
+        Some((is_err, m)) => {
+            let bg = if *is_err { MUTE_RED } else { colors.surface };
+            let fg = if *is_err { Color::WHITE } else { colors.text };
+            container(text(m.clone()).size(12).style(move |_| text::Style { color: Some(fg) }))
+                .padding(10)
+                .width(Length::Fill)
+                .style(move |_| container::Style {
+                    background: Some(Background::Color(bg)),
+                    border: Border { radius: colors.radius.into(), ..Default::default() },
+                    ..Default::default()
+                })
+                .into()
+        }
+        None => column![].into(),
+    };
+
+    let relay_card = card(column![
+        toggle_row,
+        dim(service_note),
+        dim("Your headphones stay paired to the phone. When the phone joins the same Wi-Fi as this PC it connects on its own, and Android mixes the PC's sound with the phone's (calls, music, notifications)."),
+        msg_banner,
+    ]);
+
+    // ── live status ─────────────────────────────────────────────────
+    let s = &st.status;
+    let dot = |c: Color| text("\u{f111}").size(10).font(nerd_font()).style(move |_| text::Style { color: Some(c) });
+    let green = Color { r: 0.2, g: 0.7, b: 0.35, a: 1.0 };
+    let amber = Color { r: 0.85, g: 0.65, b: 0.1, a: 1.0 };
+    let status_body: Element<'a> = if !on {
+        row![dot(colors.dim_text), dim("Relay is off.")].spacing(8).align_y(iced::Alignment::Center).into()
+    } else if !s.connected {
+        let mut col = column![row![dot(amber), head("Waiting for the phone…")].spacing(8).align_y(iced::Alignment::Center)];
+        col = col.push(dim("Open OG Phone Audio on the phone, enter the pair code below, and make sure it's on the same Wi-Fi."));
+        if !s.rejected.is_empty() {
+            col = col.push(
+                text(format!("{} tried to connect with the wrong pair code.", s.rejected))
+                    .size(12)
+                    .style(move |_| text::Style { color: Some(amber) }),
+            );
+        }
+        col.spacing(8).into()
+    } else {
+        let mins = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs().saturating_sub(s.since) / 60)
+            .unwrap_or(0);
+        let stat = move |k: &'static str, v: String| {
+            row![
+                text(k).size(12).width(Length::Fixed(170.0)).style(move |_| text::Style { color: Some(colors.dim_text) }),
+                text(v).size(12).style(move |_| text::Style { color: Some(colors.text) }),
+            ]
+        };
+        // PC capture ≈ one packet, Wi-Fi ≈ a few ms, then the phone's own
+        // jitter buffer + output path (which includes the Bluetooth hop).
+        let total = s.frame_ms * 2.0 + 3.0 + s.phone_buf_ms + s.phone_out_ms;
+        let headphones = if s.phone_headset { s.phone_outputs.join(", ") } else { "none".into() };
+        let bt = match (s.bt_paired, s.bt_connected) {
+            (false, _) => "not paired with this PC".to_string(),
+            (true, true) => "connected (phone audio plays here)".to_string(),
+            (true, false) => "paired, not connected".to_string(),
+        };
+        let (headline, extra): (String, Option<&str>) = match s.route.as_str() {
+            "bluetooth" => (format!("{}'s audio → this PC (Bluetooth)", s.phone_name), None),
+            "off" => (
+                format!("Linked to {} — idle", s.phone_name),
+                Some("No headphones on the phone, and it isn't paired with this PC over Bluetooth, so there's nothing to route. Pair it (Network → Bluetooth) to hear its calls and notifications here."),
+            ),
+            _ => (format!("This PC's audio → {} ({})", s.phone_name, s.phone_addr), None),
+        };
+        let relay_stats: Element<'a> = if s.route == "relay" {
+            column![
+                stat("Packet size", format!("{} ms", s.frame_ms)),
+                stat("Phone jitter buffer", format!("{:.1} ms", s.phone_buf_ms)),
+                stat("Phone output + Bluetooth", if s.phone_out_ms > 0.0 { format!("{:.0} ms", s.phone_out_ms) } else { "idle (nothing playing)".into() }),
+                stat("Estimated total delay", format!("≈ {:.0} ms", total)),
+                stat("Lost / dropped / underruns", format!("{} / {} / {}", s.lost, s.late, s.underruns)),
+            ]
+            .spacing(6)
+            .into()
+        } else {
+            column![].into()
+        };
+        column![
+            row![dot(green), head(&headline)].spacing(8).align_y(iced::Alignment::Center),
+            dim(extra.unwrap_or("")),
+            stat("Connected for", format!("{mins} min")),
+            stat("Phone's headphones", headphones),
+            stat("Phone ↔ PC Bluetooth", bt),
+            relay_stats,
+        ]
+        .spacing(6)
+        .into()
+    };
+    let status_card = card(column![head("Status"), status_body]);
+
+    // ── settings ────────────────────────────────────────────────────
+    let code_row = row![
+        head("Pair code"),
+        text(p.cfg.pair_code.clone())
+            .size(22)
+            .font(iced::Font::MONOSPACE)
+            .style(move |_| text::Style { color: Some(colors.accent) }),
+        iced::widget::horizontal_space(),
+        small_button(colors, "New code".into(), Message::PhoneNewCode),
+    ]
+    .spacing(14)
+    .align_y(iced::Alignment::Center);
+
+    let frame_row = row![
+        head("Packet size"),
+        seg_button(colors, "2.5 ms", p.cfg.frame_ms == 2.5, Message::PhoneFrameMs(2.5)),
+        seg_button(colors, "5 ms", p.cfg.frame_ms == 5.0, Message::PhoneFrameMs(5.0)),
+        seg_button(colors, "10 ms", p.cfg.frame_ms == 10.0, Message::PhoneFrameMs(10.0)),
+    ]
+    .spacing(8)
+    .align_y(iced::Alignment::Center);
+
+    let default_row = row![
+        head("Switch PC output to the phone while it's connected"),
+        iced::widget::horizontal_space(),
+        iced::widget::toggler(p.cfg.auto_default).size(18).on_toggle(Message::PhoneAutoDefault),
+    ]
+    .align_y(iced::Alignment::Center);
+
+    let dir = p.cfg.direction.as_str();
+    let direction_row = row![
+        head("Direction"),
+        seg_button(colors, "Auto", dir == "auto", Message::PhoneDirection("auto")),
+        seg_button(colors, "PC \u{2192} phone", dir == "to_phone", Message::PhoneDirection("to_phone")),
+        seg_button(colors, "Phone \u{2192} PC", dir == "to_pc", Message::PhoneDirection("to_pc")),
+    ]
+    .spacing(8)
+    .align_y(iced::Alignment::Center);
+    let direction_note = dim(match dir {
+        "to_phone" => "Always send this PC's audio to the phone over Wi-Fi.",
+        "to_pc" => "Always connect the phone to this PC over Bluetooth, so its calls, notifications and media play here.",
+        _ => "Follows your headphones: connected to the phone → PC audio goes to the phone. Not on the phone (e.g. on this PC) → the phone's calls, notifications and media play here over Bluetooth.",
+    });
+
+    let settings_card = card(column![
+        head("Settings"),
+        direction_row,
+        direction_note,
+        code_row,
+        dim("Type this into the phone app once. Only a phone with this code gets your audio."),
+        frame_row,
+        dim("Smaller packets = less delay but less tolerant of Wi-Fi hiccups. If you hear crackles, go up a step here or raise the jitter buffer in the phone app."),
+        default_row,
+        dim("Off = a \"Phone (OG relay)\" output shows up and you pick which apps go to it yourself (Playback subtab)."),
+    ]);
+
+    // ── phone app ───────────────────────────────────────────────────
+    let apk_note = match &st.apk {
+        Some(path) => format!("APK: {}", path.display()),
+        None => "APK not built yet — install.sh builds it (needs the Android SDK).".into(),
+    };
+    let install_btn: Element<'a> = if st.apk.is_some() && !p.busy {
+        small_button(colors, "Install on phone over USB (adb)".into(), Message::PhoneInstallApk)
+    } else {
+        column![].into()
+    };
+    let app_card = card(column![
+        head("Phone app"),
+        dim("Android only. Plug the phone in with USB debugging on, then install. You can also copy the APK over and open it."),
+        install_btn,
+        dim(&apk_note),
+        dim("Delay is mostly the Bluetooth link: about 150–250 ms with normal earbuds (SBC/AAC), 30–60 ms with aptX Low Latency or LE Audio."),
+    ]);
+
+    column![relay_card, status_card, settings_card, app_card].spacing(12).into()
 }

@@ -8,6 +8,7 @@ mod devices;
 mod config;
 mod cursor_theme;
 mod galias;
+mod phone_audio;
 mod printing;
 mod pty;
 mod soundstage;

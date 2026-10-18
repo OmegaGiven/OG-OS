@@ -311,14 +311,21 @@ window#window {{
 /// mako so it takes effect immediately. Only touches those specific keys —
 /// anything else already in the file (`max-history`, `default-timeout`,
 /// urgency overrides, ...) is left alone.
+///
+/// macOS-style cards: slightly translucent background and a faint hairline
+/// border; the accent border is kept for `[urgency=critical]` only (that
+/// section's own `border-color` line comes after the global one, so the
+/// first-match upsert never touches it).
 fn write_mako_theme(config: &Config) {
     let path = format!("{}/.config/mako/config", home());
-    upsert_line_in_file(&path, "background-color", &format!("background-color={}", config.sec_bg));
+    let bg = config.sec_bg.trim_start_matches('#');
+    let bg = if bg.len() == 6 { format!("#{bg}e8") } else { format!("#{bg}") };
+    upsert_line_in_file(&path, "background-color", &format!("background-color={bg}"));
     upsert_line_in_file(&path, "text-color", &format!("text-color={}", config.bar_text));
-    upsert_line_in_file(&path, "border-color", &format!("border-color={}", config.accent));
-    upsert_line_in_file(&path, "border-size", "border-size=2");
-    upsert_line_in_file(&path, "border-radius", &format!("border-radius={}", config.corner_radius.max(0.0) as i32));
-    upsert_line_in_file(&path, "progress-color", &format!("progress-color=source {}", config.accent));
+    upsert_line_in_file(&path, "border-color", "border-color=#ffffff22");
+    upsert_line_in_file(&path, "border-size", "border-size=1");
+    upsert_line_in_file(&path, "border-radius", &format!("border-radius={}", (config.corner_radius.max(0.0) as i32 + 4)));
+    upsert_line_in_file(&path, "progress-color", &format!("progress-color=over {}55", config.accent));
     let _ = Command::new("makoctl").arg("reload").output();
 }
 
