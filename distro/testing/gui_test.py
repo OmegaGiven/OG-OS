@@ -138,17 +138,26 @@ class GuestSession:
         # `sudo` (which hangs forever waiting on a tty that isn't there
         # over a non-interactive ssh command).
         sudo = f"echo {self.password} | sudo -S -p ''"
-        self.ssh(f"{sudo} pacman -Sy --noconfirm ydotool", timeout=60)
+        # pacman needs the keyring, which pacman-init.service builds in
+        # the background at boot (every boot on the live ISO, first boot
+        # only on an installed system) -- SSH comes up before it's done,
+        # so wait for boot to settle first or the install fails on
+        # signature checks.
+        self.ssh("systemctl is-system-running --wait >/dev/null 2>&1; true", timeout=180)
+        self.ssh(f"{sudo} pacman -Sy --noconfirm ydotool", timeout=120)
         self.ssh(f"{sudo} usermod -aG input {self.user}")
         self.ssh(
-            f"{sudo} setsid ydotoold < /dev/null > /tmp/ydotoold.log 2>&1 & disown; "
+            # The </dev/null must apply to ydotoold, not to sudo: on sudo
+            # it swallowed the piped password, which only went unnoticed
+            # on the live ISO (NOPASSWD) and broke every installed-system run.
+            f"{sudo} sh -c 'setsid ydotoold </dev/null >/run/ydotoold.log 2>&1 &'; "
             f"sleep 1; {sudo} chmod 666 {self.ydotool_socket}"
         )
 
     def wait_for_sway_socket(self, timeout: int = 60) -> str:
         deadline = time.time() + timeout
         while time.time() < deadline:
-            r = self.ssh("ls /run/user/1000/sway-ipc.* 2>&1")
+            r = self.ssh("ls /run/user/$(id -u)/sway-ipc.* 2>&1")
             if r.returncode == 0 and "sway-ipc" in r.stdout:
                 self._sway_socket = r.stdout.strip().split("\n")[0]
                 return self._sway_socket

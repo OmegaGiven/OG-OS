@@ -1,0 +1,185 @@
+#!/usr/bin/env bash
+# OG-OS Calamares target setup. Runs INSIDE the target chroot (Calamares
+# shellprocess, dontChroot: false), never on the live system itself.
+#
+#   target-setup early   right after unpackfs, before initcpiocfg/initcpio
+#   target-setup final   after bootloader, just before umount
+#
+# Why a script instead of inline shellprocess commands: every step here
+# is a plain file operation (no pacman transaction, no network, no second
+# initramfs build), and keeping them in one shellcheck-able file makes the
+# "what does an installed system NOT inherit from the live ISO" list
+# reviewable in one place. See distro/testing/README.md ("Install speed")
+# for the timing rationale behind each step.
+set -euo pipefail
+
+log() { printf 'ogos target-setup: %s\n' "$*"; }
+
+# ---------------------------------------------------------------------------
+early() {
+    # 1. mkinitcpio: drop the archiso-only drop-in and preset (they build
+    #    the LIVE initramfs and point at the archiso build environment) and
+    #    install the stock preset for every kernel in /usr/lib/modules,
+    #    exactly what mkinitcpio's own pacman hook would create. Upstream's
+    #    template only has PRESETS=('default'): one autodetected initramfs,
+    #    no 200+ MB "fallback" image. The fallback used to cost ~10 s per
+    #    install and ~210 MB of a 300 MiB ESP (which left no room for the
+    #    next kernel update).
+    rm -f /etc/mkinitcpio.conf.d/archiso.conf
+
+    local pkgbase_path pkgbase kdir found=0
+    for pkgbase_path in /usr/lib/modules/*/pkgbase; do
+        [[ -r "$pkgbase_path" ]] || continue
+        read -r pkgbase < "$pkgbase_path" || [[ -n "$pkgbase" ]]
+        kdir="${pkgbase_path%/pkgbase}"
+        sed "s|%PKGBASE%|${pkgbase}|g" /usr/share/mkinitcpio/hook.preset \
+            > "/etc/mkinitcpio.d/${pkgbase}.preset"
+        # 2. The kernel image itself. archiso keeps the live kernel outside
+        #    the squashfs, so /boot is empty after unpackfs; copy it from
+        #    the package's own file (same thing the 'linux' pacman hook
+        #    does), instead of rsync'ing the ISO's boot dir, which also
+        #    dragged the 230+ MB live archiso initramfs onto the ESP only
+        #    for mkinitcpio to overwrite it.
+        install -Dm644 "$kdir/vmlinuz" "/boot/vmlinuz-${pkgbase}"
+        found=1
+    done
+    if (( ! found )); then
+        log "no kernel found under /usr/lib/modules" >&2
+        exit 1
+    fi
+
+    # 3. Calamares' bootloader module calls `kernel-install add`, whose
+    #    mkinitcpio plugin would build a SECOND initramfs (into
+    #    /boot/<machine-id>/<kver>/) and point the boot entry at it --
+    #    a copy Arch's pacman hooks never update, so the first kernel
+    #    upgrade left the entry booting a kernel whose modules were gone.
+    #    layout=other turns kernel-install into a no-op on Arch; 'final'
+    #    below writes a standard Arch entry (vmlinuz-linux +
+    #    initramfs-linux.img) that the stock pacman hooks keep current.
+    #    Only when the ESP is mounted at /boot (the automatic-partitioning
+    #    layout, partition.conf efi.mountPoint): with a manually chosen
+    #    /efi or /boot/efi ESP, systemd-boot can't read the kernel from the
+    #    root filesystem, and kernel-install's copy onto the ESP is what
+    #    makes that layout boot at all -- leave it alone there.
+    if [[ "$(findmnt -n -o FSTYPE --target /boot 2>/dev/null)" == vfat ]]; then
+        mkdir -p /etc/kernel
+        printf 'layout=other\n' > /etc/kernel/install.conf
+    fi
+}
+
+# ---------------------------------------------------------------------------
+final() {
+    # 1. Live-medium-only state. Plain deletes of a known file list -- no
+    #    package removal transaction (removing e.g. mkinitcpio-archiso
+    #    would even re-trigger mkinitcpio through its pacman hook).
+    local f
+    for f in \
+        /etc/sudoers.d/zz-liveuser \
+        /etc/systemd/system/getty@tty1.service.d/autologin.conf \
+        /etc/systemd/journald.conf.d/volatile-storage.conf \
+        /etc/systemd/logind.conf.d/do-not-suspend.conf \
+        /etc/ssh/sshd_config.d/10-archiso.conf \
+        /usr/lib/sysusers.d/liveuser.conf \
+        /usr/lib/tmpfiles.d/liveuser.conf \
+        /etc/systemd/system/choose-mirror.service \
+        /etc/systemd/system/multi-user.target.wants/choose-mirror.service \
+        /etc/systemd/system/livecd-talk.service \
+        /etc/systemd/system/multi-user.target.wants/livecd-talk.service \
+        /etc/systemd/system/livecd-alsa-unmuter.service \
+        /etc/systemd/system/sound.target.wants/livecd-alsa-unmuter.service \
+        /etc/systemd/system/etc-pacman.d-gnupg.mount \
+        /usr/local/bin/choose-mirror \
+        /usr/local/bin/Installation_guide \
+        /usr/local/bin/livecd-sound \
+        /root/.automated_script.sh \
+        /root/.zlogin \
+        /root/install-ogos.sh \
+        /etc/motd
+    do
+        rm -f -- "$f"
+    done
+    rm -rf /root/ogos-repo /usr/local/share/livecd-sound
+    rmdir --ignore-fail-on-non-empty /etc/systemd/system/getty@tty1.service.d 2>/dev/null || true
+    # removeuser's `userdel -r` leaves the static liveuser group behind.
+    if getent group liveuser >/dev/null; then
+        groupdel liveuser || true
+    fi
+
+    # 2. pacman keyring. On the live ISO /etc/pacman.d/gnupg is a tmpfs
+    #    that pacman-init.service fills at every boot; copied as-is, an
+    #    installed system had NO keyring on disk and regenerated a fresh
+    #    one (new local master key) on every single boot. A keyring can't
+    #    be pre-built into the image either: every install would share the
+    #    same local signing key. So: generate it once, on the installed
+    #    system's first boot, in the background (not ordered before the
+    #    greeter), persisted on disk; skipped on every later boot.
+    cat > /etc/systemd/system/pacman-init.service <<'UNIT'
+[Unit]
+Description=Initialize the pacman keyring (first boot only)
+ConditionPathExists=!/etc/pacman.d/gnupg/trustdb.gpg
+Before=archlinux-keyring-wkd-sync.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/pacman-key --init
+ExecStart=/usr/bin/pacman-key --populate
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+    mkdir -p /etc/systemd/system/multi-user.target.wants
+    ln -sf ../pacman-init.service /etc/systemd/system/multi-user.target.wants/pacman-init.service
+
+    # 3. Update channel for the OG suite: the hosted [ogos] repo (same
+    #    entry install-ogos.sh writes). Without it an installed system
+    #    never sees new og-* versions.
+    if ! grep -q '^\[ogos\]' /etc/pacman.conf; then
+        cat >> /etc/pacman.conf <<'PACMAN'
+
+[ogos]
+SigLevel = Optional TrustAll
+Server = https://omegagiven.github.io/OG-os-repo/x86_64
+PACMAN
+    fi
+
+    # 4. systemd-boot entry (UEFI only; on BIOS Calamares installed GRUB,
+    #    whose grub-mkconfig already points at /boot/vmlinuz-linux).
+    #    Calamares wrote the right kernel command line (root UUID, LUKS,
+    #    resume) to /etc/kernel/cmdline; reuse it for a standard Arch
+    #    entry and drop kernel-install's empty machine-id directory.
+    if [[ -f /boot/loader/loader.conf && -s /etc/kernel/cmdline ]] \
+        && grep -qx 'layout=other' /etc/kernel/install.conf 2>/dev/null; then
+        local cmdline mid pkgbase_path pkgbase first=""
+        cmdline="$(tr '\n' ' ' < /etc/kernel/cmdline | sed 's/ *$//')"
+        mid="$(cat /etc/machine-id 2>/dev/null || true)"
+        if [[ -n "$mid" && -d "/boot/$mid" ]]; then
+            find "/boot/$mid" -depth -type d -empty -delete 2>/dev/null || true
+        fi
+        rm -f /boot/loader/entries/"${mid:-none}"-*.conf
+        mkdir -p /boot/loader/entries
+        for pkgbase_path in /usr/lib/modules/*/pkgbase; do
+            [[ -r "$pkgbase_path" ]] || continue
+            read -r pkgbase < "$pkgbase_path" || [[ -n "$pkgbase" ]]
+            cat > "/boot/loader/entries/ogos-${pkgbase}.conf" <<ENTRY
+title   OG-OS (${pkgbase})
+linux   /vmlinuz-${pkgbase}
+initrd  /initramfs-${pkgbase}.img
+options ${cmdline}
+ENTRY
+            [[ -n "$first" ]] || first="ogos-${pkgbase}.conf"
+        done
+        if [[ -n "$first" ]]; then
+            sed -i "s|^default .*|default ${first}|" /boot/loader/loader.conf
+            grep -q '^default ' /boot/loader/loader.conf \
+                || printf 'default %s\n' "$first" >> /boot/loader/loader.conf
+        fi
+    fi
+}
+
+case "${1:-}" in
+    early) early ;;
+    final) final; rm -rf /usr/local/lib/ogos-installer ;;
+    *) echo "usage: $0 early|final" >&2; exit 2 ;;
+esac
+log "$1 done"

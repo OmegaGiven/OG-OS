@@ -173,7 +173,9 @@ og-os/
    **Re-validated after the fix, full loop confirmed working**: rebuilt the ISO, re-ran the same unattended install against a fresh scratch disk, rebooted standalone. Logged in as `testuser` through lightdm's graphical greeter, confirmed via `pgrep -a og-bar` (PID present) and visually via `og-notif-center`/`og-clip` both auto-launching and tiling per the seed config's `exec` lines. Partition → pacstrap → user creation → systemd-boot → graphical login → seeded sway session all work end to end on a completely fresh install.
 
    Also confirmed live: og-bar/og-settings/sudo all present at `/usr/bin` on the installed system, matching the packages actually requested.
-5. **(Optional, later)** Calamares module if unattended installs for other people become the actual goal.
+5. **Calamares installer** — done; it is now the primary install path (auto-launched in the live session; `install-ogos.sh` stays as a manual pacstrap fallback). Install = `unpackfs` copy of the live squashfs + file edits only (`airootfs/usr/local/lib/ogos-installer/target-setup`).
+
+   **Install speed, 2026-10-19** (details and per-step table: `testing/README.md`, "Install speed"): measured 107 s → 39–40 s click-to-finish in a KVM VM. unpackfs 75 → 28 s (squashfs xz → zstd-19: single-stream decode ~5x faster for +4.6 % image size), initcpio 18 → 2 s (default preset only, no 209 MB fallback image), bootloader 5 → 2 s (kernel-install no longer builds a second initramfs). Same audit fixed: boot entry that broke on the first kernel update (pointed at kernel-install's private kernel copy), ESP 268/300 MiB full, live-only state on installs (root autologin on tty1, sshd `PermitRootLogin yes`, liveuser recreated by sysusers.d, volatile journal, no-suspend), no on-disk pacman keyring, no `[ogos]` repo in the installed pacman.conf, bluetooth not enabled, first user uid 1001.
 
 ## 6. Open decisions — resolved 2026-07-15
 

@@ -162,6 +162,16 @@ def main():
         "sway config present": "test -f ~/.config/sway/config && echo YES || echo NO",
         "og-bar process running": "pgrep -x og-bar >/dev/null && echo YES || echo NO",
         "mako process running": "pgrep -x mako >/dev/null && echo YES || echo NO",
+        # Installer hygiene (distro/airootfs/usr/local/lib/ogos-installer/target-setup):
+        # nothing live-only may survive onto an installed system.
+        "liveuser removed": "getent passwd liveuser >/dev/null && echo NO || echo YES",
+        "sudo requires a password": "sudo -n true 2>/dev/null && echo NO || echo YES",
+        "no root autologin on tty1": "test -e /etc/systemd/system/getty@tty1.service.d/autologin.conf && echo NO || echo YES",
+        "pacman keyring on disk": "test -s /etc/pacman.d/gnupg/pubring.gpg && echo YES || echo NO",
+        "[ogos] repo configured": "grep -q '^\\[ogos\\]' /etc/pacman.conf && echo YES || echo NO",
+        "bluetooth enabled": "systemctl is-enabled --quiet bluetooth && echo YES || echo NO",
+        # (/boot is the ESP, mounted umask=0077 -- not readable as the user)
+        "single initramfs preset, no fallback": "grep -qx \"PRESETS=('default')\" /etc/mkinitcpio.d/linux.preset && echo YES || echo NO",
     }
     results = {}
     for label, cmd in checks.items():

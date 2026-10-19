@@ -16,6 +16,8 @@ not a guess) -> Users (create a real account, confirmed filled and
 validated) -> Summary -> Install (confirmed: real install job runs) ->
 Finish, using gui_test.py's ydotool-over-SSH input, calibrate_pointer()
 for click precision, and swaymsg/screenshot ground truth throughout.
+Completion is detected from Calamares' own session log, which also
+yields a per-step timing table (calamares_timing.py) printed at the end.
 
 Usage:
     python3 test_calamares_install.py --ssh-port 2223 --monitor-port 4458 \\
@@ -25,6 +27,7 @@ import argparse
 import os
 import time
 
+from calamares_timing import parse_log
 from gui_test import GuestSession
 
 
@@ -160,27 +163,44 @@ def run_install(ssh_port: int, monitor_port: int, live_password: str = "ogos",
     time.sleep(3)
     shot("11-installing")
 
-    print(f"== Waiting for install job to finish (checking every 20s, up to "
-          f"{install_timeout}s) ==")
-    # No reliable non-OCR signal distinguishes "still copying files" from
-    # "done, sitting on Finish" from "failed, sitting on an error dialog"
-    # from screenshots alone (confirmed in testing: both success and
-    # failure end up on the same Finish sidebar entry, and Calamares'
-    # log doesn't print one unambiguous "done" marker either). Poll
-    # periodically and take a screenshot each time; stop as soon as the
-    # sidebar shows we're on the Finish page (window content-based, via
-    # a screenshot pixel check isn't reliable without OCR -- this just
-    # checks wall-clock time and leaves the actual "did it succeed"
-    # judgment to whoever reviews the screenshots, which is the honest
-    # thing to do given the ambiguity above).
+    print(f"== Waiting for install job to finish (polling Calamares' session "
+          f"log every 10s, up to {install_timeout}s) ==")
+    # Calamares runs as root (sudo from the live sway config), so its log
+    # is /root/.cache/calamares/session.log. Every job start is logged
+    # with a timestamp, and the finished module logs "completion:
+    # succeeded|failed" when the Finished page is reached -- a reliable
+    # done/failed signal (screenshots alone can't tell an error dialog
+    # from the Finished page without OCR), and the per-step timing table
+    # falls out of the same log (calamares_timing.py).
+    sudo = f"echo {live_password} | sudo -S -p ''"
+    log_cmd = f"{sudo} cat /root/.cache/calamares/session.log"
     deadline = time.time() + install_timeout
     shot_n = 12
+    timing = None
+    last_started = -1
     while time.time() < deadline:
-        time.sleep(20)
-        shot(f"{shot_n:02d}-install-progress")
-        shot_n += 1
-    print(f"== Done polling. Review screenshots in {screenshot_dir} "
-          f"to confirm the install actually succeeded. ==")
+        time.sleep(10)
+        r = g.ssh(log_cmd, timeout=30)
+        timing = parse_log(r.stdout)
+        if timing.started != last_started:
+            last_started = timing.started
+            name = timing.jobs[-1][0] if timing.jobs else "-"
+            print(f"  job {timing.started}/{timing.total_jobs}: {name}")
+        if timing.finished:
+            break
+    shot(f"{shot_n:02d}-install-finished")
+    log_copy = os.path.join(screenshot_dir, "calamares-session.log")
+    r = g.ssh(log_cmd, timeout=30)
+    with open(log_copy, "w", encoding="utf-8") as f:
+        f.write(r.stdout)
+    timing = parse_log(r.stdout)
+    print(f"== Install timing (Calamares job log, full log saved to {log_copy}) ==")
+    print(timing.table())
+    if not timing.finished:
+        raise TimeoutError(f"install did not finish within {install_timeout}s")
+    if not timing.succeeded:
+        raise RuntimeError("Calamares reported the installation FAILED -- see "
+                           f"{log_copy} and the last screenshot")
     return g
 
 
