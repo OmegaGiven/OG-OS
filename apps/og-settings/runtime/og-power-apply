@@ -1,7 +1,21 @@
 #!/usr/bin/env bash
+# (Re)spawns swayidle from og-settings' Power tab settings. Run at login
+# (`exec_always og-power-apply` in the seed sway config) and by og-settings
+# on every Power-tab change.
 CONFIG="$HOME/.config/sway-power/config.json"
-PID_FILE="$HOME/.config/sway-power/swayidle.pid"
-WATCH_PID_FILE="$HOME/.config/sway-power/controller-idle-watch.pid"
+STATE_DIR="$HOME/.config/sway-power"
+PID_FILE="$STATE_DIR/swayidle.pid"
+WATCH_PID_FILE="$STATE_DIR/controller-idle-watch.pid"
+mkdir -p "$STATE_DIR"
+
+# Toolkit helpers: a dev build in ~/.local/bin wins, else the packaged
+# /usr/bin copy (same rule as og_config::og_bin). Not a bare name: sway's
+# exec environment has no ~/.local/bin on PATH.
+og_bin() {
+    if [ -x "$HOME/.local/bin/$1" ]; then echo "$HOME/.local/bin/$1"
+    elif [ -x "/usr/bin/$1" ]; then echo "/usr/bin/$1"
+    else command -v "$1" || echo "/usr/bin/$1"; fi
+}
 
 # Kill by pidfile AND by name: the pidfile only tracks the last instance we
 # spawned, and an `||` here left any older stray swayidle running (two
@@ -16,20 +30,34 @@ sleep 0.3
 # doesn't depend on config, so start it once and leave it running across
 # repeated Apply&Save calls instead of restarting it every time.
 if ! kill -0 "$(cat "$WATCH_PID_FILE" 2>/dev/null)" 2>/dev/null; then
-    "$HOME/.local/bin/og-controller-idle-watch" >/dev/null 2>&1 &
-    echo $! > "$WATCH_PID_FILE"
+    watcher="$(og_bin og-controller-idle-watch)"
+    if [ -x "$watcher" ]; then
+        "$watcher" >/dev/null 2>&1 &
+        echo $! > "$WATCH_PID_FILE"
+    fi
 fi
 
-if [ ! -f "$CONFIG" ]; then
-    exit 0
-fi
-
-MON_ENABLED=$(python3 -c "import json,sys; c=json.load(open('$CONFIG')); print(c['monitor_sleep']['enabled'])")
-SYS_ENABLED=$(python3 -c "import json,sys; c=json.load(open('$CONFIG')); print(c['system_sleep']['enabled'])")
-LOCK_ENABLED=$(python3 -c "import json,sys; c=json.load(open('$CONFIG')); print(c.get('screen_lock',{}).get('enabled',False))")
-MON_SEC=$(python3 -c "import json; c=json.load(open('$CONFIG')); print(c['monitor_sleep']['minutes']*60)")
-SYS_SEC=$(python3 -c "import json; c=json.load(open('$CONFIG')); print(c['system_sleep']['minutes']*60)")
-LOCK_SEC=$(python3 -c "import json; c=json.load(open('$CONFIG')); print(c.get('screen_lock',{}).get('minutes',10)*60)")
+# One python call reading every value, with og-config's Config::default()
+# values as fallbacks — a fresh install has no config.json until
+# og-settings first saves, and that must behave exactly like the defaults
+# the Power tab shows (monitor off after 15 min, no lock, no suspend), not
+# like "everything off" as it did when this exited early on a missing file.
+read -r MON_ENABLED MON_SEC SYS_ENABLED SYS_SEC LOCK_ENABLED LOCK_SEC < <(
+    python3 - "$CONFIG" <<'PY' 2>/dev/null || echo "True 900 False 1800 False 600"
+import json, sys
+try:
+    c = json.load(open(sys.argv[1]))
+except Exception:
+    c = {}
+def get(key, enabled, minutes):
+    s = c.get(key) or {}
+    return bool(s.get("enabled", enabled)), int(s.get("minutes", minutes)) * 60
+mon = get("monitor_sleep", True, 15)
+sys_ = get("system_sleep", False, 30)
+lock = get("screen_lock", False, 10)
+print(*mon, *sys_, *lock)
+PY
+)
 
 LOCK_CMD='swaylock -f -c 000000'
 

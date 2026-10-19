@@ -285,11 +285,14 @@ pub fn update(bar: &mut Bar, message: Message) -> Task<Message> {
             // here now spawns bare command names (og-settings, og-clip,
             // og-notif-center-launch, ...) rather than full paths. Rather
             // than hunt down every call site, prepend ~/.local/bin once,
-            // here, so bare names resolve regardless of the caller.
-            let home = std::env::var("HOME").unwrap_or_default();
+            // here, so bare names resolve regardless of the caller — the
+            // og_config::og_bin rule (dev build first, then /usr/bin via
+            // the inherited PATH), so packaged installs work unchanged.
+            let dev_bin = og_config::bin::dev_bin_dir();
             let _ = std::process::Command::new("sh")
                 .arg("-c")
-                .arg(format!("PATH=\"{home}/.local/bin:$PATH\" setsid {cmd} >/dev/null 2>&1 &"))
+                .arg(format!("PATH=\"$0:$PATH\" setsid {cmd} >/dev/null 2>&1 &"))
+                .arg(dev_bin)
                 .spawn();
         }
         // Toggles run off the UI thread. Pulseaudio and bluetooth need no

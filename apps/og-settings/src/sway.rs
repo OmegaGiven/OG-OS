@@ -561,13 +561,24 @@ pub fn set_waybar_layout(config: &Config) {
 /// Restarts og-bar so edge/thickness/spacing changes in the Bar tab take
 /// effect — og-bar doesn't watch its config file for changes (PLAN.md
 /// section 2), so a kill+relaunch is the only way to apply them today.
-/// Launched via the `scripts/install.sh` install path rather than bare
-/// `og-bar`, since sway's exec environment doesn't include `~/.local/bin`
-/// on PATH (same issue noted in sway-control's own README for other tools).
+///
+/// When og-bar runs as its systemd user unit (how both the OG-OS seed
+/// config and the dev setup start it), restart the unit: killing it and
+/// spawning a second copy would race the unit's own Restart=always and
+/// leave two bars. Otherwise kill + respawn through `og_bin` (dev build in
+/// ~/.local/bin first, then /usr/bin) — never a hardcoded ~/.local/bin,
+/// which doesn't exist on a packaged install.
 pub fn restart_og_bar() {
+    let unit_active = Command::new("systemctl")
+        .args(["--user", "is-active", "--quiet", "og-bar.service"])
+        .status()
+        .is_ok_and(|s| s.success());
+    if unit_active {
+        let _ = Command::new("systemctl").args(["--user", "restart", "og-bar.service"]).status();
+        return;
+    }
     let _ = Command::new("pkill").args(["-x", "og-bar"]).output();
-    let bin = format!("{}/.local/bin/og-bar", home());
-    let _ = Command::new(bin).spawn();
+    let _ = og_config::og_command("og-bar").spawn();
 }
 
 /// Every module's `min-width`/`min-height: Npx;` in style.css hardcodes the
@@ -668,12 +679,11 @@ pub fn set_border_width(px: i32) {
 }
 
 pub fn run_power_apply() {
-    // Bare command name relies on PATH — sway's own process environment
-    // (unlike an interactive shell) doesn't include ~/.local/bin, so this
-    // silently failed to spawn every time: toggling monitor/system sleep
-    // off in the GUI never actually reached the running swayidle, which
-    // kept enforcing whatever timeout was active when it was last spawned.
-    let _ = Command::new(format!("{}/.local/bin/og-power-apply", home())).output();
+    // Resolved via og_bin, not a bare name: sway's process environment
+    // doesn't include ~/.local/bin, so a dev build was never found and
+    // toggling sleep never reached the running swayidle. Not a hardcoded
+    // ~/.local/bin path either: packaged installs have it in /usr/bin.
+    let _ = og_config::og_command("og-power-apply").output();
 }
 
 const STEAM_SYSTEM_DESKTOP: &str = "/usr/share/applications/steam.desktop";
@@ -1027,22 +1037,44 @@ pub fn get_available_cursor_themes() -> Vec<String> {
     themes.into_iter().collect()
 }
 
-/// Replaces the first top-level line starting with `prefix`, or appends
-/// `new_line` near the top (right after the `### Variables` marker sway's
-/// default config ships with, falling back to the very start of the file)
-/// if no such line exists yet.
-fn upsert_sway_config_line(prefix: &str, new_line: &str) {
+/// True when `line` is a (possibly commented-out) startup `exec` /
+/// `exec_always` line whose program is `bin` — however the path is spelled
+/// (`og-notify`, `~/.local/bin/og-notify`, `/usr/bin/og-notify`). A config
+/// written by an older og-settings, the OG-OS seed config and a dev
+/// machine's config all match the same line instead of growing duplicates
+/// (the old fixed-prefix match also missed its own `# exec ...` disabled
+/// form, so every disable/enable cycle appended another copy).
+fn exec_line_targets(line: &str, bin: &str) -> bool {
+    let t = line.trim().trim_start_matches('#').trim_start();
+    let mut words = t.split_whitespace();
+    if !matches!(words.next(), Some("exec") | Some("exec_always")) {
+        return false;
+    }
+    words
+        .find(|w| !w.starts_with("--"))
+        .map(|prog| prog.trim_matches(|c| c == '"' || c == '\''))
+        .is_some_and(|prog| prog.rsplit('/').next() == Some(bin))
+}
+
+/// Replaces the main sway config's startup line for `bin` (see
+/// `exec_line_targets`), or inserts `new_line` near the top (right after
+/// the `### Variables` marker sway's default config ships with, falling
+/// back to the very start of the file) if there is none yet.
+fn upsert_sway_exec_line(bin: &str, new_line: &str) {
     let config_path = format!("{}/.config/sway/config", home());
     let Ok(content) = std::fs::read_to_string(&config_path) else { return };
-    let mut lines: Vec<String> = content.lines().map(str::to_string).collect();
+    let _ = std::fs::write(&config_path, upsert_exec_line_in(&content, bin, new_line));
+}
 
-    if let Some(pos) = lines.iter().position(|l| l.trim().starts_with(prefix)) {
+fn upsert_exec_line_in(content: &str, bin: &str, new_line: &str) -> String {
+    let mut lines: Vec<String> = content.lines().map(str::to_string).collect();
+    if let Some(pos) = lines.iter().position(|l| exec_line_targets(l, bin)) {
         lines[pos] = new_line.to_string();
     } else {
         let insert_at = lines.iter().position(|l| l.trim() == "### Variables").unwrap_or(0);
         lines.insert(insert_at, new_line.to_string());
     }
-    let _ = std::fs::write(&config_path, lines.join("\n") + "\n");
+    lines.join("\n") + "\n"
 }
 
 /// Input/seat settings live in the input drop-in.
@@ -1084,26 +1116,30 @@ pub fn set_keyboard_repeat(rate: i32, delay: i32) {
     upsert_input_line("input type:keyboard repeat_delay", &format!("input type:keyboard repeat_delay {delay}"));
 }
 
-const NOTIF_FX_EXEC_PREFIX: &str = "exec --no-startup-id ~/.local/bin/og-notify";
+/// Sway startup line for a toolkit daemon, spelled the way `og_bin_shell`
+/// resolves it at write time: `~/.local/bin/<bin>` for a dev build, plain
+/// `<bin>` (found in /usr/bin) on a packaged install — never a path that
+/// doesn't exist on this machine.
+fn daemon_exec_line(bin: &str) -> String {
+    format!("exec --no-startup-id {} &", og_config::og_bin_shell(bin))
+}
 
 /// Only edits the sway config's startup line — whether `og-notify`
 /// comes back after a logout/reboot. Doesn't touch whether it's running
 /// right now; that's `start_notification_fx`/`stop_notification_fx`, driven
 /// by the "Enable notification effects" toggle instead.
 pub fn set_notification_fx_autostart(enabled: bool) {
-    let line = if enabled {
-        format!("{NOTIF_FX_EXEC_PREFIX} &")
-    } else {
-        format!("# {NOTIF_FX_EXEC_PREFIX} &")
-    };
-    upsert_sway_config_line(NOTIF_FX_EXEC_PREFIX, &line);
+    let exec = daemon_exec_line("og-notify");
+    let line = if enabled { exec } else { format!("# {exec}") };
+    upsert_sway_exec_line("og-notify", &line);
 }
 
 /// Starts `og-notify` now if it isn't already running. Idempotent.
 pub fn start_notification_fx() {
     let _ = Command::new("sh")
         .arg("-c")
-        .arg(format!("pgrep -x og-notify >/dev/null || {}/.local/bin/og-notify >/dev/null 2>&1 &", home()))
+        .arg("pgrep -U \"$(id -u)\" -x og-notify >/dev/null || \"$0\" >/dev/null 2>&1 &")
+        .arg(og_config::og_bin("og-notify"))
         .spawn();
 }
 
@@ -1115,19 +1151,20 @@ pub fn is_notification_fx_running() -> bool {
     Command::new("pgrep").args(["-x", "og-notify"]).output().map(|o| o.status.success()).unwrap_or(false)
 }
 
-const OPACITY_EXEC_PREFIX: &str = "exec --no-startup-id ~/.local/bin/og-opacity-apply";
-
 /// `og-opacity-apply` always autostarts (same as `og-notify`) — a
 /// value of 1.0 just makes it a no-op, so there's no separate on/off
 /// toggle for it, only the opacity slider itself.
 pub fn ensure_opacity_autostart() {
-    upsert_sway_config_line(OPACITY_EXEC_PREFIX, &format!("{OPACITY_EXEC_PREFIX} &"));
+    upsert_sway_exec_line("og-opacity-apply", &daemon_exec_line("og-opacity-apply"));
 }
 
 pub fn start_opacity_daemon() {
+    // Anchored at the end so only the watcher form matches: a one-shot
+    // `og-opacity-apply <value>` from the slider isn't the daemon.
     let _ = Command::new("sh")
         .arg("-c")
-        .arg(format!("pgrep -f og-opacity-apply >/dev/null || {}/.local/bin/og-opacity-apply >/dev/null 2>&1 &", home()))
+        .arg("pgrep -U \"$(id -u)\" -f 'og-opacity-apply$' >/dev/null || \"$0\" >/dev/null 2>&1 &")
+        .arg(og_config::og_bin("og-opacity-apply"))
         .spawn();
 }
 
@@ -1135,7 +1172,7 @@ pub fn start_opacity_daemon() {
 /// waiting for the daemon's next focus-change event — so dragging the
 /// slider updates the screen immediately.
 pub fn apply_unfocused_opacity_now(value: f32) {
-    let _ = Command::new(format!("{}/.local/bin/og-opacity-apply", home()))
+    let _ = og_config::og_command("og-opacity-apply")
         .arg(format!("{:.2}", value.clamp(0.1, 1.0)))
         .spawn();
 }
@@ -1825,8 +1862,12 @@ pub fn apply_wallpaper(config: &Config) {
     // its main.rs) — killing any running instance here and letting the
     // exec_always in sway config relaunch it is what actually applies a
     // mode switch immediately, in either direction, without a full sway
-    // reload.
-    let _ = Command::new("pkill").args(["-9", "-f", "/og-wallpaper$"]).output();
+    // reload. `-x` matches the process name exactly, however it was
+    // started (`og-wallpaper` by bare name from the OG-OS seed config, or
+    // a full path) — the old `-f '/og-wallpaper$'` missed bare-name starts
+    // and left a second wallpaper running. og-wallpaper-studio's name
+    // (truncated to "og-wallpaper-st") never matches.
+    let _ = Command::new("pkill").args(["-9", "-x", "og-wallpaper"]).output();
 
     let new_line = if config.wallpaper_mode == "color" || config.wallpaper_mode == "animated" {
         format!("output * bg {} solid_color", config.wallpaper_color)
@@ -1842,9 +1883,13 @@ pub fn apply_wallpaper(config: &Config) {
     let _ = Command::new("swaymsg").arg(&new_line).output();
 
     if config.wallpaper_mode == "animated" {
+        // og_bin: dev build first, then /usr/bin — the old hardcoded
+        // ~/.local/bin did nothing on a packaged install. A path is never
+        // part of a shell string here; it goes in as $0.
         let _ = Command::new("sh")
             .arg("-c")
-            .arg("sleep 0.2; ~/.local/bin/og-wallpaper > /tmp/og-wallpaper.log 2>&1 &")
+            .arg("sleep 0.2; \"$0\" > /tmp/og-wallpaper.log 2>&1 &")
+            .arg(og_config::og_bin("og-wallpaper"))
             .spawn();
     }
 }
@@ -2010,5 +2055,54 @@ mod upsert_line_in_file_tests {
         let content = std::fs::read_to_string(&path).unwrap();
         assert_eq!(content.matches("border-size").count(), 1);
         std::fs::remove_file(&path).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod exec_line_tests {
+    use super::*;
+
+    #[test]
+    fn matches_every_spelling_of_the_program() {
+        for l in [
+            "exec --no-startup-id ~/.local/bin/og-notify &",
+            "exec og-notify",
+            "# exec --no-startup-id ~/.local/bin/og-notify &",
+            "exec_always /usr/bin/og-notify",
+            "  exec \"og-notify\"",
+        ] {
+            assert!(exec_line_targets(l, "og-notify"), "{l}");
+        }
+        for l in [
+            "exec og-notif-center-launch",
+            "bindsym $mod+n exec og-notify",
+            "exec sh -c 'og-notify'",
+            "# og-notify is the pop-up layer",
+        ] {
+            assert!(!exec_line_targets(l, "og-notify"), "{l}");
+        }
+    }
+
+    #[test]
+    fn seed_config_line_is_replaced_not_duplicated() {
+        let seed = include_str!("../../../distro/airootfs/etc/skel/.config/sway/config");
+        let new = "exec --no-startup-id og-notify &";
+        let once = upsert_exec_line_in(seed, "og-notify", new);
+        assert_eq!(once.lines().filter(|l| exec_line_targets(l, "og-notify")).count(), 1);
+        // disable then re-enable: still exactly one line (the old prefix
+        // match missed its own "# exec" form and appended a copy each time)
+        let off = upsert_exec_line_in(&once, "og-notify", &format!("# {new}"));
+        let on = upsert_exec_line_in(&off, "og-notify", new);
+        assert_eq!(on.lines().filter(|l| exec_line_targets(l, "og-notify")).count(), 1);
+        assert_eq!(on, once);
+    }
+
+    #[test]
+    fn missing_line_is_inserted_once() {
+        let cfg = "set $mod Mod4\n### Variables\nbindsym $mod+q kill\n";
+        let out = upsert_exec_line_in(cfg, "og-opacity-apply", "exec --no-startup-id og-opacity-apply &");
+        let again = upsert_exec_line_in(&out, "og-opacity-apply", "exec --no-startup-id og-opacity-apply &");
+        assert_eq!(out, again);
+        assert_eq!(out.matches("og-opacity-apply").count(), 1);
     }
 }

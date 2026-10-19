@@ -22,8 +22,12 @@ const MODE_F = `${HOME}/.local/state/spatial-mode`;
 const PRESET_F = `${HOME}/.local/state/spatial-preset`;
 // execSync runs under /bin/sh, which never has ~/.local/bin on PATH (same
 // gotcha as sway/waybar) — always call this by absolute path or every
-// invocation below silently no-ops with "command not found".
-const SPATIAL = `${HOME}/.local/bin/spatial`;
+// invocation below silently no-ops with "command not found". Dev build in
+// ~/.local/bin wins, else the packaged copy (og_config::og_bin rule).
+const SPATIAL = (() => {
+  const dev = `${HOME}/.local/bin/spatial`;
+  try { fs.accessSync(dev, fs.constants.X_OK); return dev; } catch { return '/usr/bin/spatial'; }
+})();
 
 const sh = (c) => { try { return execSync(c, { encoding: 'utf8', timeout: 8000 }); } catch { return ''; } };
 const pactlJSON = (what) => { try { return JSON.parse(sh(`pactl -f json list ${what}`)); } catch { return []; } };

@@ -20,7 +20,15 @@ pkgdesc="OG-toolkit taskbar (workspaces, clock, tray, system stats, quick toggle
 arch=('x86_64')
 url="https://github.com/OmegaGiven/OG-OS"
 license=('MIT')
-depends=('gcc-libs' 'wayland' 'ttf-nerd-fonts-symbols' 'wl-clipboard' 'grim' 'slurp')
+# sway: swaymsg (workspaces, popups); libpulse: pactl (volume module);
+# mako: makoctl (notification count); og-scripts: og-search-launch /
+# og-notif-center-launch, which its buttons spawn.
+depends=('gcc-libs' 'wayland' 'ttf-nerd-fonts-symbols' 'wl-clipboard' 'grim' 'slurp'
+         'sway' 'libpulse' 'mako' 'og-scripts')
+optdepends=('blueman: Bluetooth module menu (Devices, Adapter settings, Send files)'
+            'og-settings: settings buttons (audio/network/bar)'
+            'og-clip: clipboard button'
+            'og-notif-center: notifications button')
 makedepends=('cargo')
 # No split -debug package: its RUSTFLAGS path remap differs per package,
 # which would make every package rebuild the shared cargo target from
@@ -40,4 +48,7 @@ build() {
 
 package() {
   install -Dm755 "${CARGO_TARGET_DIR:-$_ogsrc/target}/release/og-bar" "$pkgdir/usr/bin/og-bar"
+  # systemd user unit the seed sway config (re)starts og-bar through
+  # (crash/resume restart + watchdog); prefers a ~/.local/bin dev build.
+  install -Dm644 "$_ogsrc/apps/og-bar/og-bar.service" "$pkgdir/usr/lib/systemd/user/og-bar.service"
 }

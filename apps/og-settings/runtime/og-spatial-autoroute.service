@@ -5,7 +5,9 @@ PartOf=pipewire.service
 
 [Service]
 Type=simple
-ExecStart=%h/.local/bin/og-spatial-autoroute
+# Dev build in ~/.local/bin wins, else the packaged /usr/bin copy (same
+# rule as og_config::og_bin) — one unit file for both layouts.
+ExecStart=/bin/sh -c 'b=%h/.local/bin/og-spatial-autoroute; [ -x "$$b" ] || b=/usr/bin/og-spatial-autoroute; exec "$$b"'
 Restart=on-failure
 RestartSec=2
 Slice=session.slice

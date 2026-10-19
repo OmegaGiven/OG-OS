@@ -15,7 +15,29 @@ pkgdesc="OG-toolkit control panel (theme, audio, network, printing, power, sysmo
 arch=('x86_64')
 url="https://github.com/OmegaGiven/OG-OS"
 license=('MIT')
-depends=('gcc-libs' 'wayland' 'btop' 'bluez' 'iwd')
+# Runtime tools og-settings and its helper scripts shell out to — missing
+# ones made tabs/actions silently do nothing on a fresh install:
+# sway (swaymsg), python (og-power-apply/og-opacity-apply), swayidle +
+# swaylock (Power tab), libpulse/pipewire/alsa-utils (Audio tab: pactl,
+# parec, pw-link, pw-play, speaker-test), pacman-contrib (Updates tab:
+# checkupdates), usbutils/pciutils (Devices tab: lsusb, lspci),
+# brightnessctl (Display), libnotify + mako (Notifications tab).
+depends=('gcc-libs' 'wayland' 'btop' 'bluez' 'iwd'
+         'sway' 'python' 'swayidle' 'swaylock' 'libpulse' 'pipewire' 'alsa-utils'
+         'pacman-contrib' 'usbutils' 'pciutils' 'brightnessctl' 'libnotify' 'mako')
+optdepends=('python-evdev: keep the screen awake while a gamepad is in use (og-controller-idle-watch)'
+            'wireguard-tools: VPN tab (WireGuard configs via og-vpn-apply)'
+            'tailscale: VPN tab (Tailscale exit nodes)'
+            'cups: Printing tab'
+            'xorg-xcursorgen: Theme tab cursor import'
+            'librsvg: Theme tab cursor import from SVG'
+            'imagemagick: Theme tab cursor import from raster images'
+            'ffmpeg: Audio tab surround test tones'
+            'android-tools: Audio tab phone relay APK install'
+            'og-wallpaper: animated wallpapers'
+            'og-wallpaper-studio: Theme tab "Open Wallpaper Studio"'
+            'og-notify: Notifications tab effects preview'
+            'og-bar: Bar tab')
 makedepends=('cargo')
 # No split -debug package: its RUSTFLAGS path remap differs per package,
 # which would make every package rebuild the shared cargo target from
@@ -35,13 +57,23 @@ build() {
 
 package() {
   install -Dm755 "${CARGO_TARGET_DIR:-$_ogsrc/target}/release/og-settings" "$pkgdir/usr/bin/og-settings"
+  install -Dm644 "$_ogsrc/apps/og-settings/packaging/og-settings.desktop" "$pkgdir/usr/share/applications/og-settings.desktop"
 
-  # VPN split-tunnel helper: root-owned, group-inaccessible-to-write
-  # (750, root:root — NOT ~/.local/bin, which a normal user can edit; a
-  # NOPASSWD sudoers rule pointing at a user-writable path is a
-  # privilege-escalation hole, flagged in OS-PLAN.md since phase 1 and
-  # unresolved until this package actually installed it correctly).
-  install -Dm750 -o root -g root "$_ogsrc/apps/og-settings/scripts/og-vpn-apply" "$pkgdir/usr/local/bin/og-vpn-apply"
+  # Runtime helpers og-settings and the seed sway config run by name
+  # (resolved via og_config::og_bin: ~/.local/bin dev copy first, then
+  # here). Never ~/.local/bin-only: a fresh install has nothing there.
+  local s
+  for s in og-power-apply og-controller-idle-watch og-opacity-apply; do
+    install -Dm755 "$_ogsrc/apps/og-settings/runtime/$s" "$pkgdir/usr/bin/$s"
+  done
+
+  # VPN split-tunnel helper: root-owned, not writable by anyone else
+  # (750, root:root) and in package territory (/usr/lib, not /usr/local,
+  # which pacman doesn't own, and never ~/.local/bin, which a normal user
+  # can edit — a NOPASSWD sudoers rule pointing at a user-writable path is
+  # a privilege-escalation hole). og-settings falls back to the old
+  # /usr/local/bin location only for installs predating this move.
+  install -Dm750 -o root -g root "$_ogsrc/apps/og-settings/scripts/og-vpn-apply" "$pkgdir/usr/lib/og-settings/og-vpn-apply"
 
   # Scoped NOPASSWD entry — the sudoers rule's own path binds it to this
   # exact root-owned file, so widening what a user can run means editing

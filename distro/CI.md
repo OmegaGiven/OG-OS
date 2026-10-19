@@ -6,7 +6,7 @@ build the packages and ISO the same way.
 
 | Workflow | Trigger | Runner | Does |
 |---|---|---|---|
-| `ci.yml` | every push / PR | GitHub-hosted (Arch container) | workspace build + tests + clippy (clippy is reported, not enforced yet), PKGBUILD parse check, shellcheck on `distro/ci` |
+| `ci.yml` | every push / PR | GitHub-hosted (Arch container) | workspace build + tests + clippy (clippy is reported, not enforced yet), PKGBUILD parse check, shellcheck on `distro/ci`, launch-target check (`distro/testing/check-launchers.py`) |
 | `packages.yml` | manual | self-hosted `ogos-builder` | build the signed `[ogos]` repo from the commit; optionally publish it to `OmegaGiven/OG-os-repo` (GitHub Pages — the update channel installed systems use) |
 | `iso.yml` | manual | self-hosted `ogos-builder` | repo → ISO (installs exactly this commit's packages) → optional full VM install test → optional GitHub pre-release with `.sha256` and `.sig` |
 
@@ -90,6 +90,7 @@ gpg --gen-revoke --output ogos-signing.rev "$(gpg --with-colons -k | awk -F: '$1
   captures of commercial virtualizers (Dolby Atmos, DTS Headphone:X,
   Windows Sonic, Creative, Waves). Confirm redistribution rights or
   replace them with openly licensed HRIRs before publishing an ISO.
-- `apps/og-settings/runtime/spatial` hardcodes
-  `$HOME/.local/src/sway-control/...` (a dev-machine path) for the HRIR
-  directory; it won't find them on an installed system.
+- `apps/og-settings/runtime/spatial` + `og-spatial-autoroute` are not
+  packaged: they look for HRIRs in `$OG_HRIR_DIR`, the dev checkouts, then
+  `/usr/share/og-settings/hrir` — which nothing installs until the HRIR
+  rights above are settled (and the autorouter needs `nodejs`).

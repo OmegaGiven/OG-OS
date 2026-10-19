@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=OG Notifications
+GenericName=Notification History
+Comment=Browse recent notifications and toggle do-not-disturb
+Exec=og-notif-center
+Icon=preferences-system-notifications
+Terminal=false
+Categories=Utility;
+Keywords=notifications;history;do not disturb;dnd;
+StartupWMClass=og-notif-center

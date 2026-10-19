@@ -1620,10 +1620,7 @@ impl App {
             }
             Message::WallpaperAnimatedThemeSelected(name) => { self.config.wallpaper_animated_theme = name; }
             Message::LaunchWallpaperStudio => {
-                let _ = std::process::Command::new("sh")
-                    .arg("-c")
-                    .arg("~/.local/bin/og-wallpaper-studio &")
-                    .spawn();
+                let _ = og_config::og_command("og-wallpaper-studio").spawn();
             }
 
             Message::CursorRoleImagePick(role_key) => {
@@ -2165,8 +2162,7 @@ impl App {
                 sway::set_system_notifications_enabled(v);
             }
             Message::NotifFxTestNotification => {
-                let home = crate::config::dirs_home();
-                let _ = std::process::Command::new(home.join(".local/bin/og-notify"))
+                let _ = og_config::og_command("og-notify")
                     .arg("--preview")
                     .spawn();
                 let _ = std::process::Command::new("notify-send")
@@ -3616,14 +3612,10 @@ fn light_preset() -> Config {
 
 /// Terminal emulators found on PATH (plus the configured one, always first).
 fn on_path_dirs(bin: &str) -> bool {
-    let home = std::env::var("HOME").unwrap_or_default();
-    let mut paths: Vec<String> = std::env::var("PATH")
-        .unwrap_or_default()
-        .split(':')
-        .map(str::to_string)
-        .collect();
-    paths.push(format!("{}/.local/bin", home));
-    paths.iter().any(|d| std::path::Path::new(d).join(bin).is_file())
+    let mut paths: Vec<std::path::PathBuf> = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()).collect();
+    paths.push(og_config::bin::dev_bin_dir());
+    paths.push(og_config::bin::SYSTEM_BIN_DIR.into());
+    paths.iter().any(|d| d.join(bin).is_file())
 }
 
 fn detect_from_known(known: &[&str], current: &str) -> Vec<String> {
@@ -4124,5 +4116,40 @@ bindsym $mod+q kill
             let round = |x: f32| (x * 255.0).round() as u8;
             assert_eq!((round(back.r), round(back.g), round(back.b)), (*r, *g, *b), "mismatch for {name}");
         }
+    }
+}
+
+/// The Hotkeys tab against the config a fresh OG-OS user actually has.
+#[cfg(test)]
+mod seed_config_tests {
+    use super::*;
+
+    const SEED: &str = include_str!("../../../distro/airootfs/etc/skel/.config/sway/config");
+
+    #[test]
+    fn hotkeys_tab_loads_every_seed_binding() {
+        let b = parse_sway_bindings(SEED);
+        let expected = SEED
+            .lines()
+            .filter(|l| l.starts_with("bindsym "))
+            .count();
+        assert_eq!(b.len(), expected, "top-level bindsym lines lost by the parser");
+        // resize-mode internals stay out of the editable list
+        assert!(b.iter().all(|(k, _)| k != "$left" && k != "Return"));
+        assert!(b.iter().all(|(_, c)| !c.contains(".local/bin")));
+    }
+
+    #[test]
+    fn saving_the_seed_config_is_lossless_and_stable() {
+        let v = parse_sway_variables(SEED);
+        assert!(v.iter().any(|(n, val)| n == "$menu" && val == "og-search-launch"));
+        let b = parse_sway_bindings(SEED);
+        let once = rewrite_sway_config(SEED, &v, &b);
+        assert_eq!(parse_sway_bindings(&once), b);
+        assert_eq!(parse_sway_variables(&once), v);
+        assert!(once.contains("mode \"resize\" {"));
+        assert!(once.contains("include ~/.config/sway/config.d/*.conf"));
+        let twice = rewrite_sway_config(&once, &parse_sway_variables(&once), &parse_sway_bindings(&once));
+        assert_eq!(once, twice);
     }
 }

@@ -16,7 +16,17 @@ import time
 import evdev
 
 DEBOUNCE_SECONDS = 20
-POWER_APPLY = os.path.expanduser("~/.local/bin/og-power-apply")
+
+
+def og_bin(name):
+    """Dev build in ~/.local/bin wins, else the packaged /usr/bin copy —
+    same rule as og_config::og_bin (a hardcoded ~/.local/bin path doesn't
+    exist on a packaged install)."""
+    dev = os.path.expanduser(f"~/.local/bin/{name}")
+    return dev if os.access(dev, os.X_OK) else f"/usr/bin/{name}"
+
+
+POWER_APPLY = og_bin("og-power-apply")
 
 
 def find_gamepad():

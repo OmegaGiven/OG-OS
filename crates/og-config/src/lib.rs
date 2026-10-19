@@ -10,6 +10,9 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+pub mod bin;
+pub use bin::{og_bin, og_bin_shell, og_command};
+
 fn config_path() -> PathBuf {
     let mut p = dirs_home();
     p.push(".config/sway-power/config.json");
@@ -690,9 +693,9 @@ fn default_sections() -> Vec<BarSection> {
                 },
                 ModuleConfig {
                     kind: ModuleKind::Launcher {
-                        icon: "\u{ee0d}".to_string(), // fa-robot — no literal Claude glyph in this icon set
-                        tooltip: "Open Claude CLI".to_string(),
-                        command: "alacritty -e claude --dangerously-skip-permissions".to_string(),
+                        icon: "\u{f07b}".to_string(), // fa-folder
+                        tooltip: "Open Files".to_string(),
+                        command: "og-files".to_string(),
                     },
                     enabled: true,
                     size_override: None,
@@ -701,14 +704,10 @@ fn default_sections() -> Vec<BarSection> {
                     kind: ModuleKind::Launcher {
                         icon: "\u{f002}".to_string(), // fa-search
                         tooltip: "Search".to_string(),
-                        // ~/.local/bin, not bare "og-search" — sway's own
-                        // process environment doesn't have ~/.local/bin on
-                        // PATH (same class of bug fixed earlier for
-                        // og-power-apply), and every other launcher/click
-                        // command that targets a user-installed binary in
-                        // this file already uses the full path for exactly
-                        // that reason.
-                        command: "~/.local/bin/og-search".to_string(),
+                        // Bare name: og-bar's Launch handler resolves it
+                        // (~/.local/bin dev build first, then /usr/bin). The
+                        // -launch wrapper (og-scripts) adds Escape-to-close.
+                        command: "og-search-launch".to_string(),
                     },
                     enabled: true,
                     size_override: None,

@@ -206,7 +206,8 @@ pub fn set_route(m: RouteMode, preset: Preset, device: &str) -> Result<(), Strin
             args.push(device.to_string());
         }
     }
-    let out = Command::new("spatial")
+    // Bare "spatial" was never found from sway's PATH (no ~/.local/bin).
+    let out = og_config::og_command("spatial")
         .args(&args)
         .output()
         .map_err(|e| format!("couldn't run `spatial`: {e}"))?;

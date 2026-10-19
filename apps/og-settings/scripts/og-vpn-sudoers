@@ -1,5 +1,8 @@
-Defaults!/usr/local/bin/og-vpn-apply env_keep += "DISPLAY WAYLAND_DISPLAY XDG_RUNTIME_DIR"
+Defaults!/usr/lib/og-settings/og-vpn-apply env_keep += "DISPLAY WAYLAND_DISPLAY XDG_RUNTIME_DIR"
 # %wheel, not a hardcoded username — this ships as a real package to
 # whoever installs OG-OS, not just this dev machine. install-ogos.sh
 # adds every new user to wheel, matching the group this rule grants to.
-%wheel ALL=(root) NOPASSWD: /usr/local/bin/og-vpn-apply
+# The path is package-owned and root-owned (og-settings' PKGBUILD installs
+# it 750 root:root under /usr/lib) — never point this at ~/.local/bin or
+# anything else a normal user can write.
+%wheel ALL=(root) NOPASSWD: /usr/lib/og-settings/og-vpn-apply

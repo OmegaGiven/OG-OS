@@ -1,0 +1,30 @@
+# OG-OS system-wide default applications (XDG MIME Applications spec,
+# $XDG_CONFIG_DIRS/mimeapps.list). Used by xdg-open, og-search's file
+# results and og-files' own "Open"; a user's ~/.config/mimeapps.list
+# (written by og-files' "Always open with…") overrides any entry here.
+# og-files ships built-in viewers/editors for all of these.
+[Default Applications]
+inode/directory=og-files.desktop
+image/png=og-files.desktop
+image/jpeg=og-files.desktop
+image/gif=og-files.desktop
+image/webp=og-files.desktop
+image/bmp=og-files.desktop
+image/svg+xml=og-files.desktop
+image/tiff=og-files.desktop
+application/pdf=og-files.desktop
+text/plain=og-files.desktop
+text/markdown=og-files.desktop
+text/csv=og-files.desktop
+video/mp4=og-files.desktop
+video/webm=og-files.desktop
+video/x-matroska=og-files.desktop
+audio/mpeg=og-files.desktop
+audio/flac=og-files.desktop
+audio/ogg=og-files.desktop
+audio/x-wav=og-files.desktop
+application/zip=og-files.desktop
+application/x-tar=og-files.desktop
+application/x-7z-compressed=og-files.desktop
+application/gzip=og-files.desktop
+application/zstd=og-files.desktop

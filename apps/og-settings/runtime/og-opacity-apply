@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+# Dims every window that isn't currently focused, per the "Unfocused window
+# opacity" slider in og-settings (Theme tab). Sway has no built-in
+# "unfocused windows" opacity concept (only per-window `opacity` via
+# criteria you'd have to maintain yourself), so this watches sway's window
+# events and re-applies opacity on every focus change instead.
+CONFIG="$HOME/.config/sway-power/config.json"
+# Passing a value as $1 applies it once immediately and exits, instead of
+# reading the config and watching for focus changes — og-settings
+# uses this so dragging the slider updates the screen right away instead
+# of waiting for the next focus change.
+OVERRIDE_OPACITY="$1"
+
+get_opacity() {
+    if [ -n "$OVERRIDE_OPACITY" ]; then
+        echo "$OVERRIDE_OPACITY"
+        return
+    fi
+    python3 -c "
+import json
+try:
+    c = json.load(open('$CONFIG'))
+    v = float(c.get('unfocused_opacity', 1.0))
+except Exception:
+    v = 1.0
+print(max(0.1, min(1.0, v)))
+" 2>/dev/null || echo 1.0
+}
+
+apply_opacity() {
+    local opacity
+    opacity=$(get_opacity)
+    swaymsg -t get_tree | python3 -c "
+import json, sys, subprocess
+
+tree = json.load(sys.stdin)
+opacity = '$opacity'
+
+def leaves(node, out):
+    children = node.get('nodes', []) + node.get('floating_nodes', [])
+    if not children and (node.get('app_id') or node.get('pid')):
+        out.append(node)
+    for c in children:
+        leaves(c, out)
+    return out
+
+for win in leaves(tree, []):
+    op = '1' if win.get('focused') else opacity
+    subprocess.run(['swaymsg', f'[con_id={win[\"id\"]}]', 'opacity', op],
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+"
+}
+
+# Catch windows that already exist at startup, then react to focus changes.
+apply_opacity
+[ -n "$OVERRIDE_OPACITY" ] && exit 0
+
+swaymsg -t subscribe -m '["window"]' | while read -r _line; do
+    apply_opacity
+done

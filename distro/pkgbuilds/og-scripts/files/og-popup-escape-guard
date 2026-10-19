@@ -18,9 +18,16 @@
 
 set -eu
 
+# Dev build in ~/.local/bin wins, else the packaged copy (og_config::og_bin rule).
+og_bin() {
+    if [ -x "$HOME/.local/bin/$1" ]; then echo "$HOME/.local/bin/$1"
+    elif [ -x "/usr/bin/$1" ]; then echo "/usr/bin/$1"
+    else command -v "$1" || echo "/usr/bin/$1"; fi
+}
+
 case "${1:-}" in
     acquire)
-        swaymsg "bindsym --release Escape exec /usr/bin/og-popup-escape-kill" >/dev/null
+        swaymsg "bindsym --release Escape exec $(og_bin og-popup-escape-kill)" >/dev/null
         ;;
     release)
         if ! pgrep -f '/og-search$' >/dev/null 2>&1 && ! pgrep -f '/og-notif-center$' >/dev/null 2>&1; then

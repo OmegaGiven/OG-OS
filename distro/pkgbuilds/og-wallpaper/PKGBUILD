@@ -1,0 +1,39 @@
+# Maintainer: OmegaGiven
+# OG Wallpaper (apps/og-wallpaper): animated layer-shell wallpaper. The
+# seed sway config launches it on every (re)load and og-settings' Theme tab
+# relaunches it on a mode change; it exits immediately unless the
+# wallpaper mode is "animated". Same one-cargo-build pattern as the other
+# workspace PKGBUILDs (see ../workspace-apps).
+pkgname=og-wallpaper
+# Source tree: $OGOS_SRC if set (CI sets it to the checked-out commit),
+# else the repo this PKGBUILD lives in. Version: $OGOS_PKGVER if set (CI
+# derives a monotonic one from git), else the static fallback below.
+_ogsrc="${OGOS_SRC:-$(cd "$startdir/../../.." && pwd)}"
+pkgver="${OGOS_PKGVER:-20260908}"
+pkgrel=1
+pkgdesc="OG-toolkit animated wallpaper (layer-shell background)"
+arch=('x86_64')
+url="https://github.com/OmegaGiven/OG-OS"
+license=('MIT')
+# sway: it asks /usr/bin/sway for the IPC socket; vulkan-icd-loader: wgpu
+depends=('gcc-libs' 'wayland' 'sway' 'vulkan-icd-loader')
+makedepends=('cargo')
+# No split -debug package: its RUSTFLAGS path remap differs per package,
+# which would make every package rebuild the shared cargo target from
+# scratch (and build-repo.sh drops -debug packages anyway).
+options=('!debug')
+source=()
+
+build() {
+  # Builds every packaged app (../workspace-apps) straight from the source
+  # tree in one go: all og-* packages share that one build (and, via
+  # build-repo.sh, one CARGO_TARGET_DIR), so the 2nd..nth are no-ops.
+  local apps=()
+  mapfile -t apps < <(grep -v '^#' "$startdir/../workspace-apps")
+  cd "$_ogsrc"
+  cargo build --release --locked "${apps[@]/#/--package=}"
+}
+
+package() {
+  install -Dm755 "${CARGO_TARGET_DIR:-$_ogsrc/target}/release/og-wallpaper" "$pkgdir/usr/bin/og-wallpaper"
+}

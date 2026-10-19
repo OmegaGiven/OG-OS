@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=OG Wallpaper Studio
+GenericName=Wallpaper Editor
+Comment=Create and edit animated wallpapers for og-wallpaper
+Exec=og-wallpaper-studio
+Icon=preferences-desktop-wallpaper
+Terminal=false
+Categories=Graphics;
+Keywords=wallpaper;background;animated;theme;
+StartupWMClass=og-wallpaper-studio

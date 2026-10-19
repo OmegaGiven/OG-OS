@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=OG Apps
+GenericName=App Store
+Comment=Find and install apps from the Arch repos, the AUR and Flatpak
+Exec=og-apps
+Icon=system-software-install
+Terminal=false
+Categories=System;PackageManager;
+Keywords=install;software;packages;store;pacman;aur;flatpak;
+StartupWMClass=og-apps

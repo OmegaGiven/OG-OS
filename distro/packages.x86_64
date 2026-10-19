@@ -176,3 +176,18 @@ os-prober
 # got excluded here during the phase-3 curation pass as "rescue-disk
 # bloat" without realizing Calamares itself hard-depends on it.
 rsync
+
+# --- Desktop launch targets (added by the launcher audit; see
+# distro/testing/check-launchers.sh, which fails CI when the seed sway
+# config, a .desktop file or an app spawn site names a command no
+# package here provides) ---
+# OG apps the seed config / og-settings / og-bar launch directly:
+og-hotkeys
+og-wallpaper
+og-wallpaper-studio
+# polkit-gnome: graphical auth agent started by the seed config (password
+# prompts for privileged udisks/systemd actions; nothing ran one before).
+polkit-gnome
+# blueman: og-bar's Bluetooth menu (Devices/Adapters/Send files) spawns
+# blueman-manager / blueman-adapters / blueman-sendto.
+blueman

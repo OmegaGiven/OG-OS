@@ -15,7 +15,19 @@
 # aliases for always/off.
 set -euo pipefail
 
-HRIR_DIR="$HOME/.local/src/sway-control/src/assets/hrir"
+# HRIR impulse responses: $OG_HRIR_DIR, else the first that exists of the
+# monorepo checkout (dev), the pre-monorepo checkout (old dev layout), and
+# the packaged location (not shipped yet: redistribution rights for some
+# of the captures are unresolved, see distro/CI.md release blockers).
+HRIR_DIR="${OG_HRIR_DIR:-}"
+if [ -z "$HRIR_DIR" ]; then
+  for d in "$HOME/.local/src/OG-OS/apps/og-settings/src/assets/hrir" \
+           "$HOME/.local/src/sway-control/src/assets/hrir" \
+           /usr/share/og-settings/hrir; do
+    if [ -d "$d" ]; then HRIR_DIR="$d"; break; fi
+  done
+  HRIR_DIR="${HRIR_DIR:-/usr/share/og-settings/hrir}"
+fi
 GRAPH="/usr/share/pipewire/filter-chain/sink-virtual-surround-7.1-hesuvi.conf"
 CONF="$HOME/.config/pipewire/filter-chain.conf.d/og-spatial.conf"
 SINK="effect_input.og-spatial"
@@ -126,7 +138,10 @@ case "${1:-status}" in
     fi
     systemctl --user enable --now "$SVC" 2>/dev/null || {
       pkill -f 'og-spatial-autoroute' 2>/dev/null || true
-      nohup og-spatial-autoroute >/dev/null 2>&1 &
+      # dev build in ~/.local/bin first (not on sway's PATH), else packaged
+      autoroute="$HOME/.local/bin/og-spatial-autoroute"
+      [ -x "$autoroute" ] || autoroute=/usr/bin/og-spatial-autoroute
+      nohup "$autoroute" >/dev/null 2>&1 &
     }
     echo "spatial: $m  ($(cat "$PRESET_F"))  -> $hw"
     ;;

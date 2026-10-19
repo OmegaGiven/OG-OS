@@ -5,7 +5,8 @@ PartOf=pipewire.service
 
 [Service]
 Type=simple
-ExecStart=%h/.local/bin/og-phone-audio
+# Dev build in ~/.local/bin wins, else the packaged /usr/bin copy.
+ExecStart=/bin/sh -c 'b=%h/.local/bin/og-phone-audio; [ -x "$$b" ] || b=/usr/bin/og-phone-audio; exec "$$b"'
 Restart=on-failure
 RestartSec=2
 Slice=session.slice

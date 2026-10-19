@@ -3,9 +3,11 @@ Type=Application
 Name=OG Files
 GenericName=File Manager
 Comment=File manager with built-in viewers and editors
-Exec=og-files %U
-Icon=og-files
+# %F (local paths), not %U: og-files takes plain paths — a file:// URI
+# isn't a path and opened nothing.
+Exec=og-files %F
+Icon=system-file-manager
 Terminal=false
-Categories=System;FileTools;FileManager;Utility;
-MimeType=inode/directory;
+Categories=System;FileTools;FileManager;
+MimeType=inode/directory;image/png;image/jpeg;image/gif;image/webp;image/bmp;image/svg+xml;image/tiff;application/pdf;text/plain;text/markdown;text/csv;video/mp4;video/webm;video/x-matroska;audio/mpeg;audio/flac;audio/ogg;audio/x-wav;application/zip;application/x-tar;application/x-7z-compressed;application/gzip;application/zstd;
 StartupWMClass=og-files

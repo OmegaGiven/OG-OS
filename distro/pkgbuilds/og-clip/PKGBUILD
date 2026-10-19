@@ -34,4 +34,5 @@ build() {
 
 package() {
   install -Dm755 "${CARGO_TARGET_DIR:-$_ogsrc/target}/release/og-clip" "$pkgdir/usr/bin/og-clip"
+  install -Dm644 "$_ogsrc/apps/og-clip/packaging/og-clip.desktop" "$pkgdir/usr/share/applications/og-clip.desktop"
 }

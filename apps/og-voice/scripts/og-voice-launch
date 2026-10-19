@@ -12,10 +12,13 @@
 # regardless.
 #
 # Full path throughout — sway's exec environment doesn't have
-# ~/.local/bin on PATH.
+# ~/.local/bin on PATH. Dev build in ~/.local/bin wins, else the packaged
+# /usr/bin copy (same rule as og_config::og_bin).
+voice="$HOME/.local/bin/og-voice"
+[ -x "$voice" ] || voice=/usr/bin/og-voice
 
 if pgrep -f '/og-voice$' >/dev/null 2>&1; then
-    exec ~/.local/bin/og-voice --start
+    exec "$voice" --start
 fi
 
-exec ~/.local/bin/og-voice
+exec "$voice"

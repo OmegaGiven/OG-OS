@@ -120,7 +120,17 @@ pub fn tailscale_set_exit_node(hostname: Option<&str>) {
 
 // ── Public VPN (WireGuard) ────────────────────────────────────────────────
 
-const HELPER: &str = "/usr/local/bin/og-vpn-apply";
+/// Root-owned helper the `og-vpn` sudoers rule authorizes. Deliberately NOT
+/// resolved through `og_config::og_bin`: a NOPASSWD rule must only ever
+/// point at a package-owned, root-owned path, never at a user-writable
+/// `~/.local/bin` copy. The og-settings package installs it under
+/// /usr/lib (package territory); /usr/local/bin is where older packages
+/// put it, kept as a fallback so existing installs keep working.
+const HELPER_PATHS: [&str; 2] = ["/usr/lib/og-settings/og-vpn-apply", "/usr/local/bin/og-vpn-apply"];
+
+fn helper() -> &'static str {
+    HELPER_PATHS.iter().copied().find(|p| Path::new(p).exists()).unwrap_or(HELPER_PATHS[0])
+}
 
 #[derive(Debug, Clone)]
 pub struct WgConfig {
@@ -150,10 +160,11 @@ struct RawVpnList {
 }
 
 pub fn vpn_state() -> VpnState {
-    if !Path::new(HELPER).exists() {
+    let helper = helper();
+    if !Path::new(helper).exists() {
         return VpnState::default();
     }
-    let Ok(out) = Command::new("sudo").args(["-n", HELPER, "list"]).output() else {
+    let Ok(out) = Command::new("sudo").args(["-n", helper, "list"]).output() else {
         return VpnState { helper_installed: true, ..Default::default() };
     };
     let Ok(raw) = serde_json::from_slice::<RawVpnList>(&out.stdout) else {
@@ -168,7 +179,7 @@ pub fn vpn_state() -> VpnState {
 }
 
 fn run_helper(args: &[&str]) {
-    let _ = Command::new("sudo").arg("-n").arg(HELPER).args(args).output();
+    let _ = Command::new("sudo").arg("-n").arg(helper()).args(args).output();
 }
 
 /// Writes `contents` (a raw wg-quick `.conf`) to `/etc/wireguard/<name>.conf`
@@ -177,7 +188,7 @@ fn run_helper(args: &[&str]) {
 pub fn add_config(name: &str, contents: &str) {
     use std::io::Write;
     if let Ok(mut child) = Command::new("sudo")
-        .args(["-n", HELPER, "add", name])
+        .args(["-n", helper(), "add", name])
         .stdin(std::process::Stdio::piped())
         .spawn()
     {
@@ -251,8 +262,9 @@ pub fn set_app_routed(id: &str, name: &str, routed: bool) {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
+    let helper = helper();
     let content = format!(
-        "[Desktop Entry]\nType=Application\nName={name}\nExec=sudo -n {HELPER} launch {id}\nTerminal=false\nNoDisplay=false\n"
+        "[Desktop Entry]\nType=Application\nName={name}\nExec=sudo -n {helper} launch {id}\nTerminal=false\nNoDisplay=false\n"
     );
     let _ = std::fs::write(&path, content);
     let _ = Command::new("update-desktop-database")

@@ -1,31 +1,217 @@
-# OG-OS seed sway config — deliberately generic defaults, not this
-# project's personal tuning (see OS-PLAN.md's resolved config-split
-# decision: seed defaults + let og-settings' own onboarding import a
-# personal config afterward, don't hardcode the ISO to one machine's
-# bindings).
+# OG-OS seed sway config — the full default desktop every new user starts
+# from (copied out of /etc/skel), mirroring the reference dev setup minus
+# anything personal (monitor layout, personal apps, home paths). See
+# OS-PLAN.md's config-split decision: generic defaults here, og-settings
+# edits from there on (Hotkeys tab rewrites the bindsym lines, other tabs
+# write drop-ins under ~/.config/sway/config.d/).
+#
+# Launch rule: OG-toolkit programs are called by bare name. Packages
+# install them to /usr/bin, which is always on sway's PATH. (Never
+# ~/.local/bin paths here: that's a dev-build location that doesn't exist
+# on a fresh install — og-settings resolves dev builds itself when it
+# writes lines.) distro/testing/check-launchers.sh verifies every command
+# below is shipped by some package in packages.x86_64.
+#
+# Keep distro/airootfs/home/liveuser/.config/sway/config in sync: it is
+# this file verbatim plus a live-session-only block (the checker enforces
+# that too).
 
+### Variables
 set $mod Mod4
+set $left h
+set $down j
+set $up k
+set $right l
 set $term alacritty
+set $menu og-search-launch
+set $filemanager og-files
+set $lock swaylock -f -c 000000
 
+### Appearance
 font pango:sans-serif 10
-
+default_border pixel 2
+default_floating_border pixel 2
+# Fallback until og-settings' wallpaper drop-in (included last) takes over.
 output * bg #1a1b26 solid_color
 
-exec_always og-bar
-exec og-notify
-# og-clip and og-notif-center are on-demand POPUPS, not background
-# daemons -- launching them bare (`exec og-clip`) just pops an empty
-# window open immediately and sway tiles it into the workspace, which
-# is not what we want at startup. og-bar's own clipboard/notification
-# buttons already spawn these on demand via the *-launch wrappers; the
-# only thing that actually needs to run continuously in the background
-# is wl-paste's watcher, which feeds clip history into og-clip's store
-# without ever showing a window.
+### Session startup
+# Export the session environment to systemd --user and D-Bus activation
+# (portals, og-bar's unit, notifications), restart portals that may have
+# started before it was known, then (re)start og-bar as its systemd user
+# unit (crash/resume auto-restart + watchdog). One chain so the unit only
+# starts once the environment it needs is in place; falls back to running
+# og-bar directly if the unit isn't installed.
+exec_always sh -c 'dbus-update-activation-environment --systemd WAYLAND_DISPLAY DISPLAY SWAYSOCK XDG_CURRENT_DESKTOP XDG_SESSION_TYPE; systemctl --user try-restart xdg-desktop-portal.service xdg-desktop-portal-wlr.service; systemctl --user restart og-bar.service || pgrep -U "$(id -u)" -x og-bar >/dev/null || exec og-bar'
+
+# Notifications: mako is the actual org.freedesktop.Notifications server;
+# og-notify is the themed pop-up effects layer on top of it.
+exec mako
+exec --no-startup-id og-notify &
+
+# Graphical password prompts for privileged actions (mounting internal
+# disks in og-files, etc.).
+exec /usr/lib/polkit-gnome/polkit-gnome-authentication-agent-1
+
+# Animated wallpaper: og-wallpaper exits immediately unless og-settings'
+# wallpaper mode is "animated", so it is always safe to launch.
+exec_always sh -c 'pkill -x og-wallpaper; sleep 0.2; exec og-wallpaper'
+
+# Idle/lock/sleep: og-power-apply (re)spawns swayidle from og-settings'
+# Power tab settings (defaults when nothing is saved yet: screen off after
+# 15 minutes, no auto-lock, no auto-suspend).
+exec_always og-power-apply
+
+# og-clip and og-notif-center are on-demand popups, not daemons — og-bar's
+# buttons and the binds below open them. Only the clipboard watchers run
+# in the background, feeding og-clip's history without showing a window.
 exec wl-paste --type text --watch og-clip --store-text
 exec wl-paste --type image/png --watch og-clip --store-image
 
-# Live-session only (not carried into etc/skel for the installed system):
-# auto-launch the graphical installer, matching how most public live-ISO
+### Window rules (popups and dialogs the OG apps expect to float)
+for_window [app_id="og-search"] floating enable, resize set 900 550, move position center, border none
+for_window [app_id="og-clip"] floating enable, resize set 560 560, move position center, border none
+for_window [app_id="og-notif-center"] floating enable, resize set 560 560, border none
+for_window [app_id="og-hotkeys"] floating enable, resize set 640 700, move position center, border none
+for_window [app_id="og-voice"] floating enable, border none
+for_window [app_id="og-settings"] floating enable, resize set 1100 720, move position center
+for_window [app_id="og-apps"] floating enable, resize set 1000 700, move position center
+for_window [window_role="pop-up"] floating enable
+for_window [window_role="dialog"] floating enable
+for_window [window_type="dialog"] floating enable
+
+# Drag floating windows with $mod + left mouse, resize with $mod + right.
+floating_modifier $mod normal
+
+### Resize mode
+mode "resize" {
+    bindsym $left resize shrink width 10px
+    bindsym $down resize grow height 10px
+    bindsym $up resize shrink height 10px
+    bindsym $right resize grow width 10px
+    bindsym Left resize shrink width 10px
+    bindsym Down resize grow height 10px
+    bindsym Up resize shrink height 10px
+    bindsym Right resize grow width 10px
+    bindsym Return mode "default"
+    bindsym Escape mode "default"
+}
+
+include /etc/sway/config.d/*
+
+# og-settings managed drop-ins (outputs, wallpaper, appearance, input) —
+# keep this after everything they may override.
+include ~/.config/sway/config.d/*.conf
+
+### Key bindings
+# OG toolkit
+bindsym $mod+d exec $menu
+bindsym $mod+e exec $filemanager
+bindsym $mod+Shift+v exec og-clip
+bindsym $mod+n exec og-notif-center-launch
+bindsym $mod+slash exec og-hotkeys
+bindsym $mod+m exec swaymsg '[app_id="og-settings"] focus' >/dev/null 2>&1 || og-settings
+bindsym ctrl+alt+Delete exec og-settings
+bindsym $mod+a exec og-settings --tab audio
+
+# Apps and session
+bindsym $mod+Return exec $term
+bindsym $mod+q kill
+bindsym $mod+Shift+q kill
+bindsym $mod+Escape exec $lock
+bindsym $mod+c reload
+bindsym $mod+Shift+c reload
+bindsym $mod+Shift+e exec swaynag -t warning -m 'Exit sway? This ends your Wayland session.' -B 'Yes, exit sway' 'swaymsg exit'
+
+# Focus
+bindsym $mod+$left focus left
+bindsym $mod+$down focus down
+bindsym $mod+$up focus up
+bindsym $mod+$right focus right
+bindsym $mod+Left focus left
+bindsym $mod+Down focus down
+bindsym $mod+Up focus up
+bindsym $mod+Right focus right
+bindsym $mod+space focus mode_toggle
+
+# Move windows
+bindsym $mod+Shift+$left move left
+bindsym $mod+Shift+$down move down
+bindsym $mod+Shift+$up move up
+bindsym $mod+Shift+$right move right
+bindsym $mod+Shift+Left move left
+bindsym $mod+Shift+Down move down
+bindsym $mod+Shift+Up move up
+bindsym $mod+Shift+Right move right
+bindsym $mod+Alt+Left move left
+bindsym $mod+Alt+Down move down
+bindsym $mod+Alt+Up move up
+bindsym $mod+Alt+Right move right
+
+# Workspaces
+bindsym $mod+1 workspace number 1
+bindsym $mod+2 workspace number 2
+bindsym $mod+3 workspace number 3
+bindsym $mod+4 workspace number 4
+bindsym $mod+5 workspace number 5
+bindsym $mod+6 workspace number 6
+bindsym $mod+7 workspace number 7
+bindsym $mod+8 workspace number 8
+bindsym $mod+9 workspace number 9
+bindsym $mod+0 workspace number 10
+bindsym $mod+Shift+1 move container to workspace number 1
+bindsym $mod+Shift+2 move container to workspace number 2
+bindsym $mod+Shift+3 move container to workspace number 3
+bindsym $mod+Shift+4 move container to workspace number 4
+bindsym $mod+Shift+5 move container to workspace number 5
+bindsym $mod+Shift+6 move container to workspace number 6
+bindsym $mod+Shift+7 move container to workspace number 7
+bindsym $mod+Shift+8 move container to workspace number 8
+bindsym $mod+Shift+9 move container to workspace number 9
+bindsym $mod+Shift+0 move container to workspace number 10
+bindsym $mod+Alt+1 move container to workspace number 1
+bindsym $mod+Alt+2 move container to workspace number 2
+bindsym $mod+Alt+3 move container to workspace number 3
+bindsym $mod+Alt+4 move container to workspace number 4
+bindsym $mod+Alt+5 move container to workspace number 5
+bindsym $mod+Alt+6 move container to workspace number 6
+bindsym $mod+Alt+7 move container to workspace number 7
+bindsym $mod+Alt+8 move container to workspace number 8
+bindsym $mod+Alt+9 move container to workspace number 9
+bindsym $mod+Alt+0 move container to workspace number 10
+
+# Layout
+bindsym $mod+b splith
+bindsym $mod+v splitv
+bindsym $mod+s layout stacking
+bindsym $mod+w layout tabbed
+bindsym $mod+t layout toggle split
+bindsym $mod+f fullscreen
+bindsym $mod+x floating toggle
+bindsym $mod+Shift+space floating toggle
+bindsym $mod+r mode "resize"
+
+# Scratchpad
+bindsym $mod+Shift+minus move scratchpad
+bindsym $mod+minus scratchpad show
+
+# Media keys (work on the lock screen too)
+bindsym --locked XF86AudioMute exec pactl set-sink-mute \@DEFAULT_SINK@ toggle
+bindsym --locked XF86AudioLowerVolume exec pactl set-sink-volume \@DEFAULT_SINK@ -5%
+bindsym --locked XF86AudioRaiseVolume exec pactl set-sink-volume \@DEFAULT_SINK@ +5%
+bindsym --locked XF86AudioMicMute exec pactl set-source-mute \@DEFAULT_SOURCE@ toggle
+bindsym --locked XF86MonBrightnessDown exec brightnessctl set 5%-
+bindsym --locked XF86MonBrightnessUp exec brightnessctl set 5%+
+
+# Screenshots (saved to $XDG_SCREENSHOTS_DIR / ~/Pictures, or clipboard)
+bindsym Print exec grimshot save screen
+bindsym $mod+Print exec grimshot save output
+bindsym $mod+p exec grimshot save active
+bindsym $mod+Alt+s exec grimshot copy area
+bindsym $mod+Shift+s exec grimshot save area
+
+### Live session only — everything above is etc/skel/.config/sway/config
+### verbatim (check-launchers.sh enforces it); only this block differs.
+# Auto-launch the graphical installer, matching how most public live-ISO
 # distros greet a fresh user. liveuser has NOPASSWD wheel sudo, so `sudo`
 # runs headless with no polkit agent needed. install-ogos.sh remains
 # available as a manual/power-user fallback (run from a terminal).
@@ -38,31 +224,4 @@ exec wl-paste --type image/png --watch og-clip --store-image
 # static (1000, see airootfs/etc/passwd) so /run/user/1000 is fixed;
 # WAYLAND_DISPLAY is captured from sway's own env before sudo strips it.
 exec sh -c 'sudo env XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY="$WAYLAND_DISPLAY" QT_QPA_PLATFORM=wayland calamares'
-
-bindsym $mod+Return exec $term
 bindsym $mod+i exec sh -c 'sudo env XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY="$WAYLAND_DISPLAY" QT_QPA_PLATFORM=wayland calamares'
-bindsym $mod+d exec og-search-launch
-bindsym $mod+n exec og-notif-center-launch
-bindsym $mod+v exec og-clip
-bindsym $mod+Shift+q kill
-bindsym $mod+Shift+c reload
-bindsym $mod+Shift+e exec swaynag -t warning -m 'Exit sway?' -B 'Yes' 'swaymsg exit'
-
-bindsym $mod+Left focus left
-bindsym $mod+Right focus right
-bindsym $mod+Up focus up
-bindsym $mod+Down focus down
-
-bindsym $mod+1 workspace number 1
-bindsym $mod+2 workspace number 2
-bindsym $mod+3 workspace number 3
-bindsym $mod+4 workspace number 4
-bindsym $mod+Shift+1 move container to workspace number 1
-bindsym $mod+Shift+2 move container to workspace number 2
-bindsym $mod+Shift+3 move container to workspace number 3
-bindsym $mod+Shift+4 move container to workspace number 4
-
-bindsym $mod+f fullscreen
-bindsym $mod+Shift+space floating toggle
-
-include /etc/sway/config.d/*

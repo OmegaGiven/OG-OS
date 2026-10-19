@@ -63,7 +63,10 @@ pub fn launch_app(config: &Config, exec: &str) {
     if in_terminal {
         let _ = Command::new(terminal(config)).arg("-e").args(&parts).spawn();
     } else {
-        let _ = Command::new(parts[0]).args(&parts[1..]).spawn();
+        // og_bin: a desktop entry's bare `Exec=og-files` must still reach
+        // a dev build in ~/.local/bin (not on sway's PATH); anything else
+        // falls through to the bare name and PATH lookup as before.
+        let _ = Command::new(og_config::og_bin(parts[0])).args(&parts[1..]).spawn();
     }
 }
 
@@ -75,11 +78,9 @@ pub fn open_file(path: &std::path::Path) {
 }
 
 /// Settings-search result: jump straight to the matching og-settings tab.
-/// Absolute path, not bare "og-settings" — sway's own process environment
-/// has no ~/.local/bin on PATH (same bug class fixed earlier for
-/// og-power-apply), and every og-settings launch elsewhere in this
-/// toolkit already uses the full path for exactly that reason.
+/// Resolved through `og_config::og_bin` (dev build in ~/.local/bin first,
+/// then /usr/bin) — og-search's own environment comes from sway's, which
+/// has no ~/.local/bin on PATH, and a packaged install has nothing there.
 pub fn open_settings_tab(tab_arg: &str) {
-    let home = std::env::var("HOME").unwrap_or_default();
-    let _ = Command::new(format!("{home}/.local/bin/og-settings")).arg("--tab").arg(tab_arg).spawn();
+    let _ = og_config::og_command("og-settings").arg("--tab").arg(tab_arg).spawn();
 }

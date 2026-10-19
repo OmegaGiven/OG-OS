@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=OG Hotkeys
+GenericName=Keyboard Shortcuts
+Comment=Cheatsheet of the current sway keybindings
+Exec=og-hotkeys
+Icon=preferences-desktop-keyboard-shortcuts
+Terminal=false
+Categories=Utility;
+Keywords=keybindings;shortcuts;hotkeys;keys;cheatsheet;
+StartupWMClass=og-hotkeys

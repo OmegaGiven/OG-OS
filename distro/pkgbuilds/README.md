@@ -22,19 +22,34 @@ state silently diverging from the packaged binary.
 locally (single "Initial commit") so the same `git+file://` pattern
 applies uniformly across all 9. No GitHub remote for those two yet.
 
-## Repos packaged (9)
+## Packaged
 
 `og-bar`, `og-settings` (repo: sway-control), `og-search` (repo:
 omegagiven-search), `og-clip`, `og-notif-center`, `og-notify`, `og-apps`
 (repo: app-store), `og-files` (repo: file-manager), `og-links` (repo:
-galias).
+galias), `og-scripts` (glue scripts), and — since the seed sway config
+and og-settings launch them — `og-hotkeys`, `og-wallpaper`,
+`og-wallpaper-studio`.
+
+Install-layout rules every package follows (checked by
+`../testing/check-launchers.py` in CI):
+
+- binaries and helper scripts go to `/usr/bin`; apps find each other via
+  `og_config::og_bin` (a `~/.local/bin` dev build wins, else `/usr/bin`),
+  so nothing may hardcode `~/.local/bin`
+- user-facing apps install `/usr/share/applications/<app>.desktop`
+  (sources under `apps/<app>/packaging/`)
+- systemd user units go to `/usr/lib/systemd/user`; their `ExecStart`
+  prefers `%h/.local/bin/<bin>` and falls back to `/usr/bin/<bin>`
+- anything a NOPASSWD sudoers rule names lives under `/usr/lib/<pkg>/`,
+  root-owned, mode 750 (og-settings' `og-vpn-apply`)
 
 **Not packaged yet**: `og-note` (Tauri+Svelte+npm, not a plain cargo
-build — needs its own PKGBUILD approach with webkit2gtk, out of scope
-for this batch), `og-hotkeys` / `og-wallpaper` / `og-wallpaper-studio`
-(exist and build fine, but weren't in `BASE-PACKAGES.md`'s original
-10-package OG-suite base list — add PKGBUILDs for these later if they
-get promoted into base).
+build — needs its own PKGBUILD approach with webkit2gtk), `og-voice`
+(needs the faster-whisper STT venv and an AI CLI; not bound by the seed
+config), `og-phone-audio` (the phone side is an Android APK CI can't
+build yet), og-settings' `spatial`/`og-spatial-autoroute` (HRIR
+licensing, see `../CI.md`).
 
 ## Build order
 
@@ -44,10 +59,11 @@ app's PKGBUILD instead.
 
 Each app PKGBUILD is independent (all pull their own `OG-toolkit`
 snapshot at build time), so there's no cross-package build order — build
-any/all of the 9 in any order:
+any/all of them in any order (og-bar now depends on og-scripts, so install
+og-scripts first when using `-si`):
 
 ```sh
-for d in og-bar og-settings og-search og-clip og-notif-center og-notify og-apps og-files og-links; do
+for d in og-scripts og-bar og-settings og-search og-clip og-notif-center og-notify og-apps og-files og-links og-hotkeys og-wallpaper og-wallpaper-studio; do
   (cd "$d" && makepkg -si --noconfirm)
 done
 ```

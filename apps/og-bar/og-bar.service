@@ -7,7 +7,10 @@ StartLimitIntervalSec=0
 
 [Service]
 Type=simple
-ExecStart=%h/.local/bin/og-bar
+# Dev build in ~/.local/bin wins, else the packaged /usr/bin copy (same
+# rule as og_config::og_bin) — one unit file for both layouts. `exec` keeps
+# og-bar itself as the main PID, which NotifyAccess=main/WatchdogSec need.
+ExecStart=/bin/sh -c 'b=%h/.local/bin/og-bar; [ -x "$$b" ] || b=/usr/bin/og-bar; exec "$$b"'
 # Layer-shell clients are fragile across DPMS/suspend/output hotplug; if the
 # bar dies (crash on resume, Wayland disconnect) bring it straight back.
 Restart=always

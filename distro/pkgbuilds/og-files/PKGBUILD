@@ -47,4 +47,8 @@ build() {
 
 package() {
   install -Dm755 "${CARGO_TARGET_DIR:-$_ogsrc/target}/release/og-files" "$pkgdir/usr/bin/og-files"
+  # Desktop entry: app menus, og-search and open-with find it through this,
+  # and it's the system default for folders and viewable files
+  # (distro/airootfs/etc/xdg/mimeapps.list).
+  install -Dm644 "$_ogsrc/apps/og-files/packaging/linux/og-files.desktop" "$pkgdir/usr/share/applications/og-files.desktop"
 }

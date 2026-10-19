@@ -16,7 +16,9 @@ pkgdesc="OG-toolkit themed notification pop-up effects layer"
 arch=('x86_64')
 url="https://github.com/OmegaGiven/OG-OS"
 license=('MIT')
-depends=('gcc-libs' 'wayland')
+# mako: the org.freedesktop.Notifications server whose calls og-notify
+# watches (it is an effects layer, not a notification daemon itself).
+depends=('gcc-libs' 'wayland' 'mako')
 makedepends=('cargo')
 # No split -debug package: its RUSTFLAGS path remap differs per package,
 # which would make every package rebuild the shared cargo target from

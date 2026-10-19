@@ -1,0 +1,38 @@
+# Maintainer: OmegaGiven
+# OG Hotkeys (apps/og-hotkeys): keybinding cheatsheet popup, parsed live
+# from ~/.config/sway/config. Bound to $mod+slash in the seed sway config,
+# so it has to ship with the base system. Same one-cargo-build pattern as
+# the other workspace PKGBUILDs (see ../workspace-apps).
+pkgname=og-hotkeys
+# Source tree: $OGOS_SRC if set (CI sets it to the checked-out commit),
+# else the repo this PKGBUILD lives in. Version: $OGOS_PKGVER if set (CI
+# derives a monotonic one from git), else the static fallback below.
+_ogsrc="${OGOS_SRC:-$(cd "$startdir/../../.." && pwd)}"
+pkgver="${OGOS_PKGVER:-20260908}"
+pkgrel=1
+pkgdesc="OG-toolkit keybinding cheatsheet (reads the live sway config)"
+arch=('x86_64')
+url="https://github.com/OmegaGiven/OG-OS"
+license=('MIT')
+depends=('gcc-libs' 'wayland' 'ttf-nerd-fonts-symbols')
+makedepends=('cargo')
+# No split -debug package: its RUSTFLAGS path remap differs per package,
+# which would make every package rebuild the shared cargo target from
+# scratch (and build-repo.sh drops -debug packages anyway).
+options=('!debug')
+source=()
+
+build() {
+  # Builds every packaged app (../workspace-apps) straight from the source
+  # tree in one go: all og-* packages share that one build (and, via
+  # build-repo.sh, one CARGO_TARGET_DIR), so the 2nd..nth are no-ops.
+  local apps=()
+  mapfile -t apps < <(grep -v '^#' "$startdir/../workspace-apps")
+  cd "$_ogsrc"
+  cargo build --release --locked "${apps[@]/#/--package=}"
+}
+
+package() {
+  install -Dm755 "${CARGO_TARGET_DIR:-$_ogsrc/target}/release/og-hotkeys" "$pkgdir/usr/bin/og-hotkeys"
+  install -Dm644 "$_ogsrc/apps/og-hotkeys/packaging/og-hotkeys.desktop" "$pkgdir/usr/share/applications/og-hotkeys.desktop"
+}

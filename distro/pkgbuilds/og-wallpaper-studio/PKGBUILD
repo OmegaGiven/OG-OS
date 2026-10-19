@@ -1,0 +1,39 @@
+# Maintainer: OmegaGiven
+# OG Wallpaper Studio (apps/og-wallpaper-studio): editor for og-wallpaper's
+# animated themes, opened from og-settings' Theme tab ("Open Wallpaper
+# Studio") and from app menus. Same one-cargo-build pattern as the other
+# workspace PKGBUILDs (see ../workspace-apps).
+pkgname=og-wallpaper-studio
+# Source tree: $OGOS_SRC if set (CI sets it to the checked-out commit),
+# else the repo this PKGBUILD lives in. Version: $OGOS_PKGVER if set (CI
+# derives a monotonic one from git), else the static fallback below.
+_ogsrc="${OGOS_SRC:-$(cd "$startdir/../../.." && pwd)}"
+pkgver="${OGOS_PKGVER:-20260908}"
+pkgrel=1
+pkgdesc="OG-toolkit animated wallpaper editor"
+arch=('x86_64')
+url="https://github.com/OmegaGiven/OG-OS"
+license=('MIT')
+depends=('gcc-libs' 'wayland' 'vulkan-icd-loader')
+optdepends=('og-wallpaper: show the themes made here as the desktop background')
+makedepends=('cargo')
+# No split -debug package: its RUSTFLAGS path remap differs per package,
+# which would make every package rebuild the shared cargo target from
+# scratch (and build-repo.sh drops -debug packages anyway).
+options=('!debug')
+source=()
+
+build() {
+  # Builds every packaged app (../workspace-apps) straight from the source
+  # tree in one go: all og-* packages share that one build (and, via
+  # build-repo.sh, one CARGO_TARGET_DIR), so the 2nd..nth are no-ops.
+  local apps=()
+  mapfile -t apps < <(grep -v '^#' "$startdir/../workspace-apps")
+  cd "$_ogsrc"
+  cargo build --release --locked "${apps[@]/#/--package=}"
+}
+
+package() {
+  install -Dm755 "${CARGO_TARGET_DIR:-$_ogsrc/target}/release/og-wallpaper-studio" "$pkgdir/usr/bin/og-wallpaper-studio"
+  install -Dm644 "$_ogsrc/apps/og-wallpaper-studio/packaging/og-wallpaper-studio.desktop" "$pkgdir/usr/share/applications/og-wallpaper-studio.desktop"
+}

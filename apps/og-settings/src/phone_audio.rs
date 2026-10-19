@@ -154,7 +154,9 @@ pub fn state() -> PhoneState {
         RelayStatus::default()
     };
     PhoneState {
-        installed: crate::config::dirs_home().join(".local/bin/og-phone-audio").exists(),
+        // og_bin only returns an absolute path when the binary exists
+        // (~/.local/bin dev build or /usr/bin package).
+        installed: og_config::og_bin("og-phone-audio").is_absolute(),
         running,
         enabled: systemctl(&["is-enabled", "--quiet", SERVICE]),
         status,

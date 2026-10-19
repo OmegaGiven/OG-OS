@@ -16,7 +16,8 @@ pkgdesc="OG-toolkit notification history popup"
 arch=('x86_64')
 url="https://github.com/OmegaGiven/OG-OS"
 license=('MIT')
-depends=('gcc-libs' 'wayland')
+# mako: makoctl (history, dismiss, do-not-disturb); wl-clipboard: copy.
+depends=('gcc-libs' 'wayland' 'mako' 'wl-clipboard')
 makedepends=('cargo')
 # No split -debug package: its RUSTFLAGS path remap differs per package,
 # which would make every package rebuild the shared cargo target from
@@ -36,4 +37,5 @@ build() {
 
 package() {
   install -Dm755 "${CARGO_TARGET_DIR:-$_ogsrc/target}/release/og-notif-center" "$pkgdir/usr/bin/og-notif-center"
+  install -Dm644 "$_ogsrc/apps/og-notif-center/packaging/og-notif-center.desktop" "$pkgdir/usr/share/applications/og-notif-center.desktop"
 }

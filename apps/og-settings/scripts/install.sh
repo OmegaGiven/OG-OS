@@ -15,7 +15,7 @@ mv -f "$tmp" "$dest"
 
 echo "Installed $dest"
 
-for script in runtime/og-power-apply runtime/og-controller-idle-watch; do
+for script in runtime/og-power-apply runtime/og-controller-idle-watch runtime/og-opacity-apply; do
     name="$(basename "$script")"
     dest="$HOME/.local/bin/$name"
     tmp="${dest}.new"

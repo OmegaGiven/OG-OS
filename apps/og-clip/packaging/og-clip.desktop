@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=OG Clipboard
+GenericName=Clipboard History
+Comment=Browse and re-copy clipboard history (text and images)
+Exec=og-clip
+Icon=edit-paste
+Terminal=false
+Categories=Utility;
+Keywords=clipboard;history;copy;paste;
+StartupWMClass=og-clip

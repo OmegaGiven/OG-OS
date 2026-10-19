@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=OG Settings
+GenericName=Settings
+Comment=Theme, display, audio, network, power and keyboard settings for OG-OS
+Exec=og-settings
+Icon=preferences-system
+Terminal=false
+Categories=Settings;DesktopSettings;
+Keywords=settings;preferences;control panel;theme;display;audio;network;bluetooth;power;hotkeys;
+StartupWMClass=og-settings

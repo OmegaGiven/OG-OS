@@ -25,6 +25,18 @@ of the earlier flakiness is understood and fixed (see below).
   monitor for human review.
 - `test_calamares_install.py` — a concrete test script that logs in
   and clicks through Calamares' full install flow.
+- `check-launchers.py` — static, runs in CI (`ci.yml`): every program
+  the seed sway config, the apps' spawn sites (`Command::new`,
+  `og_config::og_bin`, og-bar launchers) and the shipped `.desktop` files
+  run must come from a package `packages.x86_64` ships; no code may
+  hardcode `~/.local/bin` without a `/usr/bin` fallback; NOPASSWD
+  sudoers rules may only name package-owned root files; the live-session
+  sway config must be the seed config plus its own block.
+- `headless-launch-test.sh` — runtime, local only (needs sway): private
+  headless sway on a fresh HOME with no `~/.local/bin`, fires every
+  startup exec and keybinding of the seed config through sway and checks
+  each reached its program (stubs stand in for `/usr/bin`; never touches
+  the caller's session).
 
 ## The bug, and the fix (this took a long time to find)
 

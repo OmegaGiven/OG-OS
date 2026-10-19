@@ -4,10 +4,18 @@
 # coordinated with it via og-popup-escape-guard so the shared Escape bind
 # only actually releases once neither popup is open anymore.
 #
-# Full paths throughout, not bare names — sway's exec environment doesn't
-# have ~/.local/bin on PATH.
-/usr/bin/og-popup-escape-guard acquire
+# Programs are resolved like og_config::og_bin: a dev build in
+# ~/.local/bin wins, else the packaged /usr/bin copy (always a full path —
+# sway's exec environment has no ~/.local/bin on PATH, and the guard's
+# `pgrep -f '/og-notif-center$'` needs the slash).
+og_bin() {
+    if [ -x "$HOME/.local/bin/$1" ]; then echo "$HOME/.local/bin/$1"
+    elif [ -x "/usr/bin/$1" ]; then echo "/usr/bin/$1"
+    else command -v "$1" || echo "/usr/bin/$1"; fi
+}
 
-/usr/bin/og-notif-center
+"$(og_bin og-popup-escape-guard)" acquire
 
-/usr/bin/og-popup-escape-guard release
+"$(og_bin og-notif-center)"
+
+"$(og_bin og-popup-escape-guard)" release

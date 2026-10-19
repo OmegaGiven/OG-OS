@@ -37,7 +37,7 @@ export OGOS_PKGVER
 # yay/calamares are third-party builds whose own PKGBUILD sources pull
 # upstream release tarballs; the loop below is the same for them.
 # calamares is a real C++/Qt6 build — expect it to dominate build time.
-DEFAULT_PACKAGES="og-settings og-apps og-bar og-clip og-files og-notif-center og-notify og-search og-links og-scripts yay calamares"
+DEFAULT_PACKAGES="og-settings og-apps og-bar og-clip og-files og-hotkeys og-notif-center og-notify og-search og-wallpaper og-wallpaper-studio og-links og-scripts yay calamares"
 read -r -a PACKAGES <<< "${OGOS_PACKAGES:-$DEFAULT_PACKAGES}"
 
 SIGN_ARGS=()
