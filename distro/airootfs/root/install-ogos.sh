@@ -239,11 +239,12 @@ pacstrap -K -C "$INSTALL_PACMAN_CONF" /mnt \
     sway sway-contrib swaybg swayidle swaylock lightdm lightdm-gtk-greeter \
     polkit xorg-xwayland xdg-desktop-portal-wlr xdg-desktop-portal-gtk xdg-utils \
     og-bar og-settings og-search og-clip og-notif-center og-notify og-files \
-    og-links og-apps og-scripts \
+    og-links og-apps og-scripts og-hotkeys og-wallpaper og-wallpaper-studio \
+    polkit-gnome blueman \
     ttf-nerd-fonts-symbols ttf-nerd-fonts-symbols-common wl-clipboard grim slurp \
     noto-fonts noto-fonts-emoji ttf-liberation \
     alacritty mako \
-    pipewire-alsa pipewire-jack pipewire-pulse alsa-utils alsa-firmware sof-firmware \
+    pipewire-alsa pipewire-jack pipewire-pulse wireplumber alsa-utils alsa-firmware sof-firmware \
     bluez bluez-utils iwd wireless_tools openssh tailscale wireguard-tools \
     mesa-utils vulkan-tools vulkan-intel vulkan-radeon vulkan-nouveau \
     libva-intel-driver intel-media-driver libva-utils \
@@ -262,6 +263,8 @@ genfstab -U /mnt >> /mnt/etc/fstab
 # sway silently falls back to its own stock default session).
 mkdir -p /mnt/etc/skel/.config/sway
 cp /etc/skel/.config/sway/config /mnt/etc/skel/.config/sway/config
+# default apps (og-files for folders, images, PDFs, media, archives)
+install -Dm644 /etc/xdg/mimeapps.list /mnt/etc/xdg/mimeapps.list
 
 # XKB layout for the graphical session. Console keymap names
 # ("us"/"de"/"fr"/"se"/...) and XKB layout codes mostly agree for the

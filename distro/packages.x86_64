@@ -97,6 +97,7 @@ alacritty
 pipewire-alsa
 pipewire-jack
 pipewire-pulse
+wireplumber
 alsa-utils
 alsa-firmware
 sof-firmware
