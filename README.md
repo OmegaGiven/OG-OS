@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="distro/branding/ogos-icon.png" alt="OG-OS icon" width="160" height="160" />
+</p>
+
 # OG-OS
 
 An Arch-based Linux distribution built around a lightweight Sway desktop
