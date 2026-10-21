@@ -1,12 +1,19 @@
 # Mac App Store build
 
-`.github/workflows/appstore.yml` (Actions > **Mac App Store** > Run
-workflow) builds a universal app with `--no-default-features --features
-appstore`, signs it, packages a signed `.pkg`, validates it with Apple and
-uploads it to App Store Connect (TestFlight), unless "upload" is off. It
-never submits for review. The version must match the version being
-prepared in App Store Connect; the build number is the run number, so it
-always grows.
+Automatic: every release (`release.yml`, which runs when `main` carries a
+version in Cargo.toml that has no GitHub Release yet) also runs
+`.github/workflows/appstore.yml`. It builds a universal app with
+`--no-default-features --features appstore`, signs it, packages a signed
+`.pkg`, validates and uploads it to App Store Connect (TestFlight), makes
+sure the macOS App Store version matching Cargo.toml exists (renaming the
+one still being prepared, or creating the next one, which copies the
+listing) and attaches the build once Apple has processed it (`asc.py`).
+It never submits for review: press "Add for Review" in App Store Connect.
+Until the signing secrets below exist, the job is skipped with a notice.
+It can also be run by hand (Actions > Mac App Store > Run workflow). The
+build number is the UTC date and time, so it always grows.
+
+To release: bump `version` in `Cargo.toml` and push to `main`.
 
 What's different from the direct-download build:
 - **Sandboxed** (`OGFiles.entitlements`). Folders are read only after the

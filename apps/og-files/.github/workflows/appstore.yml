@@ -1,20 +1,33 @@
 name: Mac App Store
 
-# Run by hand (Actions > Mac App Store > Run workflow): builds OG Files for
-# Apple silicon and Intel with `--features appstore` (sandboxed, no libmpv or
-# FFmpeg: video plays through AVFoundation), signs it with the Apple
-# Distribution certificate, wraps it in a .pkg signed with the Mac Installer
-# certificate, validates it with Apple and (unless "upload" is off) uploads
-# it to App Store Connect, where it shows up in TestFlight. Never submits for
-# review. Secrets: see packaging/macos/appstore/README.md.
+# Builds OG Files for Apple silicon and Intel with `--features appstore`
+# (sandboxed, no libmpv or FFmpeg: video plays through AVFoundation), signs
+# it with the Apple Distribution certificate, wraps it in a .pkg signed with
+# the Mac Installer certificate, validates it and uploads it to App Store
+# Connect (TestFlight). Then makes sure the App Store version matching the
+# app's version exists and attaches the build once Apple has processed it.
+# Never submits for review.
+#
+# Runs automatically from release.yml for every release, or by hand
+# (Actions > Mac App Store > Run workflow). Skips (with a notice) until the
+# signing secrets exist; see packaging/macos/appstore/README.md.
 on:
+  workflow_call:
+    inputs:
+      version:
+        description: "Marketing version (default: the version in Cargo.toml)"
+        type: string
+        default: ""
+      upload:
+        type: boolean
+        default: true
   workflow_dispatch:
     inputs:
       version:
-        description: Marketing version (must match the version in App Store Connect)
-        default: "1.0"
+        description: "Marketing version (empty = the version in Cargo.toml)"
+        default: ""
       upload:
-        description: Upload to App Store Connect (off = build, sign and validate only)
+        description: "Upload to App Store Connect (off = build, sign and validate only)"
         type: boolean
         default: true
 
@@ -22,7 +35,29 @@ permissions:
   contents: read
 
 jobs:
+  secrets:
+    name: Signing secrets present?
+    runs-on: ubuntu-latest
+    outputs:
+      ok: ${{ steps.check.outputs.ok }}
+    steps:
+      - id: check
+        env:
+          DIST: ${{ secrets.APPLE_DIST_CERTIFICATE }}
+          INST: ${{ secrets.APPLE_INSTALLER_CERTIFICATE }}
+          PROFILE: ${{ secrets.APPLE_MAC_PROVISIONING_PROFILE }}
+          KEY: ${{ secrets.APPLE_API_KEY }}
+        run: |
+          if [ -n "$DIST" ] && [ -n "$INST" ] && [ -n "$PROFILE" ] && [ -n "$KEY" ]; then
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::Mac App Store upload skipped: signing secrets not set (packaging/macos/appstore/README.md)"
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+          fi
+
   appstore:
+    needs: secrets
+    if: needs.secrets.outputs.ok == 'true'
     runs-on: macos-latest
     env:
       APP: dist/OG Files.app
@@ -32,6 +67,15 @@ jobs:
         with:
           targets: aarch64-apple-darwin,x86_64-apple-darwin
       - uses: Swatinem/rust-cache@v2
+
+      - name: Version and build number
+        run: |
+          V="${{ inputs.version }}"
+          [ -n "$V" ] || V=$(cargo pkgid | sed 's/.*[#@]//')
+          echo "VERSION=$V" >> "$GITHUB_ENV"
+          # must grow with every upload, across all workflows
+          echo "BUILD=$(date -u +%y%m%d).$(date -u +%H%M)" >> "$GITHUB_ENV"
+          echo "OG Files $V build $(date -u +%y%m%d).$(date -u +%H%M)"
 
       - name: Build (universal, App Store variant)
         env:
@@ -79,7 +123,7 @@ jobs:
             echo "::error::the App Store binary links libmpv/FFmpeg"; exit 1
           fi
           # The build number must grow with every upload.
-          sed -e "s/__VERSION__/${{ inputs.version }}/" -e "s/__BUILD__/${{ github.run_number }}/" \
+          sed -e "s/__VERSION__/$VERSION/" -e "s/__BUILD__/$BUILD/" \
             packaging/macos/appstore/Info.plist.in > "$APP/Contents/Info.plist"
           printf 'APPL????' > "$APP/Contents/PkgInfo"
           cp packaging/macos/appstore/PrivacyInfo.xcprivacy "$APP/Contents/Resources/"
@@ -147,3 +191,14 @@ jobs:
           if [ "${{ inputs.upload }}" = "true" ]; then
             xcrun altool --upload-app -f OGFiles-appstore.pkg -t macos --apiKey "$KEY_ID" --apiIssuer "$ISSUER"
           fi
+
+      - name: App Store version and build
+        if: inputs.upload
+        env:
+          ASC_KEY: ${{ secrets.APPLE_API_KEY }}
+          ASC_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          ASC_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+        run: |
+          pip3 install --quiet --break-system-packages pyjwt cryptography
+          python3 packaging/macos/appstore/asc.py ensure-version "$VERSION"
+          python3 packaging/macos/appstore/asc.py attach-build "$VERSION" --wait 45
