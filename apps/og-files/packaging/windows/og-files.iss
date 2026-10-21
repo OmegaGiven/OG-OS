@@ -10,6 +10,13 @@
 #ifndef Arch
   #define Arch "x64"
 #endif
+; Inno's architecture identifiers: x64 has an emulation-aware
+; "x64compatible"; ARM64 is just "arm64"
+#if Arch == "arm64"
+  #define ArchId "arm64"
+#else
+  #define ArchId "x64compatible"
+#endif
 #ifndef SrcDir
   #define SrcDir "..\..\dist\stage"
 #endif
@@ -27,8 +34,8 @@ DefaultGroupName=OG Files
 DisableProgramGroupPage=yes
 PrivilegesRequired=lowest
 PrivilegesRequiredOverridesAllowed=dialog
-ArchitecturesAllowed={#Arch}compatible
-ArchitecturesInstallIn64BitMode={#Arch}compatible
+ArchitecturesAllowed={#ArchId}
+ArchitecturesInstallIn64BitMode={#ArchId}
 LicenseFile={#SrcDir}\LICENSE.txt
 SetupIconFile={#SrcDir}\og-files.ico
 UninstallDisplayIcon={app}\og-files.exe
