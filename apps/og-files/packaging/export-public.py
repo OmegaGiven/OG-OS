@@ -85,6 +85,12 @@ def standalone_toml(src: str) -> str:
             line = "default = [" + ", ".join(f'"{f}"' for f in feats) + "]"
         out.append(line)
     text = "\n".join(out) + "\n"
+    # the monorepo patches winit at the workspace root; standalone, here
+    text += (
+        "\n[patch.crates-io]\n"
+        "# winit without its private macOS window-blur API (Mac App Store)\n"
+        'winit = { path = "third_party/winit" }\n'
+    )
     # og-suite stays a known cfg so the gated code compiles out cleanly
     text += (
         "\n[lints.rust]\n"

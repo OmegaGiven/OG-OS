@@ -25,3 +25,6 @@ members = [
 [patch.crates-io]
 layershellev = { path = "vendor/layershellev-0.13.7" }
 iced_layershell = { path = "vendor/iced_layershell-0.13.7" }
+# winit without its private macOS window-blur API, which the Mac App Store
+# rejects (og-files' App Store build); see apps/og-files/third_party/README.md
+winit = { path = "apps/og-files/third_party/winit" }
