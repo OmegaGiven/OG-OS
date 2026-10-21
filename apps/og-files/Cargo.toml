@@ -3,8 +3,9 @@ name = "og-files"
 version = "0.1.0"
 edition = "2021"
 description = "OG Files — file manager with built-in viewers and editors"
-license = "GPL-3.0-or-later"
+license = "MPL-2.0"
 repository = "https://github.com/OmegaGiven/og-files"
+build = "build.rs"
 
 [[bin]]
 name = "og-files"
@@ -117,6 +118,22 @@ keyring = { version = "3", features = ["apple-native", "windows-native"] }
 # macOS app bundles (Info.plist, XML or binary) for "Open with"
 [target.'cfg(target_os = "macos")'.dependencies]
 plist = "1"
+# Cocoa without child processes (works in the App Store sandbox): opening
+# files (NSWorkspace), folder-access bookmarks (NSURL), the open panel (rfd)
+objc2 = "0.6"
+objc2-foundation = "0.3"
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "block2", "NSWorkspace", "NSRunningApplication"] }
+rfd = { version = "0.15", default-features = false }
+# video player of builds without FFmpeg (the App Store build): AVFoundation
+objc2-av-foundation = { version = "0.3", features = ["block2", "objc2-core-media", "objc2-core-video", "objc2-core-graphics", "objc2-core-foundation"] }
+objc2-core-media = "0.3"
+objc2-core-video = "0.3"
+objc2-core-graphics = "0.3"
+objc2-core-foundation = "0.3"
+block2 = "0.6"
+
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.60", features = ["Win32_Foundation", "Win32_System_Console", "Win32_Storage_FileSystem", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging", "Win32_System_Threading"] }
@@ -130,6 +147,10 @@ default = ["og-suite", "ffmpeg"]
 # thumbnails and lossless trim export. Without it video needs libmpv.
 ffmpeg = ["dep:ffmpeg-next"]
 og-suite = ["dep:og-config", "dep:og-theme", "dep:og-wayland"]
+# Mac App Store build: runs in the App Sandbox (see packaging/macos/appstore).
+# Hides network mounts, terminals and disk eject; build it with
+# --no-default-features (no FFmpeg; video plays through AVFoundation).
+appstore = []
 
 [dev-dependencies]
 # test-only: self-signed signing certificates generated in tests

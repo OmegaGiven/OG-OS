@@ -253,7 +253,7 @@ translated.
 | Vision | `ocrs` 0.13 on `rten` 0.26 (OCR), `rqrr` 0.11 (QR), `imageproc` 0.27 (photo segmentation); all pure Rust | Offline and in-process. The OCR detection and recognition models (CC BY-SA 4.0, 12.2 MB) are compiled in from `assets/ocr/`; source, sha256 and license are in its README. Pages are rendered with hayro. |
 | Convert from PDF | `tools/extract.rs` + `tools/convert/` (pure Rust, in-process) | hayro interprets each page into a recording device (glyphs with Unicode, font, size, colour; images; rules), then a layout pass builds lines, columns, paragraphs, headings, lists and tables that eleven writers turn into files. See *Convert from PDF* below. |
 | Signatures | RustCrypto: `rsa` 0.9, `p256`/`p384` 0.13, `sha1`/`sha2`, `der` + `x509-cert` 0.2, `pkcs8`, `p12-keystore` 0.2 (all pure Rust, MIT/Apache) | CMS built and parsed with a small DER reader/writer in `tools/sign.rs`. |
-| Typeset | `typst` 0.15 (in-process `World`, no packages), GNU FreeFont compiled in (GPL-3.0+ with font exception) | Anything → PDF (`tools/topdf/`): every input becomes Typst source with escaped text, compiled to PDF with title + outline. |
+| Typeset | `typst` 0.15 (in-process `World`, no packages), Liberation fonts compiled in (SIL OFL 1.1) | Anything → PDF (`tools/topdf/`): every input becomes Typst source with escaped text, compiled to PDF with title + outline. |
 | Optimize | `tools/compress.rs`, `repair.rs`, `pdfa.rs` (lopdf + hayro + image) | Image downsampling by placed resolution, object dedup, object/xref streams; byte-scan repair; PDF/A-2b with sRGB intent, XMP, embedded standard-14 fonts and a verifier. |
 
 **Model.** The same rules as every other viewer apply: view mode is
@@ -376,9 +376,9 @@ absolutely placed boxes for slides), which is emitted as Typst source and
 typeset **in-process by Typst 0.15** (`typst` + `typst-pdf` as libraries;
 `engine.rs` is an in-memory `World` — no files, no packages). All user text
 enters Typst as string literals, never markup. Headings become the PDF
-outline; the document title goes into the PDF metadata. Fonts: GNU
-FreeFont (Sans/Serif/Mono, GPL-3.0-or-later + font exception, 6.7 MiB) is
-compiled in so output is identical on every OS (`assets/fonts/README.md`);
+outline; the document title goes into the PDF metadata. Fonts:
+Liberation Sans/Serif/Mono (SIL OFL 1.1, metric-compatible with Arial/Times/
+Courier) are compiled in so output is identical on every OS (`assets/fonts/README.md`);
 system fonts are only a glyph fallback (CJK…; `OG_FILES_NO_SYSTEM_FONTS=1`
 turns that off). Images are validated (and BMP/TIFF re-encoded) before they
 reach Typst, so one broken picture never fails a document.

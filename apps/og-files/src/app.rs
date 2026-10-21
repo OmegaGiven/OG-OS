@@ -496,21 +496,29 @@ impl App {
             details::load().map(Message::Details),
             Task::perform(devices::list(), Message::Drives),
             crate::extdnd::connect().map(Message::DndReady),
-            Task::perform(
-                async {
-                    tokio::task::spawn_blocking(|| {
-                        (
-                            netb::load_saved(),
-                            netb::backend_available(),
-                            netb::ssh_config_hosts(),
-                        )
-                    })
-                    .await
-                    .unwrap_or_else(|_| (Vec::new(), Err("failed".into()), Vec::new()))
-                },
-                |(c, b, ssh)| Message::NetLoaded(c, b, ssh),
-            ),
-            Task::perform(netb::discover_tailnet(), Message::NetTailnet),
+            // network locations (rclone, ssh config, tailscale): not in the
+            // App Store build, which can't run those tools
+            if crate::platform::STORE {
+                Task::none()
+            } else {
+                Task::batch([
+                    Task::perform(
+                        async {
+                            tokio::task::spawn_blocking(|| {
+                                (
+                                    netb::load_saved(),
+                                    netb::backend_available(),
+                                    netb::ssh_config_hosts(),
+                                )
+                            })
+                            .await
+                            .unwrap_or_else(|_| (Vec::new(), Err("failed".into()), Vec::new()))
+                        },
+                        |(c, b, ssh)| Message::NetLoaded(c, b, ssh),
+                    ),
+                    Task::perform(netb::discover_tailnet(), Message::NetTailnet),
+                ])
+            },
             Self::load_apps(),
             Task::batch(tasks),
         ]);
@@ -548,6 +556,9 @@ impl App {
     }
 
     fn refresh_mounted() -> Task<Message> {
+        if crate::platform::STORE {
+            return Task::none(); // no network mounts in the App Store build
+        }
         Task::perform(
             async {
                 tokio::task::spawn_blocking(netb::mounted)
@@ -2246,7 +2257,11 @@ impl App {
             Subscription::run(theme_events),
             Subscription::run(lan_events),
             // tailnet peers come and go; mounts can drop (network loss)
-            iced::time::every(std::time::Duration::from_secs(60)).map(|_| Message::NetRefresh),
+            if crate::platform::STORE {
+                Subscription::none()
+            } else {
+                iced::time::every(std::time::Duration::from_secs(60)).map(|_| Message::NetRefresh)
+            },
         ])
     }
 
@@ -2438,11 +2453,13 @@ impl App {
             entries.push(("New Markdown file…", MenuAction::NewMarkdown, true));
             entries.push(("New empty file…", MenuAction::NewFile, true));
             entries.push(("Paste", MenuAction::Paste, has_clip));
-            entries.push((
-                "Open terminal here  Ctrl+Alt+T",
-                MenuAction::OpenTerminal,
-                true,
-            ));
+            if !crate::platform::STORE {
+                entries.push((
+                    "Open terminal here  Ctrl+Alt+T",
+                    MenuAction::OpenTerminal,
+                    true,
+                ));
+            }
             entries.push(("Analyze disk usage here", MenuAction::DiskUsage, true));
         } else {
             entries.push(("Open", MenuAction::Open, true));
@@ -2451,7 +2468,12 @@ impl App {
                 entries.push((self.menu_open_label.as_str(), MenuAction::OpenDefault, true));
                 entries.push(("Open with…", MenuAction::OpenWith, true));
             }
-            if n == 1 && t.items[0].1 == Kind::Folder && t.drive.is_none() && t.net.is_none() {
+            if n == 1
+                && t.items[0].1 == Kind::Folder
+                && t.drive.is_none()
+                && t.net.is_none()
+                && !crate::platform::STORE
+            {
                 entries.push(("Open terminal here", MenuAction::OpenTerminal, true));
             }
             if files_only && t.items.iter().all(|(p, _)| archive::supported(p)) {
@@ -2994,7 +3016,7 @@ fn shortcut(key: Key, mods: Modifiers) -> Option<Message> {
             Key::Character("v") => Some(Message::Shortcut(MenuAction::Paste)),
             Key::Character("z") => Some(Message::Undo),
             Key::Character("a") => Some(Message::Key(K::SelectAll)),
-            Key::Character("t") | Key::Character("T") if mods.alt() => {
+            Key::Character("t") | Key::Character("T") if mods.alt() && !crate::platform::STORE => {
                 Some(Message::Shortcut(MenuAction::OpenTerminal))
             }
             Key::Character("n") | Key::Character("N") if mods.shift() => {

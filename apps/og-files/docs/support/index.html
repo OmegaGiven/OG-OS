@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OG Files — Support</title>
+<meta name="description" content="Help with OG Files.">
+<link rel="icon" href="../icon.png">
+<style>
+  :root { --bg: #f5f4ef; --card: #fcfbf8; --ink: #16181d; --muted: #5d5f68; --edge: #dedcd3; --accent: #2f6fd6; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #16181d; --card: #1e2027; --ink: #eef0e8; --muted: #a3a5ad; --edge: #33353d; --accent: #7fb0ff; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 17px/1.65 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  main { max-width: 760px; margin: 0 auto; padding: 28px 20px 64px; }
+  nav { display: flex; align-items: center; gap: 10px; margin-bottom: 28px; }
+  nav a { display: flex; align-items: center; gap: 10px; text-decoration: none; color: inherit; font-weight: 650; }
+  nav img { width: 30px; height: 30px; border-radius: 8px; }
+  h1 { font-size: 2.1rem; line-height: 1.15; margin: 0 0 6px; }
+  h2 { font-size: 1.25rem; margin: 32px 0 6px; }
+  p.meta { color: var(--muted); margin: 0 0 24px; }
+  a { color: var(--accent); }
+  .card { background: var(--card); border: 1px solid var(--edge); border-radius: 14px; padding: 4px 22px 14px; margin-top: 18px; }
+  li { margin: 6px 0; }
+</style>
+</head>
+<body>
+<main>
+<nav><a href="../"><img src="../icon.png" alt="">OG Files</a></nav>
+<h1>Support</h1>
+<p class="meta">Help with OG Files on macOS, Windows and Linux</p>
+
+<div class="card">
+<h2>Get help or report a problem</h2>
+<p>Open an issue at <a href="https://github.com/OmegaGiven/og-files/issues">github.com/OmegaGiven/og-files/issues</a>. Include your operating system and version, the OG Files version you installed and, if a particular file misbehaves, its type.</p>
+</div>
+
+<h2>Common questions</h2>
+<ul>
+<li><b>Mac App Store version: a folder shows "needs your permission".</b> Click <b>Grant Access…</b> and choose that folder, or your home folder to allow everything in it. OG Files remembers the choice.</li>
+<li><b>Which videos play?</b> The Mac App Store version plays what macOS plays natively: mp4, m4v and mov (H.264, HEVC, ProRes). The direct downloads bundle libmpv and play nearly everything, including mkv and webm.</li>
+<li><b>Where are my settings?</b> macOS: ~/Library/Application Support/og-files (inside the app's container for the App Store version). Windows: %APPDATA%\og-files. Linux: ~/.config/og-files.</li>
+<li><b>Downloads for other systems:</b> see the <a href="https://github.com/OmegaGiven/og-files/releases">releases page</a>.</li>
+</ul>
+
+<h2>Privacy</h2>
+<p>OG Files collects no data. Read the <a href="../privacy/">privacy policy</a>.</p>
+</main>
+</body>
+</html>

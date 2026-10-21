@@ -683,6 +683,11 @@ impl Sidebar {
                     }
                     Some(browse::Event::EmptyTrash) => (t, Some(Event::EmptyTrash)),
                     Some(browse::Event::Status(s)) => (t, Some(Event::Status(s))),
+                    Some(browse::Event::AccessGranted) => {
+                        let dirs = self.watched_dirs();
+                        let t2 = self.tree.refresh(&dirs).map(Msg::Tree);
+                        (Task::batch([t, t2]), None)
+                    }
                     None => (t, None),
                 }
             }

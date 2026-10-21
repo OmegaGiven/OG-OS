@@ -18,7 +18,7 @@ pkgrel=1
 pkgdesc="OG Files: file manager with built-in viewers and editors"
 arch=('x86_64')
 url="https://github.com/OmegaGiven/OG-OS"
-license=('MIT')
+license=('MPL-2.0')
 # mpv provides libmpv (the video engine, loaded at runtime); libva + mesa
 # give hardware decoding on AMD (radeonsi) out of the box
 depends=('gcc-libs' 'wayland' 'libxkbcommon' 'vulkan-icd-loader' 'ffmpeg' 'alsa-lib' 'udisks2'
@@ -47,4 +47,10 @@ build() {
 
 package() {
   install -Dm755 "${CARGO_TARGET_DIR:-$_ogsrc/target}/release/og-files" "$pkgdir/usr/bin/og-files"
+  local p="$_ogsrc/apps/og-files/packaging"
+  install -Dm644 "$p/linux/og-files.desktop" "$pkgdir/usr/share/applications/og-files.desktop"
+  install -Dm644 "$p/linux/com.omegagiven.ogfiles.metainfo.xml" "$pkgdir/usr/share/metainfo/com.omegagiven.ogfiles.metainfo.xml"
+  install -Dm644 "$p/icons/og-files.png" "$pkgdir/usr/share/icons/hicolor/512x512/apps/og-files.png"
+  install -Dm644 "$p/icons/og-files.svg" "$pkgdir/usr/share/icons/hicolor/scalable/apps/og-files.svg"
+  install -Dm644 "$_ogsrc/apps/og-files/LICENSE" "$pkgdir/usr/share/licenses/og-files/LICENSE"
 }

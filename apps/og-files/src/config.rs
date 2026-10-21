@@ -18,7 +18,17 @@ pub fn home() -> PathBuf {
         .unwrap_or_else(|| "/".into())
 }
 
-#[cfg(any(target_os = "macos", windows))]
+/// macOS: the real home folder even inside the App Store sandbox, where
+/// `$HOME` is the app's container (the app's own config/cache folders below
+/// still go through `dirs`, i.e. into the container).
+#[cfg(target_os = "macos")]
+pub fn home() -> PathBuf {
+    crate::macos::real_home()
+        .or_else(dirs::home_dir)
+        .unwrap_or_else(std::env::temp_dir)
+}
+
+#[cfg(windows)]
 pub fn home() -> PathBuf {
     dirs::home_dir().unwrap_or_else(std::env::temp_dir)
 }

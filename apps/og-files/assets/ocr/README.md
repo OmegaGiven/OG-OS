@@ -24,9 +24,9 @@ the slot meant for "€" decodes as "E").
 
 **License:** the model weights are published under **CC BY-SA 4.0**
 (Hugging Face model card; trained on Google's HierText dataset, also
-CC BY-SA 4.0). Creative Commons lists GPLv3 as a compatible license for
-CC BY-SA 4.0 adaptations (https://creativecommons.org/share-your-work/licensing-considerations/compatible-licenses),
-so shipping them inside this GPL-3.0-or-later program is permitted with
+CC BY-SA 4.0). They are shipped unmodified as separate data files compiled
+into the program; ShareAlike covers adaptations of the models themselves,
+not the MPL-2.0 program that loads them, so shipping them is permitted with
 attribution. Attribution: "ocrs text detection / recognition models" by
 Robert Knight, https://github.com/robertknight/ocrs-models, CC BY-SA 4.0;
 unmodified. The `ocrs` and `rten` crates themselves are MIT OR Apache-2.0.

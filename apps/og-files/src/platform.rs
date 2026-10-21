@@ -6,6 +6,20 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+/// The Mac App Store build (`--features appstore`). Leaves out what the App
+/// Sandbox can't do: network mounts (rclone/FUSE, ssh config, tailnet),
+/// terminals and ejecting disks.
+pub const STORE: bool = cfg!(feature = "appstore");
+
+/// Running inside the Mac App Store sandbox, where folders must be granted
+/// through the open panel before they can be read.
+pub fn sandboxed() -> bool {
+    #[cfg(target_os = "macos")]
+    return crate::macos::sandboxed();
+    #[cfg(not(target_os = "macos"))]
+    false
+}
+
 /// Is `p` a file this OS would run? Unix: any execute bit. Windows: a file
 /// whose extension is in `%PATHEXT%` (.exe, .bat, …).
 pub fn is_executable(p: &Path) -> bool {

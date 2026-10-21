@@ -593,6 +593,9 @@ impl Tree {
         }
         let mut lines = Vec::new();
         for s in Section::ALL {
+            if s == Section::Network && crate::platform::STORE {
+                continue;
+            }
             lines.push(Line::Heading(s.title(), 0));
             for (gs, sub, nodes) in &self.groups {
                 if *gs != s {

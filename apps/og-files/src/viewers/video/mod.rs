@@ -9,7 +9,9 @@
 //! FFmpeg-library player in `ff.rs`, which also provides grid thumbnails and
 //! the stream-copy trim exporter for both. Builds without the `ffmpeg`
 //! feature use `ff_none.rs` instead: no thumbnails, no trim export, and an
-//! "Install mpv" placeholder when libmpv can't be loaded.
+//! "Install mpv" placeholder when libmpv can't be loaded — except on macOS,
+//! where `av.rs` plays through AVFoundation (the Mac App Store build, which
+//! ships neither libmpv nor FFmpeg).
 //!
 //! Like mpv's watch-later, the position of every file is remembered in
 //! `$XDG_STATE_HOME/og-files/video-positions.json` and resumed silently.
@@ -23,7 +25,11 @@
 mod common;
 #[cfg(feature = "ffmpeg")]
 mod ff;
-#[cfg(not(feature = "ffmpeg"))]
+// macOS without FFmpeg (the App Store build): AVFoundation fills the slot
+#[cfg(all(not(feature = "ffmpeg"), target_os = "macos"))]
+#[path = "av.rs"]
+mod ff;
+#[cfg(all(not(feature = "ffmpeg"), not(target_os = "macos")))]
 #[path = "ff_none.rs"]
 mod ff;
 mod mpv;

@@ -35,3 +35,13 @@ jobs:
         run: cargo build --locked --release
       - name: Test
         run: cargo test --locked --release
+
+  appstore:
+    name: macOS App Store variant
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # the sandboxed build (no libmpv/FFmpeg, AVFoundation video) must build
+      - run: cargo build --locked --release --no-default-features --features appstore

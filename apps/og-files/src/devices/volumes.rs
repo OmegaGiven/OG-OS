@@ -11,7 +11,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 /// Mounted volumes can be unmounted from the app (`diskutil` on macOS).
-pub const CAN_UNMOUNT: bool = cfg!(target_os = "macos");
+// the App Store build can't run diskutil
+pub const CAN_UNMOUNT: bool = cfg!(target_os = "macos") && !crate::platform::STORE;
 
 /// The "Root" entry of the tree: `/` on macOS, the Windows drive on Windows.
 pub fn root_path() -> PathBuf {

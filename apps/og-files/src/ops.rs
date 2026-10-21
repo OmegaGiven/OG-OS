@@ -1532,6 +1532,21 @@ mod xdg_trash {
 mod os_trash {
     use super::*;
 
+    /// macOS: through NSFileManager (the crate's default asks Finder over
+    /// Apple Events, which prompts for permission and is blocked in the App
+    /// Store sandbox).
+    fn delete(path: &Path) -> Result<(), ::trash::Error> {
+        #[cfg(target_os = "macos")]
+        {
+            use ::trash::macos::{DeleteMethod, TrashContextExtMacos};
+            let mut ctx = ::trash::TrashContext::default();
+            ctx.set_delete_method(DeleteMethod::NsFileManager);
+            ctx.delete(path)
+        }
+        #[cfg(not(target_os = "macos"))]
+        ::trash::delete(path)
+    }
+
     /// Trash one path right now (used by `start` for JobKind::Trash).
     pub fn trash(path: &Path) -> Result<TrashEntry, String> {
         let meta = fs::symlink_metadata(path).map_err(|e| io_msg(&e))?;
@@ -1544,7 +1559,7 @@ mod os_trash {
         if cfg!(test) {
             return Err("test build: the system trash is never touched".into());
         }
-        ::trash::delete(&abs).map_err(|e| format!("Can't move this item to the Trash: {e}"))?;
+        delete(&abs).map_err(|e| format!("Can't move this item to the Trash: {e}"))?;
         #[cfg(windows)]
         if let Ok(items) = ::trash::os_limited::list() {
             if let Some(it) = items

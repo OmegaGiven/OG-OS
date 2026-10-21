@@ -37,14 +37,23 @@ See [SPEC.md](SPEC.md) for the full design and the
 
 ## Download
 
-Release builds bundle libmpv, so video works out of the box:
+From the [Releases](https://github.com/OmegaGiven/og-files/releases) page:
 
 | OS | File |
 |---|---|
-| Linux (any distro) | `OG_Files-<ver>-<arch>.AppImage` |
-| Debian / Ubuntu | `og-files_<ver>_<amd64\|arm64>.deb` (uses the system `libmpv2`) |
+| Linux, any distro | `OG_Files-<ver>-<x86_64\|aarch64>.AppImage` — everything bundled: `chmod +x` and run |
+| Debian 13+ / Ubuntu 24.04+ | `og-files_<ver>_<amd64\|arm64>.deb` |
+| Fedora 40+ / openSUSE | `og-files-<ver>-1.<x86_64\|aarch64>.rpm` |
+| Arch | `og-files-bin-<ver>-1-x86_64.pkg.tar.zst` (`sudo pacman -U …`), or the `PKGBUILD` for the AUR |
+| Linux, portable | `og-files-<ver>-linux-<arch>.tar.gz` — unpack, run `./install.sh` (per user, no root) |
 | macOS (Apple silicon / Intel) | `og-files-<ver>-macos-<arm64\|x86_64>.dmg` |
-| Windows | `og-files-<ver>-windows-x86_64.zip` |
+| Windows (x64 / ARM64) | `og-files-<ver>-windows-<x64\|arm64>-setup.exe`, or the portable `.zip` |
+
+The AppImage, macOS and Windows downloads bundle libmpv, so video works out
+of the box; with the .deb, .rpm, Arch and tarball builds install `mpv`
+(libmpv) for video. A Mac App Store version is built separately: it is
+sandboxed and plays video through AVFoundation (mp4/mov/m4v) instead of
+libmpv, and has no network mounts or terminal.
 
 ## Building from source
 
@@ -62,6 +71,7 @@ Cargo features:
 |---|---|---|
 | `ffmpeg` | FFmpeg (ffmpeg-next): video player fallback when libmpv is missing, video thumbnails, lossless trim export. Needs the FFmpeg development libraries. | yes |
 | `og-suite` | OG-OS desktop integration (suite theme, Wayland drag-and-drop with other apps). Linux only; needs the OG-OS monorepo. | yes (monorepo) |
+| `appstore` | The Mac App Store variant: sandbox folder access, no network mounts, terminal or disk eject. Build with `--no-default-features --features appstore`; see `packaging/macos/appstore/README.md`. | no |
 
 Outside the OG-OS monorepo always pass `--no-default-features` (and add
 `--features ffmpeg` if you want it).
@@ -146,4 +156,9 @@ terminal here" (macOS: a command or an app name such as `"iTerm"`; Windows:
 
 ## License
 
-GPL-3.0-or-later. See [LICENSE](LICENSE).
+OG Files is licensed under the [Mozilla Public License 2.0](LICENSE).
+Bundled third-party assets keep their own licenses: Liberation fonts (SIL
+OFL 1.1, `assets/fonts/`), the OCR models (CC BY-SA 4.0, `assets/ocr/`) and
+the ICC profile (`assets/icc/`). The direct-download builds also bundle
+libmpv, which is GPL; the Mac App Store build does not (it plays video
+through AVFoundation).

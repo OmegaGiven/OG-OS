@@ -1,16 +1,22 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- The direct-download .app (release.yml). @VERSION@ and @BUILD@ are
+     filled in by the workflow. The App Store build uses
+     appstore/Info.plist.in instead. -->
 <plist version="1.0">
 <dict>
   <key>CFBundleName</key><string>OG Files</string>
   <key>CFBundleDisplayName</key><string>OG Files</string>
-  <key>CFBundleIdentifier</key><string>io.github.omegagiven.og-files</string>
+  <key>CFBundleIdentifier</key><string>com.omegagiven.ogfiles</string>
   <key>CFBundleExecutable</key><string>og-files</string>
+  <key>CFBundleIconFile</key><string>og-files</string>
   <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
   <key>CFBundleShortVersionString</key><string>@VERSION@</string>
-  <key>CFBundleVersion</key><string>@VERSION@</string>
+  <key>CFBundleVersion</key><string>@BUILD@</string>
   <key>LSMinimumSystemVersion</key><string>11.0</string>
   <key>NSHighResolutionCapable</key><true/>
   <key>LSApplicationCategoryType</key><string>public.app-category.utilities</string>
+  <key>NSHumanReadableCopyright</key><string>© 2026 OmegaGiven. MPL-2.0.</string>
 </dict>
 </plist>

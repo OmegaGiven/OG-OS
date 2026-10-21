@@ -49,12 +49,18 @@ pub enum Msg {
     PathEdit(String),
     PathSubmit,
     EmptyTrash,
+    /// App Store sandbox: ask for access to the folder that couldn't be read.
+    GrantAccess,
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    AccessGranted(Option<PathBuf>),
 }
 
 pub enum Event {
     Item(ItemAct),
     EmptyTrash,
     Status(String),
+    /// A folder was just granted: everything on screen may be readable now.
+    AccessGranted,
 }
 
 impl Browse {
@@ -218,6 +224,21 @@ impl Browse {
     pub fn update(&mut self, msg: Msg) -> (Task<Msg>, Option<Event>) {
         match msg {
             Msg::Navigate(p) => (self.navigate(p), None),
+            Msg::GrantAccess => {
+                #[cfg(target_os = "macos")]
+                {
+                    let start = crate::macos::suggested_grant(&self.location);
+                    (Task::perform(crate::macos::pick_folder(start), Msg::AccessGranted), None)
+                }
+                #[cfg(not(target_os = "macos"))]
+                (Task::none(), None)
+            }
+            Msg::AccessGranted(None) => (Task::none(), None),
+            Msg::AccessGranted(Some(_dir)) => {
+                #[cfg(target_os = "macos")]
+                crate::macos::remember(&_dir);
+                (self.navigate(self.location.clone()), Some(Event::AccessGranted))
+            }
             Msg::Up => match self.location.parent() {
                 Some(p) if !self.is_trash() => (self.navigate(p.to_path_buf()), None),
                 _ => (Task::none(), None),
@@ -334,6 +355,23 @@ impl Browse {
         if self.loading && self.entries.is_empty() && self.trash.is_empty() {
             Some(text("Loading…").color(theme::MUTED).into())
         } else if let Some(e) = &self.error {
+            if crate::platform::sandboxed() {
+                return Some(
+                    column![
+                        text("OG Files needs your permission to open this folder."),
+                        text(
+                            "Mac App Store apps can only open folders you choose. Pick this \
+                             folder, or your home folder to allow everything in it; OG Files \
+                             remembers your choice.",
+                        )
+                        .color(theme::MUTED),
+                        button(text("Grant Access…")).on_press(Msg::GrantAccess),
+                    ]
+                    .spacing(10)
+                    .max_width(420)
+                    .into(),
+                );
+            }
             Some(text(e.clone()).into())
         } else if self.visible.is_empty() {
             Some(

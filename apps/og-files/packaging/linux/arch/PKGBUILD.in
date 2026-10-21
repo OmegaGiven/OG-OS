@@ -1,0 +1,32 @@
+# Maintainer: OmegaGiven <https://github.com/OmegaGiven>
+# AUR package for the prebuilt release; @VERSION@ and @SHA256_*@ are filled
+# in by the release workflow, which also builds the .pkg.tar.zst from it.
+pkgname=og-files-bin
+pkgver=@VERSION@
+pkgrel=1
+pkgdesc="File manager with built-in viewers and editors"
+arch=('x86_64' 'aarch64')
+url="https://github.com/OmegaGiven/og-files"
+license=('MPL-2.0')
+depends=('alsa-lib' 'libxkbcommon' 'vulkan-icd-loader' 'gcc-libs' 'glibc')
+optdepends=('mpv: video playback'
+            'udisks2: mount and eject drives'
+            'rclone: cloud and network locations'
+            'fuse3: mount network locations')
+provides=('og-files')
+conflicts=('og-files')
+options=('!strip' '!debug')
+source_x86_64=("$url/releases/download/v$pkgver/og-files-$pkgver-linux-x86_64.tar.gz")
+source_aarch64=("$url/releases/download/v$pkgver/og-files-$pkgver-linux-aarch64.tar.gz")
+sha256sums_x86_64=('@SHA256_X86_64@')
+sha256sums_aarch64=('@SHA256_AARCH64@')
+
+package() {
+    cd "og-files-$pkgver-linux-$CARCH"
+    install -Dm755 og-files "$pkgdir/usr/bin/og-files"
+    install -Dm644 og-files.desktop "$pkgdir/usr/share/applications/og-files.desktop"
+    install -Dm644 og-files.png "$pkgdir/usr/share/icons/hicolor/512x512/apps/og-files.png"
+    install -Dm644 og-files.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/og-files.svg"
+    install -Dm644 com.omegagiven.ogfiles.metainfo.xml "$pkgdir/usr/share/metainfo/com.omegagiven.ogfiles.metainfo.xml"
+    install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

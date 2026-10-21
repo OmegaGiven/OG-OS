@@ -19,6 +19,8 @@ mod fsops;
 mod inspector;
 #[cfg(any(target_os = "macos", test))]
 mod macapps;
+#[cfg(target_os = "macos")]
+mod macos;
 mod net;
 mod netui;
 mod openwith;
@@ -51,9 +53,15 @@ fn main() -> iced::Result {
         }
     }
     config::migrate_old_dirs();
+    // App Store build: re-open the folders the user granted earlier
+    #[cfg(target_os = "macos")]
+    macos::restore_access();
     #[cfg_attr(not(target_os = "linux"), allow(unused_mut))]
     let mut window = iced::window::Settings {
         size: iced::Size::new(1400.0, 860.0),
+        // taskbar / alt-tab icon on Linux and Windows (macOS uses the
+        // bundle's icon)
+        icon: iced::window::icon::from_file_data(include_bytes!("../packaging/icons/og-files.png"), None).ok(),
         ..Default::default()
     };
     #[cfg(target_os = "linux")]

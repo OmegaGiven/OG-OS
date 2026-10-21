@@ -6,6 +6,6 @@ Comment=File manager with built-in viewers and editors
 Exec=og-files %U
 Icon=og-files
 Terminal=false
-Categories=System;FileTools;FileManager;Utility;
+Categories=System;FileTools;FileManager;
 MimeType=inode/directory;
 StartupWMClass=og-files

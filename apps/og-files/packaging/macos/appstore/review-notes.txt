@@ -1,0 +1,14 @@
+OG Files is a file manager with built-in viewers and editors (documents,
+PDFs, images, video, audio, spreadsheets, archives, 3D models).
+
+Because the app is sandboxed, on first launch it shows "OG Files needs your
+permission to open this folder" with a "Grant Access…" button. Clicking it
+opens the standard open panel at the home folder; choosing the home folder
+lets the app browse it. The choice is kept as a security-scoped bookmark.
+Downloads, Pictures, Music and Movies work without asking.
+
+To test: launch, click "Grant Access…", choose your home folder, then open
+any image, PDF, text file or .mp4/.mov video from the list on the left.
+No account or sign-in is needed. The app only uses the network when the
+user converts a web page (or an HTML/Markdown file with remote images) to
+PDF.

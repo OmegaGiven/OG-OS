@@ -1113,6 +1113,15 @@ pub fn spawn_detached(argv: &[String], cwd: Option<&Path>) -> Result<u32, String
 pub fn launch(app: &App, files: &[PathBuf]) -> Result<Vec<u32>, String> {
     let term = crate::terminal::resolve_env().map(|t| crate::terminal::exec_prefix(&t));
     let lines = command_lines(app, files, term.as_deref())?;
+    // macOS app bundles (`open -a <bundle> %F`, see macapps): hand the files
+    // to the app through NSWorkspace instead of running `open`.
+    #[cfg(target_os = "macos")]
+    if let Some([open, a, bundle, ..]) = lines.first().map(Vec::as_slice) {
+        if open.as_str() == "open" && a.as_str() == "-a" {
+            crate::macos::open(files, Some(Path::new(bundle)))?;
+            return Ok(Vec::new());
+        }
+    }
     let cwd: Option<PathBuf> = if !app.workdir.is_empty() {
         Some(PathBuf::from(&app.workdir))
     } else {
@@ -1136,12 +1145,11 @@ pub fn open_default(_reg: &Registry, files: &[PathBuf]) -> Result<Vec<String>, S
     Ok(vec![format!("Opened {}", describe(files))])
 }
 
-/// macOS: one `open f1 f2 …` (Launch Services picks each file's app).
+/// macOS: NSWorkspace (Launch Services picks each file's app); no child
+/// process, so it works inside the App Store sandbox too.
 #[cfg(target_os = "macos")]
 fn system_open(files: &[PathBuf]) -> Result<(), String> {
-    let mut argv = vec!["open".to_string()];
-    argv.extend(files.iter().map(|f| f.to_string_lossy().into_owned()));
-    spawn_detached(&argv, None).map(|_| ())
+    crate::macos::open(files, None)
 }
 
 /// Windows: ShellExecuteW "open" per file (no command line, no quoting).

@@ -2,10 +2,11 @@
 //! generated source file plus the images it references, compiled straight
 //! to PDF bytes. No files are read and no packages fetched.
 //!
-//! Fonts: GNU FreeFont (Sans/Serif/Mono, GPL-3.0-or-later with the font
-//! exception) is compiled into the binary so output looks the same on every
-//! OS; the system's fonts are added after them (scanned once, lazily) and
-//! only serve as fallback for scripts FreeFont lacks (CJK, …).
+//! Fonts: Liberation Sans/Serif/Mono (SIL OFL 1.1; metric-compatible with
+//! Arial, Times New Roman and Courier New) are compiled into the binary so
+//! output looks the same on every OS; the system's fonts are added after
+//! them (scanned once, lazily) and only serve as fallback for scripts
+//! Liberation lacks (CJK, …).
 
 use std::collections::HashMap;
 use std::sync::LazyLock;
@@ -18,23 +19,23 @@ use typst::{Library, LibraryExt, World};
 use typst_kit::fonts::FontStore;
 
 /// Family names of the bundled faces (what generated sources ask for).
-pub const SANS: &str = "FreeSans";
-pub const SERIF: &str = "FreeSerif";
-pub const MONO: &str = "FreeMono";
+pub const SANS: &str = "Liberation Sans";
+pub const SERIF: &str = "Liberation Serif";
+pub const MONO: &str = "Liberation Mono";
 
 static BUNDLED: [&[u8]; 12] = [
-    include_bytes!("../../../../../assets/fonts/FreeSans.otf"),
-    include_bytes!("../../../../../assets/fonts/FreeSansBold.otf"),
-    include_bytes!("../../../../../assets/fonts/FreeSansOblique.otf"),
-    include_bytes!("../../../../../assets/fonts/FreeSansBoldOblique.otf"),
-    include_bytes!("../../../../../assets/fonts/FreeSerif.otf"),
-    include_bytes!("../../../../../assets/fonts/FreeSerifBold.otf"),
-    include_bytes!("../../../../../assets/fonts/FreeSerifItalic.otf"),
-    include_bytes!("../../../../../assets/fonts/FreeSerifBoldItalic.otf"),
-    include_bytes!("../../../../../assets/fonts/FreeMono.otf"),
-    include_bytes!("../../../../../assets/fonts/FreeMonoBold.otf"),
-    include_bytes!("../../../../../assets/fonts/FreeMonoOblique.otf"),
-    include_bytes!("../../../../../assets/fonts/FreeMonoBoldOblique.otf"),
+    include_bytes!("../../../../../assets/fonts/LiberationSans-Regular.ttf"),
+    include_bytes!("../../../../../assets/fonts/LiberationSans-Bold.ttf"),
+    include_bytes!("../../../../../assets/fonts/LiberationSans-Italic.ttf"),
+    include_bytes!("../../../../../assets/fonts/LiberationSans-BoldItalic.ttf"),
+    include_bytes!("../../../../../assets/fonts/LiberationSerif-Regular.ttf"),
+    include_bytes!("../../../../../assets/fonts/LiberationSerif-Bold.ttf"),
+    include_bytes!("../../../../../assets/fonts/LiberationSerif-Italic.ttf"),
+    include_bytes!("../../../../../assets/fonts/LiberationSerif-BoldItalic.ttf"),
+    include_bytes!("../../../../../assets/fonts/LiberationMono-Regular.ttf"),
+    include_bytes!("../../../../../assets/fonts/LiberationMono-Bold.ttf"),
+    include_bytes!("../../../../../assets/fonts/LiberationMono-Italic.ttf"),
+    include_bytes!("../../../../../assets/fonts/LiberationMono-BoldItalic.ttf"),
 ];
 
 static FONTS: LazyLock<FontStore> = LazyLock::new(|| {

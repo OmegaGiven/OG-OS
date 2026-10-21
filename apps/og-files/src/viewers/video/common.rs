@@ -1,7 +1,7 @@
 //! Pieces shared by the libmpv player, the FFmpeg fallback player (`ff.rs`,
 //! feature `ffmpeg`) and the no-FFmpeg stand-in (`ff_none.rs`).
 
-#[cfg(feature = "ffmpeg")]
+#[cfg(any(feature = "ffmpeg", target_os = "macos"))]
 use std::path::Path;
 use std::path::PathBuf;
 
@@ -54,13 +54,13 @@ pub(super) fn fmt_mark(t: f64) -> String {
 
 #[derive(Debug, Clone)]
 pub enum ExportEv {
-    #[cfg_attr(not(feature = "ffmpeg"), allow(dead_code))]
+    #[cfg_attr(not(any(feature = "ffmpeg", target_os = "macos")), allow(dead_code))]
     Progress(f32),
     Done(Result<PathBuf, String>),
 }
 
 /// `<stem>-edit.<ext>` beside `src`, made unique.
-#[cfg(feature = "ffmpeg")]
+#[cfg(any(feature = "ffmpeg", target_os = "macos"))]
 pub(super) fn edit_name(src: &Path) -> PathBuf {
     let dir = src.parent().unwrap_or(Path::new("."));
     let stem = src.file_stem().unwrap_or_default().to_string_lossy();

@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- AppStream metadata: lets GNOME Software, KDE Discover and friends show
+     OG Files with a description and icon once it's installed. -->
+<component type="desktop-application">
+  <id>com.omegagiven.ogfiles</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MPL-2.0</project_license>
+  <name>OG Files</name>
+  <summary>File manager with built-in viewers and editors</summary>
+  <developer id="com.omegagiven">
+    <name>OmegaGiven</name>
+  </developer>
+  <description>
+    <p>
+      OG Files browses, previews and edits documents, PDFs, images, video,
+      audio, spreadsheets, archives and 3D models in one window: a folder
+      tree on the left, tabbed viewers on the right.
+    </p>
+  </description>
+  <launchable type="desktop-id">og-files.desktop</launchable>
+  <url type="homepage">https://github.com/OmegaGiven/og-files</url>
+  <url type="bugtracker">https://github.com/OmegaGiven/og-files/issues</url>
+  <categories>
+    <category>System</category>
+    <category>FileManager</category>
+  </categories>
+  <content_rating type="oars-1.1"/>
+</component>
