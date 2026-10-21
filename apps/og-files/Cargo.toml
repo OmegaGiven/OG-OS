@@ -1,6 +1,6 @@
 [package]
 name = "og-files"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "OG Files — file manager with built-in viewers and editors"
 license = "MPL-2.0"
