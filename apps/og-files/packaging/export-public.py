@@ -53,7 +53,9 @@ def scan(files):
         except IsADirectoryError:
             continue
         binary = "\0" in text[:8192]
-        for m in ([] if binary else EMAIL.finditer(text)):
+        # vendored upstream crates carry their authors' published addresses
+        vendored = f.startswith("third_party/")
+        for m in ([] if binary or vendored else EMAIL.finditer(text)):
             # user@host inside a URL (sftp://u@host) isn't an address
             if text[max(0, m.start() - 3) : m.start()].endswith("//"):
                 continue
