@@ -1,5 +1,5 @@
-//! Stand-in for viewer families not built yet. Each names its planned
-//! backend so the roadmap is visible in the app itself.
+//! Stand-in for files no viewer handles (yet): says so, and offers Convert
+//! to PDF where that works.
 
 use crate::filetype::Kind;
 use crate::theme;
@@ -22,18 +22,14 @@ impl State {
     }
 
     pub fn view<M: Clone + 'static>(&self, on_convert: M) -> Element<'_, M> {
-        let plan = match self.kind {
-            Kind::Video => "Phase 2: GStreamer playback into a wgpu texture (play, seek, trim).",
-            Kind::Audio => "Phase 2: symphonia decode + cpal output, waveform view, trim.",
-            Kind::Doc => "Phase 2: DOCX/ODT/EPUB text view. Convert to PDF works now.",
-            Kind::Model3d => "Phase 3: glTF/OBJ/STL into an iced shader widget (orbit camera).",
-            Kind::Table => "Phase 2: xlsx/ods via calamine.",
-            Kind::Archive => "Phase 2: browse archives as folders (zip / tar crates).",
-            _ => "Phase 2: hex view for binary files.",
+        let plan = if self.convert {
+            "OG Files can't show this file yet, but it can convert it to PDF."
+        } else {
+            "OG Files can't show this file yet. Open it in another app from the right-click menu."
         };
         let mut c = column![
             crate::widgets::kind_icon(self.kind).size(56),
-            text(format!("{} viewer not built yet", self.kind.label())).size(18),
+            text(format!("No viewer for this {} yet", self.kind.label().to_lowercase())).size(18),
             text(plan).color(theme::MUTED),
         ]
         .spacing(8)

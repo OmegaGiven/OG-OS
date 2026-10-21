@@ -1,0 +1,12 @@
+Name: OG Files
+Subtitle: Browse, preview & edit files
+Promotional text: Every file in one window: browse folders and open PDFs, Word documents, spreadsheets, photos, video, music, archives and 3D models in tabs. No account, no tracking.
+Keywords: file manager,finder,pdf,preview,viewer,docx,word,spreadsheet,xlsx,markdown,zip,archive,3d,photos
+Support URL: https://omegagiven.github.io/og-files/support/
+Marketing URL: https://omegagiven.github.io/og-files/
+Privacy Policy URL: https://omegagiven.github.io/og-files/privacy/
+Copyright: 2026 OmegaGiven
+Category: Utilities (secondary: Productivity)
+Price: Free
+App Privacy: Data Not Collected
+Age rating: 4+ (no objectionable content)

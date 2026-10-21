@@ -1,0 +1,35 @@
+OG Files is a file manager with the viewers and editors built in. Browse your folders on the left and open what's in them in tabs on the right: PDFs, Word documents, spreadsheets, photos, video, music, archives and 3D models, all in one window, without hopping between apps.
+
+SEE EVERYTHING
+• Tree, list and grid views with photo thumbnails, plus quick filters by kind
+• An inspector beside every file: type, size, dates, permissions and what you can do with it
+• A details strip that keeps a history of what you opened and changed
+
+DOCUMENTS AND PDFS
+• A fast PDF viewer with page thumbnails, zoom and a page editor: reorder, rotate, delete, split and merge
+• Built-in PDF tools: compress, repair, OCR text from scans, sign and verify signatures, PDF/A
+• Open and edit Word (.docx) documents, read ODT and EPUB
+• Convert almost anything to PDF: documents, spreadsheets, Markdown, web pages, e-mails, images
+
+SPREADSHEETS AND TEXT
+• View and edit xlsx, ods and csv: cells, rows, columns and sorting
+• Markdown with a live preview, and a text editor with syntax colours
+
+PHOTOS, VIDEO AND MUSIC
+• Pan and zoom photos, turn a batch of pictures into a PDF, split scanned photos
+• Play mp4, m4v and mov, step frame by frame, snapshot a frame, or trim a clip into a new file
+• Play music with a waveform you can seek in; edit tags
+
+ARCHIVES, 3D AND DISK SPACE
+• Browse zip, tar, 7z and rar archives like folders; extract all or just what you pick
+• Orbit around OBJ, STL and glTF models: shaded, wireframe, normals and dimensions
+• See what fills your disk with an interactive treemap
+
+SAFE BY DESIGN
+Edits never write over your originals unless you choose Save: trims, conversions and exports are new files. Deleting moves things to the Trash, and most actions can be undone.
+
+PRIVATE
+No account, no ads, no tracking. OG Files collects no data. Your files stay on your Mac, and the app only opens the folders you grant it.
+
+FREE AND OPEN SOURCE
+OG Files is free and open source (MPL-2.0) and also runs on Windows and Linux.
