@@ -151,6 +151,10 @@ impl Browse {
         if changed {
             self.vp.offset = 0.0;
         }
+        // `visible` indexes `entries` in a folder but `trash` in the Trash:
+        // rebuild it for the new location now, or the view (drawn before the
+        // new listing arrives) indexes the wrong list and goes out of bounds
+        self.refilter();
         let reset = if changed {
             scrollable::scroll_to(
                 scrollable::Id::new(SCROLL_ID),
@@ -331,7 +335,7 @@ impl Browse {
     }
 
     fn empty_or_error(&self) -> Option<Element<'_, Msg>> {
-        if self.loading && self.entries.is_empty() && self.trash.is_empty() {
+        if self.loading && self.visible.is_empty() {
             Some(text("Loading…").color(theme::MUTED).into())
         } else if let Some(e) = &self.error {
             Some(text(e.clone()).into())
@@ -447,5 +451,53 @@ impl Browse {
             self.scroller(grid)
         });
         column![self.header(), body].spacing(6).into()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression: double-clicking Trash panicked ("index out of bounds:
+    /// the len is 0 but the index is 11") because `visible` still held the
+    /// previous folder's row indices while the view already read `trash`.
+    #[tokio::test]
+    async fn switching_to_and_from_trash_never_indexes_the_wrong_list() {
+        let dir = std::env::temp_dir().join(format!("ogx-browse-trash-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for i in 0..15 {
+            std::fs::write(dir.join(format!("f{i:02}.txt")), "x").unwrap();
+        }
+        let mut b = Browse::new();
+        let _ = b.navigate(dir.clone());
+        let entries = fsops::list_dir(dir.clone()).await;
+        let _ = b.update(Msg::Loaded(dir.clone(), entries));
+        assert_eq!(b.visible.len(), 15);
+
+        let sel = Selection::default();
+        // into the Trash, before its listing arrives
+        let _ = b.navigate(PathBuf::from(TRASH));
+        assert!(b.visible.is_empty());
+        let _ = b.view_list(&sel);
+        let _ = b.view_grid(&sel);
+        let _ = b.visible_items();
+
+        // a Trash with more items than the folder we go back to
+        let _ = b.update(Msg::TrashLoaded(Ok((0..40)
+            .map(|i| ops::TrashEntry {
+                trashed: dir.join(format!("t{i}")),
+                info: dir.join(format!("t{i}.trashinfo")),
+                original: dir.join(format!("orig{i}")),
+                deleted_at: String::new(),
+                size: 1,
+            })
+            .collect())));
+        assert_eq!(b.visible.len(), 40);
+        let _ = b.navigate(dir.clone());
+        assert_eq!(b.visible.len(), 15);
+        let _ = b.view_list(&sel);
+        let _ = b.view_grid(&sel);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

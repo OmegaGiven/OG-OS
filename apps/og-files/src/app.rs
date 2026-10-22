@@ -1563,8 +1563,11 @@ impl App {
         match ev {
             sidebar::Event::Open(p, k, pin) => self.open(p, k, pin),
             sidebar::Event::Inspect(p, k) => {
-                self.details.focus = Some(p.clone());
-                self.inspector.focus(Some((p, k))).map(Message::Inspector)
+                // sidebar entries like Trash or network items are pseudo
+                // paths ("trash:", "net:…"), not files: nothing to inspect
+                let target = p.is_absolute().then_some((p, k));
+                self.details.focus = target.as_ref().map(|(p, _)| p.clone());
+                self.inspector.focus(target).map(Message::Inspector)
             }
             sidebar::Event::Menu(t) => {
                 self.show_menu(t);
